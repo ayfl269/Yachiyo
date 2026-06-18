@@ -1,0 +1,18 @@
+export enum EventType {
+  OnLoadedEvent,
+  OnPlatformLoadedEvent,
+  AdapterMessageEvent,
+  OnWaitingLLMRequestEvent,
+  OnLLMRequestEvent,
+  OnLLMResponseEvent,
+  OnAgentBeginEvent,
+  OnAgentDoneEvent,
+  OnDecoratingResultEvent,
+  OnCallingFuncToolEvent,
+  OnUsingLLMToolEvent,
+  OnLLMToolRespondEvent,
+  OnAfterMessageSentEvent,
+  OnPluginErrorEvent,
+  OnPluginLoadedEvent,
+  OnPluginUnloadedEvent,
+}

@@ -1,0 +1,65 @@
+{
+  "name": "yachiyo",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Agent system TypeScript implementation",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "tsx watch src/server.ts",
+    "lint": "eslint src/ tests/",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc && tsx tests/test.ts && tsx tests/message-processing-test.ts && tsx tests/platform-adapter-test.ts && tsx tests/context-system-test.ts && tsx tests/memory-system-test.ts",
+    "test:watch": "tsx watch tests/test.ts",
+    "frontend:install": "cd frontend && pnpm install",
+    "frontend:dev": "cd frontend && pnpm run dev",
+    "frontend:build": "cd frontend && pnpm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@yachiyo/agent": "workspace:*",
+    "@yachiyo/common": "workspace:*",
+    "@yachiyo/config": "workspace:*",
+    "@yachiyo/provider": "workspace:*",
+    "@yachiyo/skill": "workspace:*",
+    "adm-zip": "^0.5.17",
+    "better-sqlite3": "^12.10.0",
+    "eventemitter3": "^5.0.1",
+    "playwright": "^1.60.0",
+    "sharp": "^0.35.0",
+    "uuid": "^10.0.0",
+    "ws": "^8.21.0",
+    "zod": "^3.24.0",
+    "@yachiyo/message": "workspace:*",
+    "@yachiyo/platform": "workspace:*",
+    "@yachiyo/conversation": "workspace:*",
+    "@yachiyo/knowledge-base": "workspace:*",
+    "@yachiyo/persona": "workspace:*",
+    "@yachiyo/plugin": "workspace:*",
+    "@yachiyo/t2i": "workspace:*",
+    "@yachiyo/pipeline": "workspace:*",
+    "@yachiyo/dashboard": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "@types/uuid": "^10.0.0",
+    "@types/ws": "^8.18.1",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "eslint": "^9.0.0",
+    "https-proxy-agent": "^9.0.0",
+    "ts-node": "^10.9.0",
+    "tsx": "^4.22.3",
+    "typescript": "^5.7.0",
+    "undici": "^8.3.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "esbuild"
+    ]
+  }
+}

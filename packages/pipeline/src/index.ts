@@ -1,0 +1,11 @@
+export { PipelineStage, registerStage, getRegisteredStages, clearRegisteredStages } from "./stage.js";
+export type { PipelineContext } from "./context.js";
+export { PipelineScheduler, STAGES_ORDER } from "./scheduler.js";
+export { EventBus, type ConfigManagerLike, type PipelineConfigInfo } from "./event-bus.js";
+export { SessionLockManager } from "./session-lock.js";
+export { SessionServiceManager } from "./stages/session-status-check.js";
+export { ActiveEventRegistry, activeEventRegistry } from "./active-event-registry.js";
+export { registerActiveRunner, unregisterActiveRunner, tryCaptureFollowUp, prepareFollowUpCapture, finishFollowUpTurn, type FollowUpTicket, type FollowUpCapture } from "./follow-up.js";
+export { callHandler, callEventHook } from "./handler-utils.js";
+export { MainAgentHooks, MAIN_AGENT_HOOKS } from "./agent-hooks.js";
+export { ensureBuiltinStagesRegistered, isBuiltinStagesRegistered } from "./bootstrap.js";

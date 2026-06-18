@@ -1,0 +1,59 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src"
+  },
+  "include": [
+    "src/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "packages/**/*"
+  ],
+  "references": [
+    {
+      "path": "./packages/common"
+    },
+    {
+      "path": "./packages/provider"
+    },
+    {
+      "path": "./packages/agent"
+    },
+    {
+      "path": "./packages/config"
+    },
+    {
+      "path": "./packages/skill"
+    },
+    {
+      "path": "./packages/message"
+    },
+    {
+      "path": "./packages/platform"
+    },
+    {
+      "path": "./packages/conversation"
+    },
+    {
+      "path": "./packages/knowledge-base"
+    },
+    {
+      "path": "./packages/persona"
+    },
+    {
+      "path": "./packages/plugin"
+    },
+    {
+      "path": "./packages/t2i"
+    },
+    {
+      "path": "./packages/pipeline"
+    },
+    {
+      "path": "./packages/dashboard"
+    }
+  ]
+}

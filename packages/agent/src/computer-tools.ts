@@ -1,0 +1,752 @@
+/**
+ * Runtime computer tools for sandbox/local environment.
+ * Provides file operations, code execution, and shell tools that sub-agents can use.
+ * Ported from Python: core/tools/computer_tools/
+ */
+
+import { createFunctionTool, type FunctionTool } from "./tool.js";
+import type { ContextWrapper, CallToolResult } from "./types.js";
+import { readFile, writeFile, mkdir, readdir, stat, unlink, rename } from "fs/promises";
+import { existsSync } from "fs";
+import { join, resolve, normalize, dirname } from "path";
+import { execFile } from "child_process";
+import { tmpdir } from "os";
+
+// ── Permission helpers ──
+
+export interface ComputerToolContext {
+  event?: {
+    unifiedMsgOrigin?: string;
+  };
+  providerSettings?: {
+    computer_use_runtime?: "local" | "sandbox";
+  };
+}
+
+function isLocalRuntime(context: ComputerToolContext): boolean {
+  const runtime = context.providerSettings?.computer_use_runtime ?? "local";
+  return runtime === "local";
+}
+
+function getToolContext(_ctx: unknown): ComputerToolContext {
+  const wrapper = _ctx as ContextWrapper<ComputerToolContext> | undefined;
+  return wrapper?.context ?? ({} as ComputerToolContext);
+}
+
+/**
+ * Normalize a workspace path for local runtime.
+ */
+function normalizeRwPath(
+  rawPath: string,
+  options: { localEnv: boolean; workspaceRoot?: string }
+): string {
+  let p = normalize(rawPath);
+  const root = resolve(options.workspaceRoot ?? process.cwd());
+
+  if (!p.startsWith("/") && !/^[A-Za-z]:/.test(p)) {
+    p = resolve(root, p);
+  } else {
+    p = resolve(p);
+  }
+
+  return p;
+}
+
+// ── File Read Tool ──
+
+export function createFileReadTool(workspaceRoot?: string): FunctionTool<ComputerToolContext> {
+  return createFunctionTool<ComputerToolContext>({
+    name: "file_read_tool",
+    description: "Read file content. Supports text files. Use offset/limit for large files.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Path of the file to read. If relative, will be in workspace root." },
+        offset: { type: "integer", description: "Optional line offset to start reading from. 0-based index.", minimum: 0 },
+        limit: { type: "integer", description: "Optional maximum number of lines to read.", minimum: 1 },
+      },
+      required: ["path"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const path = String(args[0] ?? "");
+      const offset = args[1] != null ? Number(args[1]) : undefined;
+      const limit = args[2] != null ? Number(args[2]) : undefined;
+      const context = getToolContext(_ctx);
+      const localEnv = isLocalRuntime(context);
+      const normalizedPath = normalizeRwPath(path, { localEnv, workspaceRoot });
+
+      try {
+        if (!existsSync(normalizedPath)) {
+          return { content: [{ type: "text", text: `error: File not found: ${normalizedPath}` }] };
+        }
+
+        const content = await readFile(normalizedPath, "utf-8");
+        const lines = content.split("\n");
+
+        const startLine = offset ?? 0;
+        const endLine = limit != null ? startLine + limit : lines.length;
+        const selectedLines = lines.slice(startLine, endLine);
+
+        // Add line numbers
+        const numbered = selectedLines.map((line, i) => `${startLine + i + 1}→${line}`).join("\n");
+
+        return { content: [{ type: "text", text: numbered || "(empty file)" }] };
+      } catch (e) {
+        return { content: [{ type: "text", text: `error: Failed to read file: ${e}` }] };
+      }
+    },
+  });
+}
+
+// ── File Write Tool ──
+
+export function createFileWriteTool(workspaceRoot?: string): FunctionTool<ComputerToolContext> {
+  return createFunctionTool<ComputerToolContext>({
+    name: "file_write_tool",
+    description: "Write UTF-8 text content to a file. Creates parent directories if needed.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Path of the file to write. If relative, will be in workspace root." },
+        content: { type: "string", description: "The text content to write to the file." },
+      },
+      required: ["path", "content"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const path = String(args[0] ?? "");
+      const content = String(args[1] ?? "");
+      const context = getToolContext(_ctx);
+
+      const localEnv = isLocalRuntime(context);
+      const normalizedPath = normalizeRwPath(path, { localEnv, workspaceRoot });
+
+      try {
+        await mkdir(join(normalizedPath, ".."), { recursive: true });
+        await writeFile(normalizedPath, content, "utf-8");
+        return { content: [{ type: "text", text: `Successfully wrote to ${normalizedPath}` }] };
+      } catch (e) {
+        return { content: [{ type: "text", text: `error: Failed to write file: ${e}` }], isError: true };
+      }
+    },
+  });
+}
+
+// ── File Edit Tool ──
+
+export function createFileEditTool(workspaceRoot?: string): FunctionTool<ComputerToolContext> {
+  return createFunctionTool<ComputerToolContext>({
+    name: "file_edit_tool",
+    description: "Edit a file by replacing old_string with new_string. Use replace_all to replace all occurrences.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Path of the file to edit." },
+        old_string: { type: "string", description: "The text to replace." },
+        new_string: { type: "string", description: "The text to replace it with." },
+        replace_all: { type: "boolean", description: "Replace all occurrences. Default: false.", default: false },
+      },
+      required: ["path", "old_string", "new_string"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const path = String(args[0] ?? "");
+      const oldString = String(args[1] ?? "");
+      const newString = String(args[2] ?? "");
+      const replaceAll = args[3] === true;
+      const context = getToolContext(_ctx);
+
+      const localEnv = isLocalRuntime(context);
+      const normalizedPath = normalizeRwPath(path, { localEnv, workspaceRoot });
+
+      try {
+        if (!existsSync(normalizedPath)) {
+          return { content: [{ type: "text", text: `error: File not found: ${normalizedPath}` }], isError: true };
+        }
+
+        const content = await readFile(normalizedPath, "utf-8");
+
+        if (!content.includes(oldString)) {
+          return { content: [{ type: "text", text: `error: old_string not found in file. Make sure the string matches exactly.` }], isError: true };
+        }
+
+        let newContent: string;
+        if (replaceAll) {
+          newContent = content.split(oldString).join(newString);
+        } else {
+          const idx = content.indexOf(oldString);
+          if (content.indexOf(oldString, idx + 1) !== -1) {
+            return {
+              content: [{ type: "text", text: `error: old_string appears multiple times in the file. Use replace_all=true to replace all occurrences, or provide more context to make the match unique.` }],
+              isError: true,
+            };
+          }
+          newContent = content.replace(oldString, newString);
+        }
+
+        await writeFile(normalizedPath, newContent, "utf-8");
+        return { content: [{ type: "text", text: `Successfully edited ${normalizedPath}` }] };
+      } catch (e) {
+        return { content: [{ type: "text", text: `error: Failed to edit file: ${e}` }], isError: true };
+      }
+    },
+  });
+}
+
+// ── Grep Tool ──
+
+export function createGrepTool(workspaceRoot?: string): FunctionTool<ComputerToolContext> {
+  return createFunctionTool<ComputerToolContext>({
+    name: "grep_tool",
+    description: "Search file contents using a regex pattern. Returns matching lines with file paths.",
+    parameters: {
+      type: "object",
+      properties: {
+        pattern: { type: "string", description: "The regex pattern to search for." },
+        path: { type: "string", description: "Directory or file to search in. Defaults to workspace root." },
+        glob: { type: "string", description: "Optional glob pattern to filter files (e.g. '*.ts')." },
+        context_lines: { type: "integer", description: "Number of context lines before and after match. Default: 2.", minimum: 0 },
+        result_limit: { type: "integer", description: "Maximum number of results. Default: 50.", minimum: 1 },
+      },
+      required: ["pattern"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const pattern = String(args[0] ?? "");
+      const searchPath = args[1] != null ? String(args[1]) : undefined;
+      const glob = args[2] != null ? String(args[2]) : undefined;
+      const contextLines = args[3] != null ? Number(args[3]) : undefined;
+      const resultLimit = args[4] != null ? Number(args[4]) : undefined;
+      const context = getToolContext(_ctx);
+      const localEnv = isLocalRuntime(context);
+      const root = workspaceRoot ?? process.cwd();
+      const normalizedPath = searchPath ? normalizeRwPath(searchPath, { localEnv, workspaceRoot: root }) : root;
+
+      try {
+        const results = await grepSearch(pattern, normalizedPath, {
+          glob,
+          contextLines: contextLines ?? 2,
+          resultLimit: resultLimit ?? 50,
+        });
+
+        if (results.length === 0) {
+          return { content: [{ type: "text", text: "No matches found." }] };
+        }
+
+        return { content: [{ type: "text", text: results.join("\n") }] };
+      } catch (e) {
+        return { content: [{ type: "text", text: `error: Search failed: ${e}` }], isError: true };
+      }
+    },
+  });
+}
+
+// ── Shell Execute Tool ──
+
+export function createShellTool(workspaceRoot?: string): FunctionTool<ComputerToolContext> {
+  return createFunctionTool<ComputerToolContext>({
+    name: "execute_shell",
+    description: "Execute a shell command. Use background=true for long-running commands.",
+    parameters: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "The shell command to execute." },
+        background: { type: "boolean", description: "Run the command in the background. Default: false.", default: false },
+        timeout: { type: "integer", description: "Optional timeout in seconds. Default: 300.", default: 300 },
+        env: { type: "object", description: "Optional environment variables.", additionalProperties: { type: "string" }, default: {} },
+      },
+      required: ["command"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const command = String(args[0] ?? "");
+      const background = args[1] === true;
+      const timeout = args[2] != null ? Number(args[2]) : undefined;
+      const env = (args[3] as Record<string, string>) ?? undefined;
+      const context = getToolContext(_ctx);
+
+      // Safety check: block dangerous commands
+      const dangerousPatterns = [
+        /rm\s+-rf\s+\//, /mkfs/, /dd\s+if=/, /sudo\s+rm/,
+        /:\(\)\{.*;\}\s*;/, // fork bomb
+      ];
+      for (const pat of dangerousPatterns) {
+        if (pat.test(command)) {
+          return { content: [{ type: "text", text: `error: Command blocked for safety: contains potentially destructive pattern.` }], isError: true };
+        }
+      }
+
+      const cwd = workspaceRoot ?? process.cwd();
+      const timeoutMs = (timeout ?? 300) * 1000;
+
+      try {
+        if (background) {
+          const logPath = join(tmpdir(), `shell_bg_${crypto.randomUUID().slice(0, 8)}.log`);
+          execFile(
+            process.platform === "win32" ? "cmd" : "/bin/sh",
+            process.platform === "win32" ? ["/c", command] : ["-c", command],
+            { cwd, env: { ...process.env, ...env }, timeout: timeoutMs }
+          );
+          return { content: [{ type: "text", text: `Background command started. Output will be written to ${logPath}.` }] };
+        }
+
+        const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolvePromise) => {
+          const child = execFile(
+            process.platform === "win32" ? "cmd" : "/bin/sh",
+            process.platform === "win32" ? ["/c", command] : ["-c", command],
+            { cwd, env: { ...process.env, ...env }, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }
+          );
+
+          let stdout = "";
+          let stderr = "";
+          child.stdout?.on("data", (data: Buffer) => { stdout += data.toString(); });
+          child.stderr?.on("data", (data: Buffer) => { stderr += data.toString(); });
+          child.on("close", (code) => { resolvePromise({ stdout, stderr, code: code ?? 0 }); });
+          child.on("error", (err) => { resolvePromise({ stdout, stderr, code: -1 }); });
+        });
+
+        let output = "";
+        if (result.stdout) output += result.stdout;
+        if (result.stderr) output += (output ? "\n" : "") + `[stderr]\n${result.stderr}`;
+        if (result.code !== 0) output += `\n[exit code: ${result.code}]`;
+
+        return { content: [{ type: "text", text: output || "(no output)" }] };
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.includes("timed out")) {
+          return { content: [{ type: "text", text: `error: Command timed out after ${timeout ?? 300} seconds.` }], isError: true };
+        }
+        return { content: [{ type: "text", text: `error: Shell execution failed: ${msg}` }], isError: true };
+      }
+    },
+  });
+}
+
+// ── Python Execute Tool (local) ──
+
+export function createLocalPythonTool(workspaceRoot?: string): FunctionTool<ComputerToolContext> {
+  return createFunctionTool<ComputerToolContext>({
+    name: "execute_python",
+    description: "Execute Python code in a local subprocess.",
+    parameters: {
+      type: "object",
+      properties: {
+        code: { type: "string", description: "The Python code to execute." },
+        silent: { type: "boolean", description: "Whether to suppress the output. Default: false.", default: false },
+        timeout: { type: "integer", description: "Optional timeout in seconds. Default: 30.", default: 30 },
+      },
+      required: ["code"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const code = String(args[0] ?? "");
+      const silent = args[1] === true;
+      const timeout = args[2] != null ? Number(args[2]) : undefined;
+      const context = getToolContext(_ctx);
+
+      const timeoutMs = (timeout ?? 30) * 1000;
+      const cwd = workspaceRoot ?? process.cwd();
+
+      try {
+        const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolvePromise) => {
+          const child = execFile(
+            "python3",
+            ["-c", code],
+            { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }
+          );
+
+          let stdout = "";
+          let stderr = "";
+          child.stdout?.on("data", (data: Buffer) => { stdout += data.toString(); });
+          child.stderr?.on("data", (data: Buffer) => { stderr += data.toString(); });
+          child.on("close", (code) => { resolvePromise({ stdout, stderr, code: code ?? 0 }); });
+          child.on("error", (err) => {
+            // python3 might not exist on Windows, try python
+            if (process.platform === "win32" && err.message.includes("python3")) {
+              const child2 = execFile("python", ["-c", code], { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 });
+              let stdout2 = "";
+              let stderr2 = "";
+              child2.stdout?.on("data", (data: Buffer) => { stdout2 += data.toString(); });
+              child2.stderr?.on("data", (data: Buffer) => { stderr2 += data.toString(); });
+              child2.on("close", (code2) => { resolvePromise({ stdout: stdout2, stderr: stderr2, code: code2 ?? 0 }); });
+              child2.on("error", () => { resolvePromise({ stdout: "", stderr: "Python not found", code: -1 }); });
+            } else {
+              resolvePromise({ stdout: "", stderr: err.message, code: -1 });
+            }
+          });
+        });
+
+        if (silent) {
+          return { content: [{ type: "text", text: "Code executed successfully (silent mode)." }] };
+        }
+
+        let output = "";
+        if (result.stdout) output += result.stdout;
+        if (result.stderr) output += (output ? "\n" : "") + `[stderr]\n${result.stderr}`;
+        if (result.code !== 0) output += `\n[exit code: ${result.code}]`;
+
+        return { content: [{ type: "text", text: output || "(no output)" }] };
+      } catch (e) {
+        return { content: [{ type: "text", text: `error: Python execution failed: ${e}` }], isError: true };
+      }
+    },
+  });
+}
+
+// ── List Directory Tool ──
+
+export function createListDirTool(workspaceRoot?: string): FunctionTool<ComputerToolContext> {
+  return createFunctionTool<ComputerToolContext>({
+    name: "list_dir_tool",
+    description: "List files and directories in a given path. Returns names, types (file/dir), and sizes.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Directory path to list. Defaults to workspace root." },
+        recursive: { type: "boolean", description: "List recursively. Default: false.", default: false },
+        max_depth: { type: "integer", description: "Maximum recursion depth when recursive=true. Default: 3.", minimum: 1, default: 3 },
+      },
+      required: [],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const dirPath = args[0] != null ? String(args[0]) : undefined;
+      const recursive = args[1] === true;
+      const maxDepth = args[2] != null ? Number(args[2]) : undefined;
+      const context = getToolContext(_ctx);
+      const localEnv = isLocalRuntime(context);
+      const root = workspaceRoot ?? process.cwd();
+      const normalizedPath = dirPath ? normalizeRwPath(dirPath, { localEnv, workspaceRoot: root }) : root;
+
+      try {
+        if (!existsSync(normalizedPath)) {
+          return { content: [{ type: "text", text: `error: Directory not found: ${normalizedPath}` }] };
+        }
+
+        const s = await stat(normalizedPath);
+        if (!s.isDirectory()) {
+          return { content: [{ type: "text", text: `error: Path is not a directory: ${normalizedPath}` }] };
+        }
+
+        const lines: string[] = [];
+
+        async function walkDir(dir: string, depth: number, prefix: string): Promise<void> {
+          if (recursive && depth > (maxDepth ?? 3)) return;
+
+          let entries;
+          try {
+            entries = await readdir(dir, { withFileTypes: true });
+          } catch {
+            lines.push(`${prefix}(unreadable)`);
+            return;
+          }
+
+          // Sort: directories first, then files, alphabetically
+          const sorted = entries.sort((a, b) => {
+            if (a.isDirectory() && !b.isDirectory()) return -1;
+            if (!a.isDirectory() && b.isDirectory()) return 1;
+            return a.name.localeCompare(b.name);
+          });
+
+          for (const entry of sorted) {
+            // Skip common non-interesting directories
+            if (entry.isDirectory() && ["node_modules", ".git", "__pycache__", ".svn", ".hg"].includes(entry.name)) {
+              lines.push(`${prefix}${entry.name}/ (skipped)`);
+              continue;
+            }
+
+            const fullPath = join(dir, entry.name);
+            if (entry.isDirectory()) {
+              lines.push(`${prefix}${entry.name}/`);
+              if (recursive) {
+                await walkDir(fullPath, depth + 1, prefix + "  ");
+              }
+            } else if (entry.isFile()) {
+              try {
+                const fileStat = await stat(fullPath);
+                const sizeStr = fileStat.size < 1024 ? `${fileStat.size}B`
+                  : fileStat.size < 1024 * 1024 ? `${(fileStat.size / 1024).toFixed(1)}KB`
+                  : `${(fileStat.size / (1024 * 1024)).toFixed(1)}MB`;
+                lines.push(`${prefix}${entry.name} (${sizeStr})`);
+              } catch {
+                lines.push(`${prefix}${entry.name}`);
+              }
+            }
+          }
+        }
+
+        await walkDir(normalizedPath, 0, "");
+
+        return { content: [{ type: "text", text: lines.join("\n") || "(empty directory)" }] };
+      } catch (e) {
+        return { content: [{ type: "text", text: `error: Failed to list directory: ${e}` }], isError: true };
+      }
+    },
+  });
+}
+
+// ── File Delete Tool ──
+
+export function createFileDeleteTool(workspaceRoot?: string): FunctionTool<ComputerToolContext> {
+  return createFunctionTool<ComputerToolContext>({
+    name: "file_delete_tool",
+    description: "Delete a file. Cannot delete directories. Use with caution as deletion is permanent.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Path of the file to delete. If relative, will be in workspace root." },
+      },
+      required: ["path"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const path = String(args[0] ?? "");
+      const context = getToolContext(_ctx);
+
+      const localEnv = isLocalRuntime(context);
+      const normalizedPath = normalizeRwPath(path, { localEnv, workspaceRoot });
+
+      try {
+        if (!existsSync(normalizedPath)) {
+          return { content: [{ type: "text", text: `error: File not found: ${normalizedPath}` }], isError: true };
+        }
+
+        const s = await stat(normalizedPath);
+        if (s.isDirectory()) {
+          return { content: [{ type: "text", text: `error: Path is a directory, not a file. Use shell commands for directory removal.` }], isError: true };
+        }
+
+        await unlink(normalizedPath);
+        return { content: [{ type: "text", text: `Successfully deleted ${normalizedPath}` }] };
+      } catch (e) {
+        return { content: [{ type: "text", text: `error: Failed to delete file: ${e}` }], isError: true };
+      }
+    },
+  });
+}
+
+// ── File Move Tool ──
+
+export function createFileMoveTool(workspaceRoot?: string): FunctionTool<ComputerToolContext> {
+  return createFunctionTool<ComputerToolContext>({
+    name: "file_move_tool",
+    description: "Move or rename a file or directory. Creates the destination parent directory if needed.",
+    parameters: {
+      type: "object",
+      properties: {
+        source: { type: "string", description: "Source path of the file or directory to move." },
+        destination: { type: "string", description: "Destination path. If relative, will be in workspace root." },
+      },
+      required: ["source", "destination"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const source = String(args[0] ?? "");
+      const destination = String(args[1] ?? "");
+      const context = getToolContext(_ctx);
+
+      const localEnv = isLocalRuntime(context);
+      const normalizedSource = normalizeRwPath(source, { localEnv, workspaceRoot });
+      const normalizedDest = normalizeRwPath(destination, { localEnv, workspaceRoot });
+
+      try {
+        if (!existsSync(normalizedSource)) {
+          return { content: [{ type: "text", text: `error: Source not found: ${normalizedSource}` }], isError: true };
+        }
+
+        if (existsSync(normalizedDest)) {
+          return { content: [{ type: "text", text: `error: Destination already exists: ${normalizedDest}` }], isError: true };
+        }
+
+        // Ensure destination parent directory exists
+        await mkdir(dirname(normalizedDest), { recursive: true });
+        await rename(normalizedSource, normalizedDest);
+
+        return { content: [{ type: "text", text: `Successfully moved ${normalizedSource} → ${normalizedDest}` }] };
+      } catch (e) {
+        return { content: [{ type: "text", text: `error: Failed to move: ${e}` }], isError: true };
+      }
+    },
+  });
+}
+
+// ── Node.js Execute Tool (local) ──
+
+export function createLocalNodeTool(workspaceRoot?: string): FunctionTool<ComputerToolContext> {
+  return createFunctionTool<ComputerToolContext>({
+    name: "execute_node",
+    description: "Execute JavaScript/TypeScript code in a Node.js subprocess.",
+    parameters: {
+      type: "object",
+      properties: {
+        code: { type: "string", description: "The JavaScript code to execute." },
+        silent: { type: "boolean", description: "Whether to suppress the output. Default: false.", default: false },
+        timeout: { type: "integer", description: "Optional timeout in seconds. Default: 30.", default: 30 },
+      },
+      required: ["code"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const code = String(args[0] ?? "");
+      const silent = args[1] === true;
+      const timeout = args[2] != null ? Number(args[2]) : undefined;
+      const context = getToolContext(_ctx);
+
+      const timeoutMs = (timeout ?? 30) * 1000;
+      const cwd = workspaceRoot ?? process.cwd();
+
+      try {
+        const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolvePromise) => {
+          const child = execFile(
+            "node",
+            ["-e", code],
+            { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }
+          );
+
+          let stdout = "";
+          let stderr = "";
+          child.stdout?.on("data", (data: Buffer) => { stdout += data.toString(); });
+          child.stderr?.on("data", (data: Buffer) => { stderr += data.toString(); });
+          child.on("close", (code) => { resolvePromise({ stdout, stderr, code: code ?? 0 }); });
+          child.on("error", (err) => { resolvePromise({ stdout: "", stderr: err.message, code: -1 }); });
+        });
+
+        if (silent) {
+          return { content: [{ type: "text", text: "Code executed successfully (silent mode)." }] };
+        }
+
+        let output = "";
+        if (result.stdout) output += result.stdout;
+        if (result.stderr) output += (output ? "\n" : "") + `[stderr]\n${result.stderr}`;
+        if (result.code !== 0) output += `\n[exit code: ${result.code}]`;
+
+        return { content: [{ type: "text", text: output || "(no output)" }] };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.includes("timed out")) {
+          return { content: [{ type: "text", text: `error: Node.js execution timed out after ${timeout ?? 30} seconds.` }], isError: true };
+        }
+        return { content: [{ type: "text", text: `error: Node.js execution failed: ${msg}` }], isError: true };
+      }
+    },
+  });
+}
+
+// ── Tool assembly helpers ──
+
+export type ComputerRuntime = "local" | "sandbox";
+
+/**
+ * Get the set of computer tools for the given runtime.
+ * This mirrors Python's `_get_runtime_computer_tools()`.
+ */
+export function getRuntimeComputerTools(
+  runtime: ComputerRuntime,
+  workspaceRoot?: string,
+): FunctionTool<ComputerToolContext>[] {
+  const tools: FunctionTool<ComputerToolContext>[] = [
+    createFileReadTool(workspaceRoot),
+    createFileWriteTool(workspaceRoot),
+    createFileEditTool(workspaceRoot),
+    createListDirTool(workspaceRoot),
+    createFileDeleteTool(workspaceRoot),
+    createFileMoveTool(workspaceRoot),
+    createGrepTool(workspaceRoot),
+    createShellTool(workspaceRoot),
+  ];
+
+  if (runtime === "local") {
+    tools.push(createLocalPythonTool(workspaceRoot));
+    tools.push(createLocalNodeTool(workspaceRoot));
+  }
+  // sandbox-only tools (upload/download, ipython) would be added here
+  // when sandbox booter is implemented
+
+  return tools;
+}
+
+// ── Simple grep implementation (fallback when ripgrep is not available) ──
+
+async function grepSearch(
+  pattern: string,
+  searchPath: string,
+  options: { glob?: string; contextLines: number; resultLimit: number },
+): Promise<string[]> {
+  const regex = new RegExp(pattern, "i");
+  const results: string[] = [];
+  const globRegex = options.glob ? globToRegex(options.glob) : null;
+
+  async function walkDir(dir: string): Promise<void> {
+    if (results.length >= options.resultLimit) return;
+
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch { return; }
+
+    for (const entry of entries) {
+      if (results.length >= options.resultLimit) return;
+      const fullPath = join(dir, entry.name);
+
+      if (entry.isDirectory()) {
+        // Skip common non-interesting directories
+        if (["node_modules", ".git", "__pycache__", ".svn", ".hg"].includes(entry.name)) continue;
+        await walkDir(fullPath);
+      } else if (entry.isFile()) {
+        if (globRegex && !globRegex.test(entry.name)) continue;
+
+        try {
+          const content = await readFile(fullPath, "utf-8");
+          const lines = content.split("\n");
+
+          for (let i = 0; i < lines.length; i++) {
+            if (results.length >= options.resultLimit) return;
+            if (!regex.test(lines[i])) continue;
+
+            const start = Math.max(0, i - options.contextLines);
+            const end = Math.min(lines.length, i + options.contextLines + 1);
+            const ctx = lines.slice(start, end)
+              .map((line, idx) => `${start + idx + 1}→${line}`)
+              .join("\n");
+
+            results.push(`${fullPath}:\n${ctx}`);
+          }
+        } catch { /* skip unreadable files */ }
+      }
+    }
+  }
+
+  if (existsSync(searchPath)) {
+    const s = await stat(searchPath);
+    if (s.isDirectory()) {
+      await walkDir(searchPath);
+    } else {
+      // Single file search
+      try {
+        const content = await readFile(searchPath, "utf-8");
+        const lines = content.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          if (results.length >= options.resultLimit) return results;
+          if (!regex.test(lines[i])) continue;
+          const start = Math.max(0, i - options.contextLines);
+          const end = Math.min(lines.length, i + options.contextLines + 1);
+          const ctx = lines.slice(start, end)
+            .map((line, idx) => `${start + idx + 1}→${line}`)
+            .join("\n");
+          results.push(`${searchPath}:\n${ctx}`);
+        }
+      } catch { /* skip */ }
+    }
+  }
+
+  return results;
+}
+
+function globToRegex(glob: string): RegExp {
+  const escaped = glob
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*")
+    .replace(/\?/g, ".");
+  return new RegExp(`^${escaped}$`, "i");
+}

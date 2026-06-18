@@ -1,0 +1,38 @@
+{
+  "name": "@yachiyo/pipeline",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./*.js": {
+      "types": "./dist/*.d.ts",
+      "import": "./dist/*.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "eventemitter3": "^5.0.1",
+    "uuid": "^10.0.0",
+    "@yachiyo/common": "workspace:*",
+    "@yachiyo/agent": "workspace:*",
+    "@yachiyo/config": "workspace:*",
+    "@yachiyo/conversation": "workspace:*",
+    "@yachiyo/knowledge-base": "workspace:*",
+    "@yachiyo/message": "workspace:*",
+    "@yachiyo/persona": "workspace:*",
+    "@yachiyo/plugin": "workspace:*",
+    "@yachiyo/provider": "workspace:*",
+    "@yachiyo/skill": "workspace:*",
+    "@yachiyo/t2i": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/uuid": "^10.0.0"
+  }
+}

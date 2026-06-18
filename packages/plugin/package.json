@@ -1,0 +1,29 @@
+{
+  "name": "@yachiyo/plugin",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./*.js": {
+      "types": "./dist/*.d.ts",
+      "import": "./dist/*.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@yachiyo/common": "workspace:*",
+    "@yachiyo/agent": "workspace:*",
+    "@yachiyo/config": "workspace:*",
+    "@yachiyo/conversation": "workspace:*",
+    "@yachiyo/message": "workspace:*",
+    "@yachiyo/provider": "workspace:*"
+  },
+  "devDependencies": {}
+}

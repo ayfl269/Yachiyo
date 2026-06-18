@@ -1,0 +1,48 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src"
+  },
+  "include": [
+    "src/**/*"
+  ],
+  "references": [
+    {
+      "path": "../common"
+    },
+    {
+      "path": "../agent"
+    },
+    {
+      "path": "../config"
+    },
+    {
+      "path": "../conversation"
+    },
+    {
+      "path": "../knowledge-base"
+    },
+    {
+      "path": "../message"
+    },
+    {
+      "path": "../persona"
+    },
+    {
+      "path": "../pipeline"
+    },
+    {
+      "path": "../platform"
+    },
+    {
+      "path": "../plugin"
+    },
+    {
+      "path": "../provider"
+    },
+    {
+      "path": "../skill"
+    }
+  ]
+}
