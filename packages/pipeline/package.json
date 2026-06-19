@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "eventemitter3": "^5.0.1",
-    "uuid": "^10.0.0",
+    "uuid": "^14.0.0",
     "@yachiyo/common": "workspace:*",
     "@yachiyo/agent": "workspace:*",
     "@yachiyo/config": "workspace:*",
