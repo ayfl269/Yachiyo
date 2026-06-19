@@ -1,7 +1,7 @@
-const tsPlugin = require("@typescript-eslint/eslint-plugin");
-const tsParser = require("@typescript-eslint/parser");
+import tsPlugin from "@typescript-eslint/eslint-plugin";
+import tsParser from "@typescript-eslint/parser";
 
-module.exports = [
+export default [
   {
     files: ["src/**/*.ts", "tests/**/*.ts"],
     languageOptions: {
@@ -20,6 +20,12 @@ module.exports = [
       "@typescript-eslint/no-unused-vars": ["warn", { "argsIgnorePattern": "^_" }],
       "@typescript-eslint/no-require-imports": "off",
       "@typescript-eslint/no-empty-object-type": "off",
+    },
+  },
+  {
+    files: ["tests/**/*.ts"],
+    rules: {
+      "@typescript-eslint/no-unused-vars": "off",
     },
   },
 ];

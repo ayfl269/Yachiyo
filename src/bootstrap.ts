@@ -36,7 +36,7 @@ import {
   getRuntimeComputerTools,
 } from "./agent/computer-tools.js";
 import { createMemoryTool } from "./agent/memory-tool.js";
-import { MemoryConsolidator, DEFAULT_CONSOLIDATION_CONFIG } from "./agent/memory-consolidator.js";
+import { MemoryConsolidator } from "./agent/memory-consolidator.js";
 import { createCodeSearchTool } from "./agent/code-search-tool.js";
 import { getSubAgentManagementTools } from "./agent/subagent-create-tool.js";
 
@@ -346,7 +346,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
     for (const adapterConfig of options.adapters ?? []) {
       const validated = validateAdapterConfig(adapterConfig);
       if (validated.enabled === false) continue;
-      const adapter = adapterRegistry.createAdapter(validated.type, validated, eventQueue);
+      adapterRegistry.createAdapter(validated.type, validated, eventQueue);
       sqliteAdapterStore.save(validated);
     }
   }
