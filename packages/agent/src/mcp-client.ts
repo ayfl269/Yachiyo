@@ -372,7 +372,7 @@ export class MCPClient {
 
       if (transportType === "streamable_http") {
         const { StreamableHTTPClientTransport } = await import(
-          "@modelcontextprotocol/sdk/client/streamablehttp.js"
+          "@modelcontextprotocol/sdk/client/streamableHttp.js"
         );
         const transport = new StreamableHTTPClientTransport(
           new URL(url) as any,
