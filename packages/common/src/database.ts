@@ -2,7 +2,7 @@
  * SQLite Database Manager
  *
  * Manages 4 SQLite databases (chat, memory, config, knowledge) with:
- * - PRAGMA optimizations (WAL, cache, mmap, foreign keys)
+ * - PRAGMA optimizations (DELETE, cache, mmap, foreign keys)
  * - Schema migration system (version-tracked)
  * - Transaction helpers
  */
@@ -121,11 +121,9 @@ export class DatabaseManager {
       try {
         // 在关闭连接前，尝试运行存储优化指令（包装在独立的 try-catch 中，避免其因锁或其他原因报错时阻止连接的关闭）
         try {
-          // 1. 将 WAL 文件中的更新写入主数据库文件并清空/截断 WAL 文件到 0 字节
-          db.pragma("wal_checkpoint(TRUNCATE)");
-          // 2. 运行增量真空回收，释放多余的空闲页面占用空间（比全量 VACUUM 速度快得多，更安全）
+          // 1. 运行增量真空回收，释放多余的空闲页面占用空间（比全量 VACUUM 速度快得多，更安全）
           db.pragma("incremental_vacuum");
-          // 3. 在关闭前进行统计分析优化，SQLite 官方推荐此操作以加速后续的查询
+          // 2. 在关闭前进行统计分析优化，SQLite 官方推荐此操作以加速后续的查询
           db.pragma("optimize");
         } catch (optError) {
           console.warn(`[DatabaseManager] Warning: failed to optimize ${name}.db before closing:`, optError);
@@ -155,10 +153,9 @@ export class DatabaseManager {
    * Apply PRAGMA optimizations to a database connection.
    */
   private applyPragmas(db: Database.Database): void {
-    db.pragma("journal_mode = WAL");
+    db.pragma("journal_mode = DELETE");
     db.pragma("synchronous = NORMAL");
-    db.pragma("journal_size_limit = 1048576"); // 限制 WAL 文件大小为 1MB，防止其无限制膨胀
-    db.pragma("wal_autocheckpoint = 250");     // 将自动 Checkpoint 阈值从默认 1000 页降到 250 页（约 1MB）
+    db.pragma("journal_size_limit = 1048576"); // 限制日志文件大小为 1MB
     db.pragma("auto_vacuum = INCREMENTAL");    // 开启增量真空回收模式
     db.pragma("cache_size = 20000");
     db.pragma("temp_store = MEMORY");
