@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test": "tsc && tsx tests/test.ts && tsx tests/message-processing-test.ts && tsx tests/platform-adapter-test.ts && tsx tests/context-system-test.ts && tsx tests/memory-system-test.ts",
     "test:watch": "tsx watch tests/test.ts",
-    "frontend:install": "cd frontend && pnpm install",
+    "frontend:install": "cd frontend && pnpm install --ignore-workspace",
     "frontend:dev": "cd frontend && pnpm run dev",
     "frontend:build": "cd frontend && pnpm run build"
   },
