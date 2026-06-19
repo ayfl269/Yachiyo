@@ -17,6 +17,7 @@ interface AgentConfig {
   pathMappings: [string, string][];
   sttEnabled: boolean;
   streamingResponse: boolean;
+  modelStreaming: boolean;
   maxStep: number;
   maxContextLength: number;
   toolCallTimeout: number;
@@ -309,6 +310,10 @@ onMounted(fetchConfig);
           <div class="form-group">
             <label>压缩时强制保留的最近轮数</label>
             <input type="number" v-model.number="config.llmCompressKeepRecent" class="form-control" />
+          </div>
+          <div class="form-group row-checkbox">
+            <input type="checkbox" v-model="config.modelStreaming" id="modelStreaming" />
+            <label for="modelStreaming">启用模型流式输出 (Model Stream)</label>
           </div>
         </div>
 

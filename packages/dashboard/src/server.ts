@@ -1655,14 +1655,19 @@ export class DashboardServer {
         const { createChatProvider } = await import("@yachiyo/provider/factory.js");
         const prov = createChatProvider(type as any, { apiKey, baseUrl, model, modalities: providerConfig.modalities || [] } as any);
 
-        // 优先使用流式调用测试（与实际对话一致），不支持流式时回退到非流式
-        if (prov.textChatStream) {
+        // 优先使用流式调用测试（与实际对话一致），配置禁用或不支持流式时回退到非流式
+        const config = this.ctx.configManager.getActiveConfig();
+        const modelStreaming = config?.modelStreaming ?? true;
+
+        if (modelStreaming && prov.textChatStream) {
           let received = false;
           for await (const chunk of prov.textChatStream({
             contexts: [{ role: "user", content: "hello" } as any],
           })) {
-            if (chunk.completionText) received = true;
-            break; // 只需收到一个有效 chunk 即可确认连通
+            if (chunk.completionText || chunk.reasoningContent || chunk.toolsCallName) {
+              received = true;
+              break; // 收到有效内容后确认连通并退出
+            }
           }
           if (!received) throw new Error("流式响应未返回有效内容");
         } else {

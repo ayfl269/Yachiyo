@@ -341,8 +341,9 @@ export class ProcessStage extends PipelineStage {
 
       const enableStreaming = event.getExtra<boolean>("enable_streaming") ?? this.streamingResponse;
     const platformSupportsStreaming = event.platformMeta.supportStreamingMessage;
-    // 当平台不支持流式时，LLM 也应使用非流式模式，避免产生大量无用 chunk
-    const useStreaming = enableStreaming && platformSupportsStreaming;
+    const modelStreaming = this.ctx.config.modelStreaming ?? true;
+    // 当平台不支持流式或配置禁用模型流式时，LLM 也应使用非流式模式，避免产生大量无用 chunk
+    const useStreaming = enableStreaming && platformSupportsStreaming && modelStreaming;
     const result = await buildMainAgent({
       provider,
       request: providerRequest,

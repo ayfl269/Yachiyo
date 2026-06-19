@@ -16,6 +16,7 @@ export interface AgentConfig {
   pathMappings: [string, string][];
   sttEnabled: boolean;
   streamingResponse: boolean;
+  modelStreaming: boolean;
   maxStep: number;
   maxContextLength: number;
   toolCallTimeout: number;
@@ -193,6 +194,7 @@ export class ConfigManager {
       pathMappings: [],
       sttEnabled: false,
       streamingResponse: true,
+      modelStreaming: true,
       maxStep: 30,
       maxContextLength: 8000,
       toolCallTimeout: 120000,
