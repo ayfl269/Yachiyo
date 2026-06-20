@@ -46,6 +46,12 @@ export class OpenAIResponsesProvider implements Provider {
       stream: false,
     };
 
+    if (params.temperature !== undefined) {
+      body.temperature = params.temperature;
+    } else if (this.providerConfig.temperature !== undefined) {
+      body.temperature = Number(this.providerConfig.temperature);
+    }
+
     if (instructions) {
       body.instructions = instructions;
     }
@@ -96,6 +102,12 @@ export class OpenAIResponsesProvider implements Provider {
       input,
       stream: true,
     };
+
+    if (params.temperature !== undefined) {
+      body.temperature = params.temperature;
+    } else if (this.providerConfig.temperature !== undefined) {
+      body.temperature = Number(this.providerConfig.temperature);
+    }
 
     if (instructions) {
       body.instructions = instructions;

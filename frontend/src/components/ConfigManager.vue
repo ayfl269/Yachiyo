@@ -65,6 +65,7 @@ interface AgentConfig {
   llmCompressKeepRecentRatio: number;
   llmCompressProviderId: string;
   fallbackMaxContextTokens: number;
+  temperature: number;
 }
 
 interface Provider {
@@ -92,7 +93,11 @@ const fetchConfig = async () => {
       fetch('/api/personas'),
     ]);
     if (cfgRes.ok) {
-      config.value = await cfgRes.json();
+      const data = await cfgRes.json();
+      if (data && data.temperature === undefined) {
+        data.temperature = 0.7;
+      }
+      config.value = data;
       safetyKeywordsStr.value = config.value?.safetyKeywords.join(', ') || '';
     }
     if (provRes.ok) {
@@ -302,6 +307,14 @@ onMounted(fetchConfig);
               <option value="">(未选择 — 无角色)</option>
               <option v-for="p in personasList" :key="p.id" :value="p.id">{{ p.name }} ({{ p.id }})</option>
             </select>
+          </div>
+          <div class="form-group">
+            <label>模型温度 (Temperature)</label>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <input type="range" v-model.number="config.temperature" min="0" max="2" step="0.1" style="flex: 1; accent-color: var(--accent-primary);" />
+              <input type="number" v-model.number="config.temperature" min="0" max="2" step="0.1" class="form-control font-mono" style="width: 70px; text-align: center; padding: 0.3rem;" />
+            </div>
+            <span class="help-text">控制生成文本的随机性与创意性 (建议 0.0 - 2.0，默认 0.7)</span>
           </div>
           <div class="form-group span-2">
             <label>历史消息压缩提示词</label>

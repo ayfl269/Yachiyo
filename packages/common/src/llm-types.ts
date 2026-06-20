@@ -53,6 +53,7 @@ export interface ProviderRequest {
   model?: string;
   conversation?: Conversation;
   extraUserContentParts: ContentPart[];
+  temperature?: number;
 }
 
 // Conversation
@@ -91,4 +92,5 @@ export interface ProviderChatParams {
   extraUserContentParts?: ContentPart[];
   abortSignal?: AbortSignal;
   enableCaching?: boolean;
+  temperature?: number;
 }

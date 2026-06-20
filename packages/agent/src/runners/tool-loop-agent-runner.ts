@@ -972,6 +972,7 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
       sessionId: this.req.sessionId,
       extraUserContentParts: this.req.extraUserContentParts,
       abortSignal: this.abortController.signal,
+      temperature: this.req.temperature,
     };
     if (options.includeModel) {
       payload.model = this.req.model;

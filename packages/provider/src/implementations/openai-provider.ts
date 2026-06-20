@@ -46,6 +46,12 @@ export class OpenAIProvider implements Provider {
       stream: false,
     };
 
+    if (params.temperature !== undefined) {
+      body.temperature = params.temperature;
+    } else if (this.providerConfig.temperature !== undefined) {
+      body.temperature = Number(this.providerConfig.temperature);
+    }
+
     if (funcTool && !funcTool.empty()) {
       body.tools = funcTool.openaiSchema(true);
     }
@@ -89,6 +95,12 @@ export class OpenAIProvider implements Provider {
       messages,
       stream: true,
     };
+
+    if (params.temperature !== undefined) {
+      body.temperature = params.temperature;
+    } else if (this.providerConfig.temperature !== undefined) {
+      body.temperature = Number(this.providerConfig.temperature);
+    }
 
     if (funcTool && !funcTool.empty()) {
       body.tools = funcTool.openaiSchema(true);

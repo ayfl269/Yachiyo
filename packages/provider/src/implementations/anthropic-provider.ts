@@ -101,6 +101,11 @@ export class AnthropicProvider implements Provider {
       messages,
       max_tokens: this.maxTokens,
     };
+    if (params.temperature !== undefined) {
+      body.temperature = params.temperature;
+    } else if (this.providerConfig.temperature !== undefined) {
+      body.temperature = Number(this.providerConfig.temperature);
+    }
     if (stream) {
       body.stream = true;
     }

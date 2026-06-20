@@ -30,6 +30,7 @@ interface Provider {
   custom_extra_body?: Record<string, any>
   max_context_tokens?: number
   reasoning?: boolean
+  temperature?: number
   [key: string]: any
 }
 
@@ -450,7 +451,8 @@ function buildModelProviderConfig(modelName: string): Provider | null {
     modalities,
     custom_extra_body: {},
     max_context_tokens: maxContext,
-    reasoning: isReasoning
+    reasoning: isReasoning,
+    temperature: 0.7
   }
 }
 
@@ -537,6 +539,9 @@ async function testProvider(provider: Provider) {
 // Provider edit dialog
 function openProviderEdit(provider: Provider) {
   providerEditData.value = JSON.parse(JSON.stringify(provider))
+  if (providerEditData.value && providerEditData.value.temperature === undefined) {
+    providerEditData.value.temperature = 0.7
+  }
   providerEditOriginalId.value = provider.id
   providerEditMode.value = 'edit'
   showProviderEditDialog.value = true
@@ -1443,6 +1448,14 @@ onMounted(loadConfig)
                   <input type="checkbox" v-model="providerEditData.reasoning" />
                   <span>{{ providerEditData.reasoning ? '开启' : '关闭' }}</span>
                 </label>
+              </div>
+              <div class="form-group">
+                <label>模型默认温度 (Temperature)</label>
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                  <input type="range" v-model.number="providerEditData.temperature" min="0" max="2" step="0.1" style="flex: 1; accent-color: var(--accent-primary);" />
+                  <input type="number" v-model.number="providerEditData.temperature" min="0" max="2" step="0.1" class="form-control font-mono" style="width: 70px; text-align: center; padding: 0.3rem;" />
+                </div>
+                <span class="help-text">设置该模型的默认生成温度 (0.0 - 2.0，默认 0.7)</span>
               </div>
             </div>
           </div>

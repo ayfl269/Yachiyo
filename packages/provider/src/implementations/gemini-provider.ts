@@ -175,6 +175,13 @@ export class GeminiProvider implements Provider {
 
     const enableCaching = params.enableCaching ?? (this.providerConfig.enableCaching as boolean | undefined) ?? false;
 
+    const generationConfig: Record<string, unknown> = {};
+    if (params.temperature !== undefined) {
+      generationConfig.temperature = params.temperature;
+    } else if (this.providerConfig.temperature !== undefined) {
+      generationConfig.temperature = Number(this.providerConfig.temperature);
+    }
+
     const body: Record<string, unknown> = {
       // Relax safety settings
       safetySettings: [
@@ -184,6 +191,10 @@ export class GeminiProvider implements Provider {
         { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
       ],
     };
+
+    if (Object.keys(generationConfig).length > 0) {
+      body.generationConfig = generationConfig;
+    }
 
     let tools: any[] | undefined = undefined;
     if (funcTool && !funcTool.empty()) {

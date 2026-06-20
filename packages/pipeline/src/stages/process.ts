@@ -326,6 +326,8 @@ export class ProcessStage extends PipelineStage {
         } : undefined,
       });
 
+      providerRequest.temperature = this.ctx.config.temperature;
+
       const provider = this.ctx.providerManager?.getUsingProvider?.(
         "chat_completion" as ProviderType,
         event.unifiedMsgOrigin

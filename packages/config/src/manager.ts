@@ -66,6 +66,7 @@ export interface AgentConfig {
   memoryInjectPersonaCount: number;
   memoryBufferMinMessages: number;
   memoryConsolidationBufferCount: number;
+  temperature?: number;
 }
 
 export interface ConfigInfo {
@@ -244,6 +245,7 @@ export class ConfigManager {
       memoryInjectPersonaCount: 5,
       memoryBufferMinMessages: 6,
       memoryConsolidationBufferCount: 30,
+      temperature: 0.7,
     };
   }
 }
