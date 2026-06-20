@@ -55,11 +55,5 @@
     "tsx": "^4.22.3",
     "typescript": "^5.7.0",
     "undici": "^8.3.0"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3",
-      "esbuild"
-    ]
   }
 }
