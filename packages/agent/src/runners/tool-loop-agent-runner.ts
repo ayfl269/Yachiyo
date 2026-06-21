@@ -1296,17 +1296,27 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
           );
         }
 
+        let timerId: ReturnType<typeof setTimeout> | undefined;
+        const timeoutPromise = new Promise<IteratorResult<CallToolResult | null>>((_, reject) => {
+          timerId = setTimeout(() => reject(new Error("timeout")), this.runContext.toolCallTimeout * 1000);
+        });
+
         try {
           const result = await Promise.race([
             executor.next(),
-            new Promise<IteratorResult<CallToolResult | null>>((_, reject) =>
-              setTimeout(() => reject(new Error("timeout")), this.runContext.toolCallTimeout * 1000)
-            ),
+            timeoutPromise,
           ]);
+
+          if (timerId) {
+            clearTimeout(timerId);
+          }
 
           if (result.done) return;
           yield result.value;
         } catch (e) {
+          if (timerId) {
+            clearTimeout(timerId);
+          }
           if (e instanceof Error && e.message === "timeout") {
             throw new Error(
               `Tool execution timeout after ${this.runContext.toolCallTimeout} seconds.`
