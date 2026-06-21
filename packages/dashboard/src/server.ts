@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "http";
-import { join, extname } from "path";
+import { join, extname, resolve, relative, isAbsolute } from "path";
 import { readFile, stat, writeFile, mkdir, unlink, readdir } from "fs/promises";
 import { cpus, tmpdir, totalmem } from "os";
 
@@ -42,6 +42,13 @@ export interface BootstrapContext {
   memoryConsolidator: MemoryConsolidator;
   dashboardServer?: any;
   shutdown: () => Promise<void>;
+}
+
+export function isPathSafe(basePath: string, targetPath: string): boolean {
+  const resolvedBase = resolve(basePath);
+  const resolvedTarget = resolve(resolvedBase, targetPath);
+  const rel = relative(resolvedBase, resolvedTarget);
+  return !rel.startsWith("..") && !isAbsolute(rel);
 }
 
 export class DashboardServer {
@@ -1985,6 +1992,11 @@ export class DashboardServer {
           res.end(JSON.stringify({ error: "Skill not found" }));
           return;
         }
+        if (!isPathSafe(skill.path, subPath)) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: "Invalid path" }));
+          return;
+        }
         const dirPath = join(skill.path, subPath);
         const entries = await readdir(dirPath, { withFileTypes: true });
         const files = entries.map((e: any) => ({
@@ -2246,6 +2258,11 @@ export class DashboardServer {
           res.end(JSON.stringify({ error: "Skill not found" }));
           return;
         }
+        if (!isPathSafe(skill.path, filePath)) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: "Invalid path" }));
+          return;
+        }
         const fullPath = join(skill.path, filePath);
         const content = await readFile(fullPath, "utf-8");
         res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
@@ -2272,6 +2289,11 @@ export class DashboardServer {
         if (!skill?.path) {
           res.writeHead(404);
           res.end(JSON.stringify({ error: "Skill not found" }));
+          return;
+        }
+        if (!isPathSafe(skill.path, filePath)) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: "Invalid path" }));
           return;
         }
         const fullPath = join(skill.path, filePath);
