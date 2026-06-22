@@ -854,19 +854,138 @@ function testActiveEventRegistry(): Promise<void> {
 
   // Stop all except event1
   const stoppedCount = activeEventRegistry.stopAll("test:FriendMessage:s1", event1);
-  console.log("  stopAll 停止�?", stoppedCount);
-  console.log("  event1 未停�?", !event1.isStopped());
-  console.log("  event2 已停�?", event2.isStopped());
+  console.log("  stopAll 停止数:", stoppedCount);
+  console.log("  event1 未停止:", !event1.isStopped());
+  console.log("  event2 已停止:", event2.isStopped());
 
   activeEventRegistry.unregister(event1);
   activeEventRegistry.unregister(event2);
 
-  console.log("  �?ActiveEventRegistry 测试通过");
+  console.log("  ✅ ActiveEventRegistry 测试通过");
   return Promise.resolve();
 }
 
 // ============================================================
-// 运行所有测�?// ============================================================
+// 12b. 测试: EventBus 错误保护
+// ============================================================
+async function testEventBusErrorProtection(): Promise<void> {
+  console.log("\n=== 测试: EventBus 错误保护 ===");
+
+  const assert = (cond: boolean, msg: string) => {
+    if (!cond) throw new Error(msg);
+  };
+
+  const eventQueue = new AsyncQueue<MessageEvent>();
+  let schedulerExecuteCalled = 0;
+  let schedulerExecuteThrown = 0;
+
+  // Mock scheduler that throws when execute is called
+  class ErrorThrowingScheduler extends PipelineScheduler {
+    constructor() {
+      super({} as any);
+    }
+    async initialize() {}
+    async execute(event: MessageEvent): Promise<void> {
+      schedulerExecuteCalled++;
+      if (event.getMessageStr() === "throw-execution") {
+        schedulerExecuteThrown++;
+        throw new Error("Execution failed intentionally");
+      }
+    }
+  }
+
+  const errorScheduler = new ErrorThrowingScheduler();
+  const schedulerMapping = new Map<string, PipelineScheduler>();
+  schedulerMapping.set("good-config", errorScheduler);
+
+  // Mock config manager that throws on a specific message
+  let configGetConfInfoCalled = 0;
+  const configManager = {
+    getConfInfo(umo: string) {
+      configGetConfInfoCalled++;
+      if (umo.includes("throw-config")) {
+        throw new Error("ConfigManager failed intentionally");
+      }
+      return { id: "good-config" };
+    }
+  };
+
+  const eventBus = new EventBus(eventQueue, schedulerMapping, configManager);
+
+  // Start the event bus
+  const busPromise = eventBus.dispatch();
+
+  // Create mock events
+  class TestEvent extends MessageEvent {
+    async send(): Promise<void> {}
+    async sendStreaming(): Promise<void> {}
+  }
+
+  const platformMsg = new PlatformMessage();
+  platformMsg.type = MessageType.FRIEND_MESSAGE;
+  platformMsg.selfId = "bot";
+  platformMsg.messageId = "m1";
+  platformMsg.sender = { userId: "u1", nickname: "Test" };
+  platformMsg.timestamp = Date.now();
+
+  const event1 = new TestEvent(
+    "throw-execution",
+    { ...platformMsg, messageStr: "throw-execution" } as any,
+    { name: "test", id: "test" } as any,
+    "s1"
+  );
+
+  const event2 = new TestEvent(
+    "throw-config",
+    { ...platformMsg, messageStr: "throw-config" } as any,
+    { name: "test", id: "test" } as any,
+    "throw-config"
+  );
+  Object.defineProperty(event2, "unifiedMsgOrigin", {
+    get() {
+      return "throw-config";
+    }
+  });
+
+  const event3 = new TestEvent(
+    "normal",
+    { ...platformMsg, messageStr: "normal" } as any,
+    { name: "test", id: "test" } as any,
+    "s2"
+  );
+
+  // 1. Put event1 (throws in execute) into queue
+  eventQueue.put(event1);
+
+  // 2. Put event2 (throws in getConfInfo) into queue
+  eventQueue.put(event2);
+
+  // 3. Put event3 (normal execution) into queue
+  eventQueue.put(event3);
+
+  // Wait a short time for event loop processing
+  await new Promise(resolve => setTimeout(resolve, 100));
+
+  console.log("  configManager.getConfInfo 递交次数:", configGetConfInfoCalled);
+  console.log("  scheduler.execute 调用次数:", schedulerExecuteCalled);
+  console.log("  scheduler.execute 故意抛错次数:", schedulerExecuteThrown);
+
+  assert(configGetConfInfoCalled === 3, "Config manager should have been queried 3 times");
+  assert(schedulerExecuteCalled === 2, "Scheduler execute should have been called 2 times");
+  assert(schedulerExecuteThrown === 1, "Scheduler execute should have intentionally thrown 1 time");
+
+  // Stop the event bus
+  eventBus.stop();
+  // Put a dummy event to wake up eventQueue.get() to allow loop termination
+  eventQueue.put(null as any);
+  await busPromise;
+
+  console.log("  ✅ EventBus 错误保护测试通过");
+}
+
+// ============================================================
+// 运行所有测试
+// ============================================================
 
 async function main(): Promise<void> {
   console.log("╔══════════════════════════════════════════╗");
@@ -886,6 +1005,7 @@ async function main(): Promise<void> {
     testProviderSystem();
     await testSkill();
     await testEventBusE2E();
+    await testEventBusErrorProtection();
     await testActiveEventRegistry();
 
     console.log("\n╔══════════════════════════════════════════╗");

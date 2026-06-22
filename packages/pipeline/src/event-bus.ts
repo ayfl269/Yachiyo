@@ -30,17 +30,29 @@ export class EventBus {
   async dispatch(): Promise<void> {
     this.running = true;
     while (this.running) {
-      const event = await this.eventQueue.get();
-      const confInfo = this.configManager.getConfInfo(event.unifiedMsgOrigin);
-      const confId = confInfo.id;
-      const scheduler = this.schedulerMapping.get(confId);
+      try {
+        const event = await this.eventQueue.get();
+        if (!event) {
+          continue;
+        }
 
-      if (!scheduler) {
-        console.error(`PipelineScheduler not found for config: ${confId}, event ignored.`);
-        continue;
+        const confInfo = this.configManager.getConfInfo(event.unifiedMsgOrigin);
+        const confId = confInfo.id;
+        const scheduler = this.schedulerMapping.get(confId);
+
+        if (!scheduler) {
+          console.error(`PipelineScheduler not found for config: ${confId}, event ignored.`);
+          continue;
+        }
+
+        setTimeout(() => {
+          scheduler.execute(event).catch((err) => {
+            console.error(`Unhandled error executing event in PipelineScheduler for config ${confId}:`, err);
+          });
+        }, 0);
+      } catch (err) {
+        console.error("Error in EventBus dispatch loop:", err);
       }
-
-      setTimeout(() => scheduler.execute(event), 0);
     }
   }
 
