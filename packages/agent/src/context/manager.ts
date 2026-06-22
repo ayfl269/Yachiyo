@@ -48,7 +48,7 @@ export class ContextManager {
       let currentTrustedTokenUsage = trustedTokenUsage;
 
       // Step 1: Enforce max turns (truncation)
-      if (this.config.enforceMaxTurns !== -1) {
+      if (this.config.enforceMaxTurns > 0) {
         result = this.truncator.truncateByTurns(
           result,
           this.config.enforceMaxTurns,

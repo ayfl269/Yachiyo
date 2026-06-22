@@ -83,13 +83,14 @@ export class ContextTruncator {
     keepMostRecentTurns: number,
     dropTurns = 1
   ): Message[] {
-    if (keepMostRecentTurns === -1) return messages;
+    if (keepMostRecentTurns <= 0 || keepMostRecentTurns === -1) return messages;
 
     const [systemMessages, nonSystemMessages] = ContextTruncator.splitSystemRest(messages);
     const rounds = splitIntoRounds(nonSystemMessages);
     if (rounds.length <= keepMostRecentTurns) return messages;
 
-    const numToKeep = keepMostRecentTurns - dropTurns + 1;
+    const actualDrop = Math.max(1, dropTurns);
+    const numToKeep = keepMostRecentTurns - actualDrop + 1;
     const truncatedRounds = numToKeep <= 0 ? [] : rounds.slice(-numToKeep);
     const truncatedContexts = truncatedRounds.flat();
 
@@ -104,16 +105,16 @@ export class ContextTruncator {
    * Drop the oldest N turns.
    */
   truncateByDroppingOldestTurns(messages: Message[], dropTurns = 1): Message[] {
-    if (dropTurns <= 0) return messages;
+    const actualDrop = Math.max(1, dropTurns);
 
     const [systemMessages, nonSystemMessages] = ContextTruncator.splitSystemRest(messages);
     const rounds = splitIntoRounds(nonSystemMessages);
 
     let truncatedNonSystem: Message[];
-    if (rounds.length <= dropTurns) {
+    if (rounds.length <= actualDrop) {
       truncatedNonSystem = [];
     } else {
-      const truncatedRounds = rounds.slice(dropTurns);
+      const truncatedRounds = rounds.slice(actualDrop);
       truncatedNonSystem = truncatedRounds.flat();
     }
 

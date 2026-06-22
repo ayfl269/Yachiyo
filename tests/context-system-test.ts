@@ -210,6 +210,79 @@ async function testTrustedTokenUsageInvalidation(): Promise<void> {
 }
 
 // ============================================================
+// 4. Test: enforceMaxTurns <= 0 or -1 (no limit / disabled)
+// ============================================================
+async function testEnforceMaxTurnsZeroAndNegatives(): Promise<void> {
+  console.log("\n--- Test 4: enforceMaxTurns <= 0 / -1 treated as disabled ---");
+
+  const messages: Message[] = [
+    { role: "system", content: "System" },
+    { role: "user", content: "Q1" },
+    { role: "assistant", content: "A1" },
+    { role: "user", content: "Q2" },
+    { role: "assistant", content: "A2" },
+    { role: "user", content: "Q3" },
+    { role: "assistant", content: "A3" },
+  ];
+
+  // Config with enforceMaxTurns = 0 (the new default / disabled)
+  const config0 = createContextConfig({
+    maxContextTokens: 0,
+    enforceMaxTurns: 0,
+    truncateTurns: 0,
+  });
+  const manager0 = new ContextManager(config0);
+  const processed0 = await manager0.process(messages);
+  assert(processed0.length === messages.length, `Expected no truncation when enforceMaxTurns is 0, but got ${processed0.length}`);
+
+  // Config with enforceMaxTurns = -1 (disabled)
+  const configNeg = createContextConfig({
+    maxContextTokens: 0,
+    enforceMaxTurns: -1,
+    truncateTurns: 1,
+  });
+  const managerNeg = new ContextManager(configNeg);
+  const processedNeg = await managerNeg.process(messages);
+  assert(processedNeg.length === messages.length, `Expected no truncation when enforceMaxTurns is -1, but got ${processedNeg.length}`);
+
+  console.log("  ✅ enforceMaxTurns <= 0 / -1 disabled checks passed");
+}
+
+// ============================================================
+// 5. Test: truncateTurns = 0 defaulting to drop at least 1 turn
+// ============================================================
+function testTruncateTurnsZeroDefaulting(): void {
+  console.log("\n--- Test 5: truncateTurns = 0 defaults to drop at least 1 turn ---");
+
+  const truncator = new ContextTruncator();
+  const messages: Message[] = [
+    { role: "system", content: "System" },
+    { role: "user", content: "Q1" },
+    { role: "assistant", content: "A1" },
+    { role: "user", content: "Q2" },
+    { role: "assistant", content: "A2" },
+    { role: "user", content: "Q3" },
+    { role: "assistant", content: "A3" },
+  ];
+
+  // We have 3 rounds. Limit is 2. dropTurns is 0.
+  // Under the old bug: numToKeep = 2 - 0 + 1 = 3 rounds. So 3 rounds kept (no truncation occurred!).
+  // Under the fix: actualDrop = 1, numToKeep = 2 - 1 + 1 = 2 rounds. So 2 rounds kept.
+  const truncatedByTurns = truncator.truncateByTurns(messages, 2, 0);
+  const roundsByTurns = splitIntoRounds(truncatedByTurns.filter(m => m.role !== "system"));
+  assert(roundsByTurns.length === 2, `Expected 2 rounds to be kept (enforcing dropTurns=0 -> dropTurns=1), but got ${roundsByTurns.length}`);
+
+  // We call truncateByDroppingOldestTurns with dropTurns = 0
+  // Under the old bug: 0 turns dropped.
+  // Under the fix: actualDrop = 1 -> 1 turn dropped.
+  const truncatedByDropping = truncator.truncateByDroppingOldestTurns(messages, 0);
+  const roundsByDropping = splitIntoRounds(truncatedByDropping.filter(m => m.role !== "system"));
+  assert(roundsByDropping.length === 2, `Expected 2 rounds to be kept (dropping oldest 1 round instead of 0), but got ${roundsByDropping.length}`);
+
+  console.log("  ✅ truncateTurns = 0 defaulting to drop at least 1 turn passed");
+}
+
+// ============================================================
 // Run All Tests
 // ============================================================
 async function main() {
@@ -217,6 +290,8 @@ async function main() {
     testPreciseRoundTruncation();
     await testSoftVsHardLimit();
     await testTrustedTokenUsageInvalidation();
+    await testEnforceMaxTurnsZeroAndNegatives();
+    testTruncateTurnsZeroDefaulting();
     console.log("\n==============================================");
     console.log("🎉 All Context System Special Tests Passed!");
     console.log("==============================================\n");
