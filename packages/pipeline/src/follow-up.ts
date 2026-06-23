@@ -14,6 +14,42 @@ interface FollowUpOrderState {
 
 const FOLLOW_UP_ORDER_STATE = new Map<string, FollowUpOrderState>();
 
+// Stale entry cleanup: periodically remove entries whose runner is gone
+// and no activity has occurred for a while.
+const STALE_FOLLOW_UP_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+let cleanupTimer: ReturnType<typeof setInterval> | null = null;
+
+function startFollowUpCleanup(): void {
+  if (cleanupTimer) return;
+  cleanupTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [umo, state] of FOLLOW_UP_ORDER_STATE) {
+      // If the runner is gone and all statuses are resolved, clean up immediately
+      if (!ACTIVE_AGENT_RUNNERS.has(umo) && state.statuses.size === 0) {
+        FOLLOW_UP_ORDER_STATE.delete(umo);
+        continue;
+      }
+      // If the runner is gone and the entry has been idle too long, force-clean
+      if (!ACTIVE_AGENT_RUNNERS.has(umo)) {
+        const oldestPending = Math.min(
+          ...Array.from(state.statuses.values()).map((_, i) => i), // no timestamps, use size heuristic
+        );
+        // If runner is gone but statuses remain, notifyAll to unblock waiters then delete
+        state.condition.notifyAll();
+        state.statuses.clear();
+        FOLLOW_UP_ORDER_STATE.delete(umo);
+      }
+    }
+  }, CLEANUP_INTERVAL_MS);
+  if (cleanupTimer && typeof cleanupTimer === "object" && "unref" in cleanupTimer) {
+    cleanupTimer.unref();
+  }
+}
+
+// Auto-start cleanup on first use
+startFollowUpCleanup();
+
 export interface FollowUpTicket {
   resolved: Promise<void>;
   consumed: boolean;

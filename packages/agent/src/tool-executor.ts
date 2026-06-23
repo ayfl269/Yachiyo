@@ -114,16 +114,36 @@ class BackgroundTaskEventBus extends EventEmitter {
     return () => { this.off("task_completed", listener); };
   }
 
-  /** Wait for a specific task to complete. Returns a promise that resolves with the result. */
-  waitForTask(taskId: string): Promise<BackgroundTaskResult> {
-    return new Promise((resolve) => {
+  /** Wait for a specific task to complete. Returns a promise that resolves with the result.
+   *  Rejects with an error if the task doesn't complete within the specified timeout.
+   */
+  waitForTask(taskId: string, timeoutMs: number = 30 * 60 * 1000): Promise<BackgroundTaskResult> {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+
       const listener = (result: BackgroundTaskResult) => {
         if (result.taskId === taskId) {
+          if (timer) clearTimeout(timer);
           this.off("task_completed", listener);
+          settled = true;
           resolve(result);
         }
       };
+
       this.on("task_completed", listener);
+
+      timer = setTimeout(() => {
+        if (!settled) {
+          this.off("task_completed", listener);
+          reject(new Error(`waitForTask timed out after ${timeoutMs}ms for task ${taskId}`));
+        }
+      }, timeoutMs);
+
+      // Don't prevent process exit
+      if (timer && typeof timer === "object" && "unref" in timer) {
+        timer.unref();
+      }
     });
   }
 }

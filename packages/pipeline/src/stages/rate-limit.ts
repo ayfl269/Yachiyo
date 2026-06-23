@@ -9,12 +9,31 @@ export class RateLimitStage extends PipelineStage {
   private windowSeconds: number = 60;
   private strategy: "STALL" | "DISCARD" = "DISCARD";
   private counters: Map<string, { count: number; windowStart: number }> = new Map();
+  private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
   async initialize(ctx: PipelineContext): Promise<void> {
     this.rateLimitEnabled = ctx.config.rateLimitEnabled ?? false;
     this.maxRequests = ctx.config.rateLimitMaxRequests ?? 10;
     this.windowSeconds = ctx.config.rateLimitWindowSeconds ?? 60;
     this.strategy = ctx.config.rateLimitStrategy ?? "DISCARD";
+
+    // Periodically purge expired counters to prevent unbounded growth
+    const cleanupIntervalMs = Math.max(this.windowSeconds * 1000, 60_000);
+    this.cleanupTimer = setInterval(() => this.purgeExpired(), cleanupIntervalMs);
+    // Allow the Node.js process to exit even if this timer is active
+    if (this.cleanupTimer && typeof this.cleanupTimer === "object" && "unref" in this.cleanupTimer) {
+      this.cleanupTimer.unref();
+    }
+  }
+
+  private purgeExpired(): void {
+    const now = Date.now();
+    const threshold = this.windowSeconds * 1000;
+    for (const [key, counter] of this.counters) {
+      if (now - counter.windowStart > threshold) {
+        this.counters.delete(key);
+      }
+    }
   }
 
   async process(event: MessageEvent): Promise<void> {
@@ -39,5 +58,13 @@ export class RateLimitStage extends PipelineStage {
         await new Promise(resolve => setTimeout(resolve, waitMs));
       }
     }
+  }
+
+  destroy(): void {
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
+    this.counters.clear();
   }
 }

@@ -309,7 +309,6 @@ export class MCPClient {
   private serverName: string | null = null;
   private reconnectLock = false;
   private reconnecting = false;
-  private oldSessions: MCPClientSession[] = [];
 
   /**
    * Connect to an MCP server.
@@ -495,7 +494,9 @@ export class MCPClient {
     try {
       // Save old session for later cleanup
       if (this.session) {
-        this.oldSessions.push(this.session);
+        const oldSession = this.session;
+        // Close the old session asynchronously to prevent oldSessions from growing unboundedly
+        oldSession.close().catch(() => { /* ignore errors during close */ });
       }
 
       this.session = null;
@@ -520,16 +521,6 @@ export class MCPClient {
       }
       this.session = null;
     }
-
-    // Clean up old sessions
-    for (const oldSession of this.oldSessions) {
-      try {
-        await oldSession.close();
-      } catch {
-        // ignore
-      }
-    }
-    this.oldSessions = [];
   }
 }
 
