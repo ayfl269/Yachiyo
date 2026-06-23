@@ -540,7 +540,10 @@ function testConfigManager(): void {
 async function testConversationManager(): Promise<void> {
   console.log("\n=== 测试: ConversationManager ===");
 
-  const manager = new ConversationManager();
+  const store = new InMemoryConversationStore();
+  await store.initialize();
+
+  const manager = new ConversationManager(store);
   const umo = "webchat:FriendMessage:user-1";
 
   // New conversation
@@ -562,13 +565,20 @@ async function testConversationManager(): Promise<void> {
   const updated = await manager.getConversation(umo, convId);
   console.log("  更新后历�?", updated?.history?.includes("Hello"));
 
+  // Test truncation in addMessagePair
+  manager.setMaxHistoryMessages(3);
+  await manager.addMessagePair(umo, "Hello 1", "Reply 1");
+  await manager.addMessagePair(umo, "Hello 2", "Reply 2");
+  const truncatedConv = await manager.getConversation(umo, convId);
+  const truncatedHistory = JSON.parse(truncatedConv?.history || "[]");
+  console.log("  截断后历史消息数:", truncatedHistory.length);
+  console.log("  截断正确 (应该为 3):", truncatedHistory.length === 3);
+  console.log("  保留的消息包括 Hello 2:", truncatedHistory[1].content === "Hello 2");
+
   // Get current conversation id
   console.log("  当前对话 id:", await manager.getCurrConversationId(umo));
 
-  // InMemoryConversationStore
-  const store = new InMemoryConversationStore();
-  await store.initialize();
-  console.log("  InMemoryStore 初始化成�?", true);
+  // InMemoryStore initialized at the start of the test
 
   // API Key operations
   await store.createApiKey({ id: "1", keyHash: "abc123hash", keyPrefix: "test", name: "Test", scopes: null, createdBy: "admin", createdAt: new Date(), lastUsedAt: null, expiresAt: null, revokedAt: null });
