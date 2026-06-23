@@ -66,6 +66,8 @@ export interface AgentConfig {
   memoryInjectPersonaCount: number;
   memoryBufferMinMessages: number;
   memoryConsolidationBufferCount: number;
+  // History storage limit
+  maxHistoryMessages: number;
   temperature?: number;
 }
 
@@ -245,6 +247,8 @@ export class ConfigManager {
       memoryInjectPersonaCount: 5,
       memoryBufferMinMessages: 6,
       memoryConsolidationBufferCount: 30,
+      // History storage limit
+      maxHistoryMessages: 200,
       temperature: 0.7,
     };
   }

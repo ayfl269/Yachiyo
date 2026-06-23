@@ -17,9 +17,18 @@ export interface ConversationRecord {
 export class ConversationManager {
   private store: ConversationStore | null;
   private memoryConsolidator: MemoryConsolidator | null = null;
+  /** Maximum number of messages to keep in history. 0 = unlimited. */
+  private maxHistoryMessages: number = 200;
 
-  constructor(store?: ConversationStore) {
+  constructor(store?: ConversationStore, options?: { maxHistoryMessages?: number }) {
     this.store = store ?? null;
+    if (options?.maxHistoryMessages !== undefined) {
+      this.maxHistoryMessages = options.maxHistoryMessages;
+    }
+  }
+
+  setMaxHistoryMessages(max: number): void {
+    this.maxHistoryMessages = max;
   }
 
   setMemoryConsolidator(consolidator: MemoryConsolidator): void {
@@ -142,6 +151,11 @@ export class ConversationManager {
     if (!Array.isArray(history)) history = [];
     history.push({ role: "user", content: userMessage });
     history.push({ role: "assistant", content: assistantMessage });
+
+    // Truncate history to prevent unbounded growth
+    if (this.maxHistoryMessages > 0 && history.length > this.maxHistoryMessages) {
+      history.splice(0, history.length - this.maxHistoryMessages);
+    }
 
     await this.store.updateConversation(conversationId, {
       history: JSON.stringify(history),

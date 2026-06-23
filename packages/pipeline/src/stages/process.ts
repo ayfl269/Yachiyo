@@ -453,6 +453,13 @@ export class ProcessStage extends PipelineStage {
       if (!conv) return;
       const history: Array<{ role: string; content: string }> = (() => { try { return JSON.parse(conv.history); } catch { return []; } })();
       history.push({ role: "assistant", content: text });
+
+      // Truncate history to prevent unbounded growth
+      const maxHistoryMessages = this.ctx.config.maxHistoryMessages ?? 200;
+      if (history.length > maxHistoryMessages) {
+        history.splice(0, history.length - maxHistoryMessages);
+      }
+
       await this.ctx.conversationManager.updateConversation(umo, convId, {
         history: JSON.stringify(history),
       });

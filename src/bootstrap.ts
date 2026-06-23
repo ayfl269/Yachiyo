@@ -139,6 +139,19 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
   const sqliteConfigStore = new (await import("./config/sqlite-config-store.js")).SqliteConfigStore(dbManager.getDb("config"));
   const configManager = new ConfigManager(undefined, sqliteConfigStore);
 
+  // Apply maxHistoryMessages from config to ConversationManager
+  const initialConfig = configManager.getActiveConfig();
+  if (initialConfig?.maxHistoryMessages) {
+    conversationManager.setMaxHistoryMessages(initialConfig.maxHistoryMessages);
+  }
+  // Update when config changes
+  configManager.onChange((_configId, _changeType) => {
+    const cfg = configManager.getActiveConfig();
+    if (cfg?.maxHistoryMessages) {
+      conversationManager.setMaxHistoryMessages(cfg.maxHistoryMessages);
+    }
+  });
+
   const sqlitePersonaStore = new SqlitePersonaStore(dbManager.getDb("config"));
   const personaManager = new PersonaManager(sqlitePersonaStore);
 
