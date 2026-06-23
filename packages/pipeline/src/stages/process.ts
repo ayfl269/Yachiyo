@@ -128,14 +128,22 @@ export class ProcessStage extends PipelineStage {
                 .map(c => c.message)
                 .join("");
               const assistantText = chainText || respText;
-              await this.saveAssistantMessage(umo, convId, assistantText);
-              event.setResult(
-                new EventResult()
-                  .setResultContentType(ResultContentType.LLM_RESULT)
-                  .plain(assistantText)
-              );
-              // Cache assistant text before yield — respond stage will clearResult()
-              event.setExtra("_cachedAssistantText", assistantText);
+              if (runResult.finalResponse.role === "err") {
+                event.setResult(
+                  new EventResult()
+                    .setResultContentType(ResultContentType.LLM_RESULT)
+                    .plain(assistantText)
+                );
+              } else {
+                await this.saveAssistantMessage(umo, convId, assistantText);
+                event.setResult(
+                  new EventResult()
+                    .setResultContentType(ResultContentType.LLM_RESULT)
+                    .plain(assistantText)
+                );
+                // Cache assistant text before yield — respond stage will clearResult()
+                event.setExtra("_cachedAssistantText", assistantText);
+              }
             } else {
               // No finalResponse — try to use collected chains as fallback
               const chainText = runResult.chains
@@ -384,6 +392,9 @@ export class ProcessStage extends PipelineStage {
             chunkCount++;
             yield resp.data.chain;
           } else if (resp.type === "llm_result") {
+            chunkCount++;
+            yield resp.data.chain;
+          } else if (resp.type === "err") {
             chunkCount++;
             yield resp.data.chain;
           } else if (resp.type === "aborted") {

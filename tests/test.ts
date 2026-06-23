@@ -659,6 +659,63 @@ async function testToolLoopRunner(): Promise<void> {
 }
 
 // ============================================================
+// 8b. 测试: ErrorResponse 错误响应处理
+// ============================================================
+
+async function testErrorResponseHandling(): Promise<void> {
+  console.log("\n=== 测试: ErrorResponse 错误响应处理 ===");
+
+  const mockProvider = createMockProvider([
+    {
+      role: "err",
+      completionText: "Failed to connect to LLM server",
+      isChunk: false,
+    },
+  ]);
+
+  const runner = new ToolLoopAgentRunner();
+  const runContext = createContextWrapper<null>(null);
+  const hooks = new EmptyAgentHooks();
+  const executor = new FunctionToolExecutor();
+
+  await runner.reset(runContext, hooks, {
+    provider: mockProvider,
+    request: {
+      prompt: "Hello",
+      imageUrls: [],
+      audioUrls: [],
+      contexts: [],
+      extraUserContentParts: [],
+    },
+    toolExecutor: executor,
+    agentHooks: hooks,
+    streaming: false,
+  });
+
+  const responses: AgentResponse[] = [];
+  for await (const response of runner.stepUntilDone(10)) {
+    responses.push(response);
+  }
+
+  console.log("  Runner 状态已完成:", runner.done());
+  console.log("  Runner 状态是否为 ERROR:", (runner as any).state === AgentState.ERROR);
+
+  const finalResp = runner.getFinalLlmResp();
+  console.log("  最终回复 role:", finalResp?.role);
+  console.log("  最终回复 content:", finalResp?.completionText);
+
+  const { runAgent } = await import("../src/agent/agent-runner.js");
+  const runResult = await runAgent(runner, {
+    maxStep: 30,
+  });
+
+  console.log("  runAgent 返回 finalResponse role:", runResult.finalResponse?.role);
+  console.log("  runAgent 返回 finalResponse content:", runResult.finalResponse?.completionText);
+
+  console.log("  ✅ ErrorResponse 错误响应处理测试通过");
+}
+
+// ============================================================
 // 9. 测试: ToolImageCache
 // ============================================================
 
@@ -1024,6 +1081,7 @@ async function main(): Promise<void> {
     testMcpValidation();
     testModalities();
     await testToolLoopRunner();
+    await testErrorResponseHandling();
     await testToolImageCache();
     await testNewComputerTools();
     await testWebTools();

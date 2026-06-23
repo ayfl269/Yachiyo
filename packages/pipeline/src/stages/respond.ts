@@ -145,6 +145,10 @@ export class RespondStage extends PipelineStage {
       for await (const chunk of generator) {
         // Skip reasoning/thinking chunks — only send text content to user
         if (chunk.type === "reasoning") continue;
+        if (chunk.type === "err") {
+          yield chunk;
+          continue;
+        }
         if (chunk.message) parts.push(chunk.message);
         yield chunk;
       }
