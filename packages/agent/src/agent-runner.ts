@@ -185,12 +185,12 @@ export async function runAgent<TContext = unknown>(
       onError?.(errMsg);
 
       const errorResponse: LLMResponse = {
-        role: "err",
+        role: "assistant",
         completionText: errMsg,
         isChunk: false,
       };
 
-      chains.push(createMessageChain("err", errMsg));
+      chains.push(createMessageChain("assistant", errMsg));
 
       return {
         finalResponse: errorResponse,
