@@ -14,7 +14,7 @@
  */
 
 import type Database from "better-sqlite3";
-import type { Migration } from "@yachiyo/common/database.js";
+import { escapeLike, type Migration } from "@yachiyo/common/database.js";
 
 // ── Types ──
 
@@ -242,8 +242,8 @@ export class SqliteMemoryStore {
 
     // Also search in tags
     const tagRows = this.db.prepare(`
-      SELECT DISTINCT memory_key FROM memory_tags WHERE tag LIKE ? LIMIT ?
-    `).all(`%${query}%`, limit) as any[];
+      SELECT DISTINCT memory_key FROM memory_tags WHERE tag LIKE ? ESCAPE '\\' LIMIT ?
+    `).all(`%${escapeLike(query)}%`, limit) as any[];
     for (const r of tagRows) {
       if (!keys.includes(r.memory_key)) {
         keys.push(r.memory_key);
@@ -252,9 +252,10 @@ export class SqliteMemoryStore {
 
     // If FTS found nothing, fall back to LIKE search
     if (keys.length === 0) {
+      const escapedQuery = escapeLike(query);
       const likeRows = this.db.prepare(`
-        SELECT key FROM memories WHERE key LIKE ? OR value LIKE ? LIMIT ?
-      `).all(`%${query}%`, `%${query}%`, limit) as any[];
+        SELECT key FROM memories WHERE key LIKE ? ESCAPE '\\' OR value LIKE ? ESCAPE '\\' LIMIT ?
+      `).all(`%${escapedQuery}%`, `%${escapedQuery}%`, limit) as any[];
       keys = likeRows.map((r) => r.key);
     }
 
@@ -504,8 +505,8 @@ export class SqliteMemoryStore {
     const prefix = key.split("_").slice(0, -1).join("_");
     if (prefix) {
       const prefixRows = this.db.prepare(`
-        SELECT * FROM memories WHERE key LIKE ? AND key != ? LIMIT ?
-      `).all(`${prefix}%`, key, limit) as any[];
+        SELECT * FROM memories WHERE key LIKE ? ESCAPE '\\' AND key != ? LIMIT ?
+      `).all(`${escapeLike(prefix)}%`, key, limit) as any[];
       for (const r of prefixRows) {
         if (!similarKeys.has(r.key)) {
           similarKeys.add(r.key);
@@ -606,10 +607,10 @@ export class SqliteMemoryStore {
    * Search conversation indices by topic or title.
    */
   searchConversationIndices(query: string, limit: number = 20): ConversationIndexEntry[] {
-    const likeQuery = `%${query}%`;
+    const likeQuery = `%${escapeLike(query)}%`;
     const rows = this.db.prepare(`
       SELECT * FROM conversation_indices
-      WHERE title LIKE ? OR topics LIKE ?
+      WHERE title LIKE ? ESCAPE '\\' OR topics LIKE ? ESCAPE '\\'
       ORDER BY timestamp DESC LIMIT ?
     `).all(likeQuery, likeQuery, limit) as any[];
     return rows.map(r => this.rowToIndexEntry(r));

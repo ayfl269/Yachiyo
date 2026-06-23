@@ -20,7 +20,7 @@ import {
   type PlatformStats,
   type ProviderStat,
 } from "./store.js";
-import type { Migration } from "@yachiyo/common/database.js";
+import { escapeLike, type Migration } from "@yachiyo/common/database.js";
 
 // ── Migrations ──
 
@@ -212,8 +212,8 @@ export class SqliteConversationStore extends ConversationStore {
     }
 
     if (options.searchQuery) {
-      conditions.push("(title LIKE ? OR unified_msg_origin LIKE ?)");
-      const like = `%${options.searchQuery}%`;
+      conditions.push("(title LIKE ? ESCAPE '\\' OR unified_msg_origin LIKE ? ESCAPE '\\')");
+      const like = `%${escapeLike(options.searchQuery)}%`;
       params.push(like, like);
     }
 

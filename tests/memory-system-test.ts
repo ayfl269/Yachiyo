@@ -9,6 +9,7 @@ import { tmpdir } from "os";
 
 import { SqliteMemoryStore, MEMORY_MIGRATIONS, type MemoryType, type MemoryScope } from "../src/agent/sqlite-memory-store.js";
 import { MemoryConsolidator, DEFAULT_CONSOLIDATION_CONFIG, type ConsolidationConfig } from "../src/agent/memory-consolidator.js";
+import { SqliteConversationStore, CHAT_MIGRATIONS } from "../src/conversation/sqlite-conversation-store.js";
 
 // ── Helpers ──
 
@@ -837,6 +838,120 @@ async function testCheckAndConsolidate() {
   db.close();
 }
 
+async function testLikeQueryEscaping() {
+  console.log("\n=== SQL LIKE 查询特殊字符转义测试 ===");
+  
+  // 1. 测试 SqliteMemoryStore
+  const memDb = createTestDb();
+  runMigrations(memDb);
+  const memStore = new SqliteMemoryStore(memDb);
+
+  // 1.1. 测试 tag 中的特殊字符 (Like fallback)
+  memStore.save("mem_1", "value 1", ["tag_test"], { memoryType: "long_term" });
+  memStore.save("mem_2", "value 2", ["tag%test"], { memoryType: "long_term" });
+  memStore.save("mem_3", "value 3", ["tagatest"], { memoryType: "long_term" });
+  memStore.save("mem_4", "value 4", ["tag\\test"], { memoryType: "long_term" });
+
+  const tagRows_ = memDb.prepare(`
+    SELECT DISTINCT memory_key FROM memory_tags WHERE tag LIKE ? ESCAPE '\\'
+  `).all(`%tag\\_test%`) as any[];
+  assertEqual(tagRows_.length, 1, "LIKE 匹配 tag_test 且包含转义时只返回 1 条记录");
+  assertEqual(tagRows_[0].memory_key, "mem_1", "匹配 key 为 mem_1");
+
+  const tagRowsPct = memDb.prepare(`
+    SELECT DISTINCT memory_key FROM memory_tags WHERE tag LIKE ? ESCAPE '\\'
+  `).all(`%tag\\%test%`) as any[];
+  assertEqual(tagRowsPct.length, 1, "LIKE 匹配 tag%test 且包含转义时只返回 1 条记录");
+  assertEqual(tagRowsPct[0].memory_key, "mem_2", "匹配 key 为 mem_2");
+
+  const tagRowsSlash = memDb.prepare(`
+    SELECT DISTINCT memory_key FROM memory_tags WHERE tag LIKE ? ESCAPE '\\'
+  `).all(`%tag\\\\test%`) as any[];
+  assertEqual(tagRowsSlash.length, 1, "LIKE 匹配 tag\\test 且包含转义时只返回 1 条记录");
+  assertEqual(tagRows_[0] ? tagRows_[0].memory_key : "", "mem_1", "匹配 key 为 mem_1"); // wait, tagRowsSlash matched mem_4
+
+  const tagRowsSlashCorrect = memDb.prepare(`
+    SELECT DISTINCT memory_key FROM memory_tags WHERE tag LIKE ? ESCAPE '\\'
+  `).all(`%tag\\\\test%`) as any[];
+  assertEqual(tagRowsSlashCorrect.length, 1, "LIKE 匹配 tag\\test 且包含转义时只返回 1 条记录 (斜杠)");
+  assertEqual(tagRowsSlashCorrect[0].memory_key, "mem_4", "匹配 key 为 mem_4");
+
+  // 1.2. 测试 findSimilar 中的前缀匹配 (key 含有下划线)
+  memStore.save("session_123_user_info", "v1", [], { memoryType: "long_term" });
+  memStore.save("session_123_user_extra", "v2", [], { memoryType: "long_term" });
+  memStore.save("sessiona123auser_info", "v3", [], { memoryType: "long_term" });
+
+  const similar = memStore.findSimilar("session_123_user_info", [], 10);
+  const similarKeys = similar.map(s => s.key);
+  assert(similarKeys.includes("session_123_user_extra"), "前缀匹配找到 session_123_user_extra");
+  assert(!similarKeys.includes("sessiona123auser_info"), "前缀匹配不应匹配由于下划线通配导致的 sessiona123auser_info");
+
+  // 1.3. 测试 searchConversationIndices (对话索引 LIKE 搜索)
+  memStore.addConversationIndex({
+    title: "关于_项目的讨论",
+    topics: ["项目"],
+    conversationId: "conv_like_1",
+    timestamp: new Date().toISOString(),
+  });
+  memStore.addConversationIndex({
+    title: "关于a项目的讨论",
+    topics: ["项目"],
+    conversationId: "conv_like_2",
+    timestamp: new Date().toISOString(),
+  });
+
+  const searchIndexRes = memStore.searchConversationIndices("关于_项目");
+  assertEqual(searchIndexRes.length, 1, "搜索'关于_项目'只返回 1 条");
+  assertEqual(searchIndexRes[0].conversationId, "conv_like_1", "匹配对话ID正确");
+
+  memDb.close();
+
+  // 2. 测试 SqliteConversationStore
+  const chatDb = createTestDb();
+  chatDb.exec("CREATE TABLE IF NOT EXISTS _migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL DEFAULT (datetime('now')))");
+  for (const migration of CHAT_MIGRATIONS) {
+    const row = chatDb.prepare("SELECT version FROM _migrations WHERE version = ?").get(migration.version) as any;
+    if (!row) {
+      chatDb.exec(migration.up);
+      chatDb.prepare("INSERT INTO _migrations (version, name) VALUES (?, ?)").run(migration.version, migration.name);
+    }
+  }
+  const chatStore = new SqliteConversationStore(chatDb);
+
+  await chatStore.createConversation({
+    id: "conv_c1",
+    unifiedMsgOrigin: "origin_test",
+    personaId: "p1",
+    history: "[]",
+    platformId: "platform_1",
+    title: "测试_特殊字符",
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    tokenUsage: null,
+  });
+
+  await chatStore.createConversation({
+    id: "conv_c2",
+    unifiedMsgOrigin: "origin_test",
+    personaId: "p1",
+    history: "[]",
+    platformId: "platform_1",
+    title: "测试a特殊字符",
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    tokenUsage: null,
+  });
+
+  const [filtered, total] = await chatStore.getFilteredConversations({
+    searchQuery: "测试_特殊",
+  });
+
+  assertEqual(total, 1, "对话搜索'测试_特殊'只匹配 1 个对话");
+  assertEqual(filtered[0].id, "conv_c1", "匹配到的对话 ID 为 conv_c1");
+
+  chatDb.close();
+}
+
 // ── Main ──
 
 async function main() {
@@ -862,6 +977,7 @@ async function main() {
     await testMemoryDisabledConfiguration();
     await testMemoryRefinements();
     await testCheckAndConsolidate();
+    await testLikeQueryEscaping();
   } catch (e) {
     console.error("\n!!! 测试执行异常 !!!", e);
     failed++;

@@ -21,6 +21,14 @@ export interface Migration {
   up: string; // SQL statements to execute
 }
 
+/**
+ * Escape special characters in SQL LIKE pattern.
+ * Converts \ -> \\, % -> \% and _ -> \_
+ */
+export function escapeLike(pattern: string): string {
+  return pattern.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
+
 // ── DatabaseManager ──
 
 export class DatabaseManager {
