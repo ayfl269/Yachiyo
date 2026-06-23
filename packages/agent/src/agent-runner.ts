@@ -222,6 +222,7 @@ export async function* runLiveAgent<TContext = unknown>(
 ): AsyncGenerator<{ type: "text" | "audio"; text: string; audio?: Buffer }, void, unknown> {
   const textQueue: (string | null)[] = [];
   let done = false;
+  let agentError: unknown = null;
 
   // Run agent in background, feeding text chunks into queue
   const agentPromise = runAgent(agentRunner, {
@@ -241,6 +242,7 @@ export async function* runLiveAgent<TContext = unknown>(
     textQueue.push(null); // Signal end
   }).catch((e) => {
     done = true;
+    agentError = e;
     textQueue.push(null);
     console.error(`Live agent error: ${e}`);
   });
@@ -258,6 +260,9 @@ export async function* runLiveAgent<TContext = unknown>(
 
   // Wait for agent to fully complete
   await agentPromise;
+
+  // Propagate agent error to consumer so they can distinguish failure from normal end
+  if (agentError) throw agentError;
 }
 
 // ---- Helpers ----
