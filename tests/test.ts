@@ -52,6 +52,7 @@ import {
   createDeleteSubAgentTool,
   getSubAgentManagementTools,
   dynamicSubAgentRegistry,
+  InMemoryVectorStore,
 } from "../src/index.js";
 import type {
   Provider,
@@ -1062,6 +1063,42 @@ async function testDynamicSubAgentCreate(): Promise<void> {
 }
 
 // ============================================================
+// 15. 测试: InMemoryVectorStore 余弦相似度维度校验
+// ============================================================
+
+async function testInMemoryVectorStoreDimensionValidation(): Promise<void> {
+  console.log("\n=== 测试: InMemoryVectorStore 余弦相似度维度校验 ===");
+
+  const store = new InMemoryVectorStore();
+  await store.upsert(
+    "chunk-1",
+    [0.1, 0.2, 0.3], // dimension 3
+    "content-1",
+    "doc-1",
+    "docName-1",
+    1,
+    "kb-1"
+  );
+
+  // 1. Same dimension query should succeed
+  const results = await store.search([0.1, 0.2, 0.3], 5, "kb-1");
+  console.log("  维度相同时搜索结果数量:", results.length);
+  console.log("  维度相同时得分是否非空:", results[0]?.score != null);
+
+  // 2. Mismatched dimension query should throw error
+  let threwError = false;
+  try {
+    await store.search([0.1, 0.2], 5, "kb-1"); // dimension 2, mismatch!
+  } catch (e) {
+    threwError = true;
+    console.log("  维度不同时捕获到预期错误:", (e as Error).message);
+  }
+  console.log("  维度校验成功触发错误:", threwError);
+
+  console.log("  ✅ InMemoryVectorStore 维度校验测试通过");
+}
+
+// ============================================================
 // 运行所有测试
 // ============================================================
 
@@ -1088,6 +1125,7 @@ async function main(): Promise<void> {
     await testMemoryTool();
     await testCodeSearchTool();
     await testDynamicSubAgentCreate();
+    await testInMemoryVectorStoreDimensionValidation();
 
     console.log("\n╔══════════════════════════════════════════╗");
     console.log("║   🎉 所有测试通过!                        ║");

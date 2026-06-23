@@ -11,6 +11,9 @@ interface StoredVector {
 }
 
 function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length) {
+    throw new Error(`Dimension mismatch: vector A has length ${a.length}, but vector B has length ${b.length}`);
+  }
   let dot = 0;
   let normA = 0;
   let normB = 0;
@@ -90,6 +93,12 @@ export class InMemoryVectorStore extends VectorStore {
       }
 
       const emb = vector.embedding;
+      if (emb.length !== len) {
+        throw new Error(
+          `Dimension mismatch: query vector has length ${len}, but stored vector ${chunkId} has length ${emb.length}`
+        );
+      }
+
       let dot = 0;
       let normBSq = 0;
       for (let i = 0; i < len; i++) {

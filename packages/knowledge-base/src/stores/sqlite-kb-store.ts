@@ -190,6 +190,9 @@ export class SqliteKBMetadataStore {
 // ── SQLite Vector Store ──
 
 function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+  if (a.length !== b.length) {
+    throw new Error(`Dimension mismatch: vector A has length ${a.length}, but vector B has length ${b.length}`);
+  }
   let dot = 0;
   let normA = 0;
   let normB = 0;
@@ -303,6 +306,11 @@ export class SqliteVectorStore extends VectorStore {
 
     for (const row of rows) {
       const vecArr = bufferToEmbedding(row.embedding);
+      if (vecArr.length !== len) {
+        throw new Error(
+          `Dimension mismatch: query vector has length ${len}, but stored vector ${row.chunk_id} has length ${vecArr.length}`
+        );
+      }
       
       // 3. 内联计算点积与文档向量的范数（避开多余的函数调用开销，方便 V8 引擎做更好的优化）
       let dot = 0;
