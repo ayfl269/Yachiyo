@@ -86,7 +86,7 @@ yachiyo/
 │   ├── skill/                    # @yachiyo/skill
 │   └── t2i/                      # @yachiyo/t2i
 ├── frontend/                     # React + Vite 管理后台
-│   └── src/components/           # 13 个管理面板组件
+│   └── src/components/           # 12 个管理面板组件
 ├── tests/                        # 测试套件（tsx 直接运行）
 ├── doc/                          # 架构设计与 API 文档
 │   ├── API_REFERENCE.md          # API 参考文档
@@ -175,10 +175,10 @@ pnpm test
 ## 技术栈
 
 **后端核心：**
-TypeScript 5.7+ · Node.js · pnpm Workspaces · Better-sqlite3 · Zod · WebSocket (ws) · Playwright · Sharp · EventEmitter3 · MCP SDK
+TypeScript 6.0+ · Node.js · pnpm Workspaces · Better-sqlite3 · Zod · WebSocket (ws) · Playwright · Sharp · EventEmitter3 · MCP SDK
 
 **前端管理后台：**
-React 18 · TypeScript 5.7 · Vite 8 · ApexCharts · Lucide Icons · JSZip · QRCode
+React 18 · TypeScript 6.0+ · Vite 8 · ApexCharts · Lucide Icons · JSZip · QRCode
 
 **测试：**
 tsx（TypeScript 直接执行）
