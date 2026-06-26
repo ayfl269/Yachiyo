@@ -22,7 +22,7 @@ async function main() {
   const webhookPort = parseInt(process.env.WEBHOOK_PORT ?? "8080", 10);
   const webhookHost = process.env.WEBHOOK_HOST ?? "0.0.0.0";
   const dashboardEnabled = process.env.DASHBOARD_ENABLED !== "false";
-  const dashboardPort = parseInt(process.env.DASHBOARD_PORT ?? "8081", 10);
+  const dashboardPort = parseInt(process.env.DASHBOARD_PORT ?? "8000", 10);
   const dashboardHost = process.env.DASHBOARD_HOST ?? "127.0.0.1";
 
 

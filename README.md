@@ -1,6 +1,6 @@
 # Yachiyo
 
-Yachiyo 是一个基于 TypeScript 实现的模块化 Agent 系统。采用 pnpm workspaces 单仓多包架构，支持多模型提供商接入、多平台消息适配、分层 SQLite 记忆体系、丰富的工具链与沙箱隔离执行、子代理编排，以及 Vue 3 管理后台。
+Yachiyo 是一个基于 TypeScript 实现的模块化 Agent 系统。采用 pnpm workspaces 单仓多包架构，支持多模型提供商接入、多平台消息适配、分层 SQLite 记忆体系、丰富的工具链与沙箱隔离执行、子代理编排，以及 React 管理后台。
 
 这个项目的创建初衷是构建一个全能型个人助手，可以实现多模态的对话交互，并提供丰富的工具链与插件系统。项目名称来源于《超时空辉夜姬》中的角色（月见八千代）
 
@@ -23,7 +23,7 @@ Yachiyo 是一个基于 TypeScript 实现的模块化 Agent 系统。采用 pnpm
 - **安全沙箱 (Process Sandbox)**：基于 Windows Job Object / Linux cgroup 的进程级安全沙箱，可限制 CPU 权重、最大内存使用与最大衍生进程数，保障本地命令及代码安全执行。
 - **多平台适配器中心 (Adapter Registry)**：支持 QQ (OneBot11 WebSocket)、QQ Official Bot、微信 (WeChat OC) 平台适配，统一生命周期管理并共享异步事件队列。
 - **插件与技能系统 (Plugin & Skill)**：可扩展的插件注册与技能管理机制，支持事件过滤、自定义处理逻辑。
-- **Vue 3 管理后台 (Admin Dashboard)**：集成 Vue 3 + Vite 管理面板，可视化管理提供商、插件、技能、角色、知识库、对话、记忆、配置与消息平台。
+- **React 管理后台 (Admin Dashboard)**：集成 React + Vite 管理面板，可视化管理提供商、插件、技能、角色、知识库、对话、记忆、配置与消息平台。
 
 ---
 
@@ -85,8 +85,8 @@ yachiyo/
 │   ├── provider/                 # @yachiyo/provider
 │   ├── skill/                    # @yachiyo/skill
 │   └── t2i/                      # @yachiyo/t2i
-├── frontend/                     # Vue 3 + Vite 管理后台
-│   └── src/components/           # 12 个管理面板组件
+├── frontend/                     # React + Vite 管理后台
+│   └── src/components/           # 13 个管理面板组件
 ├── tests/                        # 测试套件（tsx 直接运行）
 ├── doc/                          # 架构设计与 API 文档
 │   ├── API_REFERENCE.md          # API 参考文档
@@ -178,7 +178,7 @@ pnpm test
 TypeScript 5.7+ · Node.js · pnpm Workspaces · Better-sqlite3 · Zod · WebSocket (ws) · Playwright · Sharp · EventEmitter3 · MCP SDK
 
 **前端管理后台：**
-Vue 3.5 · TypeScript 6.0 · Vite 8 · ApexCharts · Lucide Icons · JSZip · QRCode
+React 18 · TypeScript 5.7 · Vite 8 · ApexCharts · Lucide Icons · JSZip · QRCode
 
 **测试：**
 tsx（TypeScript 直接执行）

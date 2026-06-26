@@ -61,7 +61,7 @@ export class DashboardServer {
   private todayTokens: number = 0;
   private lastTokenDate: string = new Date().toDateString();
 
-  constructor(ctx: BootstrapContext, port: number = 8081, host: string = "127.0.0.1") {
+  constructor(ctx: BootstrapContext, port: number = 8000, host: string = "127.0.0.1") {
     this.ctx = ctx;
     this.port = port;
     this.host = host;
