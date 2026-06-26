@@ -7,9 +7,9 @@
 import { createFunctionTool, type FunctionTool } from "./tool.js";
 import type { ContextWrapper, CallToolResult } from "./types.js";
 import { readFile, writeFile, mkdir, readdir, stat, unlink, rename } from "fs/promises";
-import { existsSync } from "fs";
+import { createWriteStream, existsSync } from "fs";
 import { join, resolve, normalize, dirname } from "path";
-import { execFile } from "child_process";
+import { execFile, type ChildProcess } from "child_process";
 import { tmpdir } from "os";
 
 // ── Permission helpers ──
@@ -244,6 +244,68 @@ export function createGrepTool(workspaceRoot?: string): FunctionTool<ComputerToo
 
 // ── Shell Execute Tool ──
 
+/**
+ * Best-effort guard against obviously destructive shell commands.
+ *
+ * NOTE: This is defense-in-depth, NOT a security boundary. Shell command
+ * parsing can always be subverted (base64, variable expansion, quoting,
+ * aliases, pipes, here-documents, …). Real isolation must come from
+ * process-level sandboxing (see sandbox.ts). This guard only exists to catch
+ * accidental foot-guns like `rm -rf /` from a model typo — the previous
+ * regex blacklist was trivially bypassed by extra whitespace or alternative
+ * targets such as `rm -rf ~` / `rm -rf /home`.
+ */
+function isDestructiveCommand(command: string): boolean {
+  // Collapse all whitespace (spaces, tabs, newlines) so tricks like
+  // `rm  -rf /` or `rm\t-rf /` cannot slip past a pattern expecting one space.
+  const c = command.replace(/\s+/g, " ").trim();
+
+  const patterns: RegExp[] = [
+    // rm with a recursive flag targeting root/home/wildcard/parent
+    /\brm\s+(?:-[a-z]*r[a-z]*|--recursive)[\s='"`]*(?:\/+|~|\$HOME|\*|\.\.(?:\s|$|;|&|\|))/,
+    // mkfs / mke2fs — reformat a filesystem
+    /\bmk(?:fs|e2fs)\b/,
+    // dd writing to a block device
+    /\bdd\b[^|]*\bof=\/dev\//,
+    // direct redirect to a block device
+    />\s*\/dev\/(?:sd|nvme|hd|vd|xvd|disk)/,
+    // find from root with -delete or -exec rm
+    /\bfind\s+\/\b[^|]*(?:-delete|-exec\s+rm\b)/,
+    // classic fork bomb: :(){ :|:& };:
+    /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/,
+    // system shutdown / reboot
+    /\b(?:shutdown|reboot|halt|poweroff|init\s+0)\b/,
+  ];
+
+  return patterns.some((p) => p.test(c));
+}
+
+/**
+ * Registry of background shell processes started by `execute_shell`.
+ *
+ * Keeping the ChildProcess references here means they can be tracked and
+ * terminated instead of leaking forever (the previous implementation discarded
+ * the reference immediately). Entries are removed automatically when the child
+ * exits.
+ */
+const backgroundProcesses = new Map<string, ChildProcess>();
+
+/**
+ * Kill a background shell process by id. Returns true if a process was found
+ * and signalled, false otherwise. The caller may follow up with a SIGKILL if
+ * the process does not exit within a grace period.
+ */
+export function killBackgroundShell(id: string): boolean {
+  const child = backgroundProcesses.get(id);
+  if (!child) return false;
+  try {
+    child.kill("SIGTERM");
+  } catch {
+    /* ignore — process may have already exited */
+  }
+  return true;
+}
+
 export function createShellTool(workspaceRoot?: string): FunctionTool<ComputerToolContext> {
   return createFunctionTool<ComputerToolContext>({
     name: "execute_shell",
@@ -266,15 +328,10 @@ export function createShellTool(workspaceRoot?: string): FunctionTool<ComputerTo
       const env = (args[3] as Record<string, string>) ?? undefined;
       const context = getToolContext(_ctx);
 
-      // Safety check: block dangerous commands
-      const dangerousPatterns = [
-        /rm\s+-rf\s+\//, /mkfs/, /dd\s+if=/, /sudo\s+rm/,
-        /:\(\)\{.*;\}\s*;/, // fork bomb
-      ];
-      for (const pat of dangerousPatterns) {
-        if (pat.test(command)) {
-          return { content: [{ type: "text", text: `error: Command blocked for safety: contains potentially destructive pattern.` }], isError: true };
-        }
+      // Defense-in-depth guard: block obviously destructive commands.
+      // NOTE: this is NOT a security boundary — see isDestructiveCommand docs.
+      if (isDestructiveCommand(command)) {
+        return { content: [{ type: "text", text: `error: Command blocked for safety: contains a potentially destructive pattern. If this is a legitimate command, run it outside the agent tool layer.` }], isError: true };
       }
 
       const cwd = workspaceRoot ?? process.cwd();
@@ -282,13 +339,32 @@ export function createShellTool(workspaceRoot?: string): FunctionTool<ComputerTo
 
       try {
         if (background) {
-          const logPath = join(tmpdir(), `shell_bg_${crypto.randomUUID().slice(0, 8)}.log`);
-          execFile(
+          const id = crypto.randomUUID().slice(0, 8);
+          const logPath = join(tmpdir(), `shell_bg_${id}.log`);
+          // Actually redirect stdout/stderr to the log file — the previous
+          // implementation computed logPath but never wired up the streams,
+          // so the returned message was a lie and the output was lost.
+          const logStream = createWriteStream(logPath, { flags: "w" });
+          // Keep the ChildProcess reference so it can be tracked and killed
+          // via killBackgroundShell(id); the previous implementation discarded
+          // it immediately, causing unbounded process leaks.
+          const child = execFile(
             process.platform === "win32" ? "cmd" : "/bin/sh",
             process.platform === "win32" ? ["/c", command] : ["-c", command],
             { cwd, env: { ...process.env, ...env }, timeout: timeoutMs }
           );
-          return { content: [{ type: "text", text: `Background command started. Output will be written to ${logPath}.` }] };
+          child.stdout?.pipe(logStream);
+          child.stderr?.pipe(logStream);
+          backgroundProcesses.set(id, child);
+          child.on("close", () => {
+            backgroundProcesses.delete(id);
+            logStream.end();
+          });
+          child.on("error", () => {
+            backgroundProcesses.delete(id);
+            logStream.end();
+          });
+          return { content: [{ type: "text", text: `Background command started (id=${id}). Output is being written to ${logPath}. Use killBackgroundShell("${id}") to terminate it.` }] };
         }
 
         const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolvePromise) => {

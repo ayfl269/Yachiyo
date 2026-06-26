@@ -5,6 +5,8 @@
  * Plan B: Process-level sandbox (Linux cgroup + namespace)
  */
 
+import { resolve, sep } from "path";
+
 // ── Plan A: Tool-level Sandbox Policy ──
 
 /**
@@ -97,13 +99,35 @@ export function applySandboxPolicyToToolSet(
 }
 
 /**
+ * Check whether `filePath` is the same as, or located inside, `dir`.
+ * Both inputs are normalized via `path.resolve()` before comparison to
+ * defeat path-traversal tricks (e.g. `/home/user/../user2/secret`, trailing
+ * slashes, mixed separators). A plain `startsWith` is NOT safe because
+ * `/home/user/sec` would match `/home/user/secret`.
+ */
+function isPathInside(filePath: string, dir: string): boolean {
+  const resolvedFile = resolve(filePath);
+  const resolvedDir = resolve(dir);
+  if (resolvedFile === resolvedDir) return true;
+  return resolvedFile.startsWith(resolvedDir + sep);
+}
+
+/**
  * Check if a file path is allowed by the sandbox policy.
+ *
+ * Both `allowedPaths` and `deniedPaths` are interpreted as directory roots:
+ * a path is considered to match a policy entry only when it resolves to a
+ * location inside (or equal to) that entry. Substring matching (`includes`)
+ * is intentionally NOT used because it would let `/etc/passed` be denied by
+ * a `/etc/pass` rule and could produce false positives/negatives.
  */
 export function isPathAllowed(path: string, policy: SandboxPolicy): boolean {
+  const resolved = resolve(path);
+
   // Denied paths take precedence
   if (policy.deniedPaths) {
-    for (const prefix of policy.deniedPaths) {
-      if (path.startsWith(prefix) || path.includes(prefix)) {
+    for (const dir of policy.deniedPaths) {
+      if (isPathInside(resolved, resolve(dir))) {
         return false;
       }
     }
@@ -112,8 +136,8 @@ export function isPathAllowed(path: string, policy: SandboxPolicy): boolean {
   // If allowedPaths is specified, path must match one
   if (policy.allowedPaths) {
     let matched = false;
-    for (const prefix of policy.allowedPaths) {
-      if (path.startsWith(prefix)) {
+    for (const dir of policy.allowedPaths) {
+      if (isPathInside(resolved, resolve(dir))) {
         matched = true;
         break;
       }
@@ -189,8 +213,25 @@ export const DEFAULT_PROCESS_SANDBOX_CONFIG: ProcessSandboxConfig = {
 };
 
 /**
+ * Quote a string for safe use as a single POSIX shell argument.
+ *
+ * Wraps the value in single quotes and escapes any embedded single quotes
+ * using the standard `'\''` sequence. The result is safe to interpolate
+ * into a `sh -c` invocation: metacharacters such as `;`, `&&`, `|`, `$()`,
+ * and backticks cannot break out of the quoting.
+ */
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+/**
  * Build the unshare + cgexec command string for Linux process sandboxing.
  * Returns null if not on Linux or if cgroup v2 is not available.
+ *
+ * The caller-supplied `command` and `cgroupPath` are passed to the shell as
+ * separately-quoted arguments so that any metacharacters they contain are
+ * interpreted only by the inner shell running *inside* the sandbox, never by
+ * the outer shell that launches the sandbox wrapper.
  */
 export function buildLinuxSandboxCommand(
   command: string,
@@ -210,11 +251,14 @@ export function buildLinuxSandboxCommand(
   if (cfg.networkIsolated) parts.push("--net");
   parts.push("--pid"); // Always isolate PID
 
-  // cgroup resource limits
-  const cgexec = `cgexec -g cpu,memory,pids:${cgroupPath}`;
+  // cgroup resource limits — cgroupPath is quoted so a malicious/ill-formed
+  // path cannot inject flags or break out of the `-g` argument.
+  const cgexecArg = shellQuote(`cpu,memory,pids:${cgroupPath}`);
 
-  // Build the full command
-  const sandboxCmd = `${parts.join(" ")} ${cgexec} -- ${command}`;
+  // The user command is passed as a single quoted argument to `sh -c`, so
+  // metacharacters (`;`, `&&`, backticks, `$()`, …) are evaluated by the
+  // inner shell that runs inside the sandbox, not by the outer launcher.
+  const sandboxCmd = `${parts.join(" ")} cgexec -g ${cgexecArg} -- sh -c ${shellQuote(command)}`;
   return sandboxCmd;
 }
 
