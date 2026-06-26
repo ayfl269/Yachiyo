@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { ApexOptions } from 'apexcharts'
-import Chart from 'react-apexcharts'
+import type { ApexOptions, ApexAxisChartSeries } from 'apexcharts'
+import Chart from './chart'
 import {
   Activity, MessageSquare, Cpu, HardDrive, Timer,
   RefreshCw, Bot, Sparkles, AlertCircle
 } from 'lucide-react'
 
 type TokenRange = 1 | 3 | 7
-type ChartSeries = Array<{ name: string; data: unknown[] }>
+type ChartSeries = ApexAxisChartSeries
 
 interface RunningStats {
   hours: number

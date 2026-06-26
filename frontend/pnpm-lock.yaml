@@ -15,8 +15,8 @@ importers:
         specifier: ^3.10.1
         version: 3.10.1
       lucide-react:
-        specifier: ^0.471.0
-        version: 0.471.0(react@18.3.1)
+        specifier: ^0.471.2
+        version: 0.471.2(react@18.3.1)
       qrcode:
         specifier: ^1.5.4
         version: 1.5.4
@@ -49,8 +49,8 @@ importers:
         specifier: ^6.0.3
         version: 6.0.3(vite@8.0.16(@types/node@22.20.0))
       typescript:
-        specifier: ^5.7.0
-        version: 5.7.2
+        specifier: ^6.0.0
+        version: 6.0.3
       vite:
         specifier: ^8.0.12
         version: 8.0.16(@types/node@22.20.0)
@@ -381,8 +381,8 @@ packages:
     resolution: {integrity: sha512-lyuxPGr/Wfhrlem2CL/UcnUc1zcqKAImBDzukY7Y5F/yQiNdko6+fRLevlw1HgMySw7f611UIY408EtxRSoK3Q==}
     hasBin: true
 
-  lucide-react@0.471.0:
-    resolution: {integrity: sha512-3L0OOJClsKDETJGK7nABqW8ftaVmUjWzluzPpw/6dGdI1bOmzsLsCjZpAEpg24Xs/U7xdYveQU+CBkHxWy7MrA==}
+  lucide-react@0.471.2:
+    resolution: {integrity: sha512-A8fDycQxGeaSOTaI7Bm4fg8LBXO7Qr9ORAX47bDRvugCsjLIliugQO0PkKFoeAD57LIQwlWKd3NIQ3J7hYp84g==}
     peerDependencies:
       react: ^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0
 
@@ -507,8 +507,8 @@ packages:
   tslib@2.8.1:
     resolution: {integrity: sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==}
 
-  typescript@5.7.2:
-    resolution: {integrity: sha512-i5t66RHxDvVN40HfDd1PsEThGNnlMCMT3jMUuoh9/0TaqWevNontacunWyN02LA9/fIbEWlcHZcgTKb9QoaLfg==}
+  typescript@6.0.3:
+    resolution: {integrity: sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==}
     engines: {node: '>=14.17'}
     hasBin: true
 
@@ -816,7 +816,7 @@ snapshots:
     dependencies:
       js-tokens: 3.0.0
 
-  lucide-react@0.471.0(react@18.3.1):
+  lucide-react@0.471.2(react@18.3.1):
     dependencies:
       react: 18.3.1
 
@@ -951,7 +951,7 @@ snapshots:
   tslib@2.8.1:
     optional: true
 
-  typescript@5.7.2: {}
+  typescript@6.0.3: {}
 
   undici-types@6.21.0: {}
 
