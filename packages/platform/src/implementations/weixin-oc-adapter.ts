@@ -63,6 +63,18 @@ const ITEM_TYPE = {
 
 const SESSION_TIMEOUT_ERRCODE = -14;
 
+/** Channel version sent in `base_info` for every iLink Bot API call. */
+const WECHAT_CHANNEL_VERSION = "yachiyo-agent";
+
+/**
+ * Generate the per-request `X-WECHAT-UIN` header value. The official client
+ * sends a random 32-bit UIN encoded as base64; we mimic that shape. The value
+ * has no auth significance but is required by the gateway.
+ */
+function generateWechatUinHeader(): string {
+  return Buffer.from(String(Math.floor(Math.random() * 0xffffffff))).toString("base64");
+}
+
 // ── AES-ECB Helpers ──
 
 function pkcs7Pad(data: Buffer, blockSize: number = 16): Buffer {
@@ -138,7 +150,7 @@ class ILinkClient {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "AuthorizationType": "ilink_bot_token",
-      "X-WECHAT-UIN": Buffer.from(String(Math.floor(Math.random() * 0xffffffff))).toString("base64"),
+      "X-WECHAT-UIN": generateWechatUinHeader(),
     };
     if (tokenRequired && this.token) {
       headers["Authorization"] = `Bearer ${this.token}`;
@@ -620,7 +632,7 @@ export class WeixinOCAdapter extends PlatformAdapter {
   private async pollInboundUpdates(): Promise<void> {
     const data = await this.client.requestJson("POST", "ilink/bot/getupdates", {
       payload: {
-        base_info: { channel_version: "yachiyo-agent" },
+        base_info: { channel_version: WECHAT_CHANNEL_VERSION },
         get_updates_buf: this.syncBuf,
       },
       tokenRequired: true,
@@ -891,7 +903,7 @@ export class WeixinOCAdapter extends PlatformAdapter {
 
     const payload = await this.client.requestJson("POST", "ilink/bot/sendmessage", {
       payload: {
-        base_info: { channel_version: "yachiyo-agent" },
+        base_info: { channel_version: WECHAT_CHANNEL_VERSION },
         msg: {
           from_user_id: "",
           to_user_id: userId,
@@ -1018,7 +1030,7 @@ export class WeixinOCAdapter extends PlatformAdapter {
         payload: {
           ilink_user_id: userId,
           context_token: contextToken,
-          base_info: { channel_version: "yachiyo-agent" },
+          base_info: { channel_version: WECHAT_CHANNEL_VERSION },
         },
         tokenRequired: true,
       });
@@ -1043,7 +1055,7 @@ export class WeixinOCAdapter extends PlatformAdapter {
         ilink_user_id: userId,
         typing_ticket: ticket,
         status: cancel ? 2 : 1,
-        base_info: { channel_version: "yachiyo-agent" },
+        base_info: { channel_version: WECHAT_CHANNEL_VERSION },
       },
       tokenRequired: true,
     });

@@ -151,6 +151,13 @@ class BackgroundTaskEventBus extends EventEmitter {
 
 export const backgroundTaskBus = BackgroundTaskEventBus.getInstance();
 
+/**
+ * Background tasks use a much longer timeout than regular tool calls so
+ * long-running operations (indexing, large fetches) are not killed. One
+ * hour matches the previous inline literal and is intentionally generous.
+ */
+const BACKGROUND_TASK_TIMEOUT_SECONDS = 3600;
+
 export abstract class BaseFunctionToolExecutor<TContext = unknown> {
   abstract execute(
     tool: FunctionTool<TContext>,
@@ -595,13 +602,13 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
     _taskId: string,
     toolArgs: Record<string, unknown>
   ): Promise<void> {
-    // Background tasks use a longer timeout (3600s) than regular tool calls.
+    // Background tasks use a longer timeout than regular tool calls.
     // Create a shallow copy of the runContext with the extended timeout so
     // the shared context is NOT mutated — otherwise a concurrent foreground
-    // tool could inherit the 3600s timeout.
+    // tool could inherit the extended timeout.
     const backgroundContext: ContextWrapper<TContext> = {
       ...runContext,
-      toolCallTimeout: 3600,
+      toolCallTimeout: BACKGROUND_TASK_TIMEOUT_SECONDS,
     };
     try {
       const iter = this.executeLocal(tool, backgroundContext, toolArgs);

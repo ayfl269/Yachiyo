@@ -4,6 +4,14 @@ import type { MessageEvent } from "@yachiyo/message/event.js";
 
 @registerStage
 export class RateLimitStage extends PipelineStage {
+  /**
+   * NOTE: `counters` is an in-process `Map`. The rate limit is therefore
+   * per-process only — when running multiple instances (PM2 workers,
+   * containers, horizontal scaling) each process maintains its own counters
+   * and the effective limit is `maxRequests * instance_count`. For shared
+   * enforcement, migrate the counter store to Redis or another shared
+   * KV backend.
+   */
   private rateLimitEnabled: boolean = false;
   private maxRequests: number = 10;
   private windowSeconds: number = 60;

@@ -176,6 +176,9 @@ export function resetFileLockManager(): void {
 
 // ── Parallel Sub-Agent Task Manager ──
 
+/** Polling interval (ms) used by `waitForAll` to re-check task completion. */
+const WAIT_FOR_ALL_POLL_INTERVAL_MS = 100;
+
 export interface SubAgentTask {
   id: string;
   agentName: string;
@@ -361,7 +364,7 @@ export class SubAgentTaskManager extends EventEmitter {
       );
       if (allDone) return [...this.tasks.values()];
 
-      await new Promise((r) => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, WAIT_FOR_ALL_POLL_INTERVAL_MS));
     }
 
     // Timeout: cancel remaining tasks

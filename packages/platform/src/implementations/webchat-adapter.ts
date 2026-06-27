@@ -59,15 +59,33 @@ function establishSSE(res: ServerResponse, sessionId: string): SSEConnection {
   };
 
   const heartbeat = setInterval(() => {
-    if (res.writableEnded) {
+    // Stop the timer once the response is finished or the underlying socket
+    // has been destroyed. Checking `destroyed` covers the case where the
+    // client disconnected abruptly (TCP RST, network drop) and the `close`
+    // event is delayed or never fires — without this guard the interval
+    // would keep writing to a dead socket indefinitely, leaking memory and
+    // CPU per abandoned session.
+    if (res.writableEnded || res.destroyed) {
       clearInterval(heartbeat);
       return;
     }
-    res.write(": heartbeat\n\n");
-    conn.lastActiveAt = Date.now();
+    try {
+      res.write(": heartbeat\n\n");
+      conn.lastActiveAt = Date.now();
+    } catch {
+      // Write failed — connection is gone. Clear the timer so we don't
+      // keep retrying on a dead response.
+      clearInterval(heartbeat);
+    }
   }, 15000);
+  // Allow the process to exit even if a heartbeat is still pending.
+  heartbeat.unref();
 
-  res.on("close", () => clearInterval(heartbeat));
+  // Clear on both `close` (normal end) and `error` (socket error) to avoid
+  // leaving the interval running when the connection tears down abnormally.
+  const stopHeartbeat = (): void => clearInterval(heartbeat);
+  res.on("close", stopHeartbeat);
+  res.on("error", stopHeartbeat);
 
   return conn;
 }

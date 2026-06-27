@@ -10,6 +10,15 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+/**
+ * Segmented reply timing. Each component is delayed by a random interval
+ * (in ms) to mimic human typing rhythm. `COMP_INTERVAL_MIN_MS` is the
+ * floor and `COMP_INTERVAL_SPREAD_MS` is the size of the random range
+ * above it, so the effective delay is `[MIN, MIN + SPREAD)` ms.
+ */
+const COMP_INTERVAL_MIN_MS = 50;
+const COMP_INTERVAL_SPREAD_MS = 151;
+
 @registerStage
 export class RespondStage extends PipelineStage {
   private replyWithMention: boolean = false;
@@ -133,7 +142,7 @@ export class RespondStage extends PipelineStage {
   }
 
   private calcCompInterval(): number {
-    return Math.floor(Math.random() * 151) + 50;
+    return Math.floor(Math.random() * COMP_INTERVAL_SPREAD_MS) + COMP_INTERVAL_MIN_MS;
   }
 
   private async collectAndSendStreaming(

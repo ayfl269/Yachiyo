@@ -1183,7 +1183,8 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
                     `Cached at: ${cached.filePath}. ` +
                     `Use send_message_to_user to send it to the user.`
                   );
-                } catch {
+                } catch (e) {
+                  console.warn(`[ToolLoop] Failed to cache image from tool ${funcToolName}:`, e);
                   resultParts.push(
                     `Image returned (base64, ${imgContent.mimeType}). ` +
                     `Use send_message_to_user to send it to the user.`
@@ -1212,7 +1213,8 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
                         `Use send_message_to_user to send it to the user.`
                       );
                       yield HandleFunctionToolsResult.fromCachedImage(cached);
-                    } catch {
+                    } catch (e) {
+                      console.warn(`[ToolLoop] Failed to cache image resource from tool ${funcToolName}:`, e);
                       resultParts.push(`Image resource returned (${mimeType}), but failed to cache.`);
                     }
                   } else {
@@ -1340,8 +1342,9 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
       // Ensure the async generator is properly closed to prevent resource leaks
       try {
         await executor.return(undefined);
-      } catch {
-        // ignore errors during generator cleanup
+      } catch (e) {
+        // Best-effort cleanup; surface the error for diagnostics without failing the call.
+        console.debug("[ToolLoop] Error during generator cleanup:", e);
       }
     }
   }
