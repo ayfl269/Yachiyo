@@ -153,6 +153,60 @@ export const MEMORY_MIGRATIONS: Migration[] = [
   },
 ];
 
+// ── Row Types ──
+
+/** Row type for the memories table. */
+interface MemoryRow {
+  key: string;
+  value: string;
+  created_at: string;
+  updated_at: string;
+  memory_type: MemoryType;
+  scope: MemoryScope;
+  scope_id: string;
+  priority: number;
+  access_count: number;
+  last_accessed_at: string | null;
+  expires_at: string | null;
+}
+
+/** Row type for SELECT created_at, access_count FROM memories. */
+interface MemoryAccessRow {
+  created_at: string;
+  access_count: number;
+}
+
+/** Row type for SELECT key, created_at FROM memories. */
+interface MemoryKeyDateRow {
+  key: string;
+  created_at: string;
+}
+
+/** Row type for SELECT key FROM memories / memories_fts. */
+interface MemoryKeyRow {
+  key: string;
+}
+
+/** Row type for SELECT memory_key FROM memory_tags. */
+interface MemoryTagKeyRow {
+  memory_key: string;
+}
+
+/** Row type for the conversation_indices table. */
+interface ConversationIndexRow {
+  id: number;
+  title: string;
+  topics: string;
+  conversation_id: string;
+  timestamp: string;
+  created_at: string;
+}
+
+/** Row type for COUNT(*) as cnt queries. */
+interface CountRow {
+  cnt: number;
+}
+
 // ── SqliteMemoryStore ──
 
 export class SqliteMemoryStore {
@@ -182,7 +236,7 @@ export class SqliteMemoryStore {
     const expiresAt = options?.expiresAt ?? null;
 
     this.db.transaction(() => {
-      const existing = this.db.prepare("SELECT created_at, access_count FROM memories WHERE key = ?").get(key) as any;
+      const existing = this.db.prepare("SELECT created_at, access_count FROM memories WHERE key = ?").get(key) as MemoryAccessRow;
       const createdAt = existing?.created_at ?? now;
       const accessCount = existing?.access_count ?? 0;
 
@@ -205,7 +259,7 @@ export class SqliteMemoryStore {
    * Recall a memory by key. Increments access_count.
    */
   recall(key: string): MemoryEntry | null {
-    const row = this.db.prepare("SELECT * FROM memories WHERE key = ?").get(key) as any;
+    const row = this.db.prepare("SELECT * FROM memories WHERE key = ?").get(key) as MemoryRow;
     if (!row) return null;
 
     // Update access stats
@@ -214,7 +268,7 @@ export class SqliteMemoryStore {
     `).run(new Date().toISOString(), key);
 
     // Re-read to get updated access_count
-    const updatedRow = this.db.prepare("SELECT * FROM memories WHERE key = ?").get(key) as any;
+    const updatedRow = this.db.prepare("SELECT * FROM memories WHERE key = ?").get(key) as MemoryRow;
     return this.rowToEntry(updatedRow);
   }
 
@@ -233,7 +287,7 @@ export class SqliteMemoryStore {
       try {
         const ftsRows = this.db.prepare(`
           SELECT key FROM memories_fts WHERE memories_fts MATCH ? LIMIT ?
-        `).all(ftsQuery, limit * 2) as any[];
+        `).all(ftsQuery, limit * 2) as MemoryKeyRow[];
         keys = ftsRows.map((r) => r.key);
       } catch {
         // FTS query syntax error, fall through to LIKE
@@ -243,7 +297,7 @@ export class SqliteMemoryStore {
     // Also search in tags
     const tagRows = this.db.prepare(`
       SELECT DISTINCT memory_key FROM memory_tags WHERE tag LIKE ? ESCAPE '\\' LIMIT ?
-    `).all(`%${escapeLike(query)}%`, limit) as any[];
+    `).all(`%${escapeLike(query)}%`, limit) as MemoryTagKeyRow[];
     for (const r of tagRows) {
       if (!keys.includes(r.memory_key)) {
         keys.push(r.memory_key);
@@ -255,7 +309,7 @@ export class SqliteMemoryStore {
       const escapedQuery = escapeLike(query);
       const likeRows = this.db.prepare(`
         SELECT key FROM memories WHERE key LIKE ? ESCAPE '\\' OR value LIKE ? ESCAPE '\\' LIMIT ?
-      `).all(`%${escapedQuery}%`, `%${escapedQuery}%`, limit) as any[];
+      `).all(`%${escapedQuery}%`, `%${escapedQuery}%`, limit) as MemoryKeyRow[];
       keys = likeRows.map((r) => r.key);
     }
 
@@ -280,7 +334,7 @@ export class SqliteMemoryStore {
     const placeholders = keys.map(() => "?").join(",");
     const rows = this.db.prepare(`
       SELECT * FROM memories WHERE key IN (${placeholders})${whereClause} ORDER BY priority DESC, updated_at DESC LIMIT ?
-    `).all(...keys, ...params, limit) as any[];
+    `).all(...keys, ...params, limit) as MemoryRow[];
 
     return rows.map((r) => this.rowToEntry(r));
   }
@@ -319,7 +373,7 @@ export class SqliteMemoryStore {
 
     const rows = this.db.prepare(`
       SELECT * FROM memories WHERE 1=1${whereClause} ORDER BY priority DESC, updated_at DESC LIMIT ?
-    `).all(...params, limit) as any[];
+    `).all(...params, limit) as MemoryRow[];
 
     return rows.map((r) => this.rowToEntry(r));
   }
@@ -348,7 +402,7 @@ export class SqliteMemoryStore {
       params.push(options.scopeId);
     }
 
-    const row = this.db.prepare(`SELECT COUNT(*) as cnt FROM memories WHERE 1=1${whereClause}`).get(...params) as any;
+    const row = this.db.prepare(`SELECT COUNT(*) as cnt FROM memories WHERE 1=1${whereClause}`).get(...params) as CountRow;
     return row?.cnt ?? 0;
   }
 
@@ -404,10 +458,10 @@ export class SqliteMemoryStore {
 
     this.db.transaction(() => {
       // Find short_term memories for this session
-      let query = `SELECT key, created_at FROM memories WHERE memory_type = 'short_term' AND scope = 'session' AND scope_id = ?`;
+      const query = `SELECT key, created_at FROM memories WHERE memory_type = 'short_term' AND scope = 'session' AND scope_id = ?`;
       const params: unknown[] = [scopeId];
 
-      const rows = this.db.prepare(query).all(...params) as any[];
+      const rows = this.db.prepare(query).all(...params) as MemoryKeyDateRow[];
 
       for (const row of rows) {
         // Check age-based deletion
@@ -506,7 +560,7 @@ export class SqliteMemoryStore {
     if (prefix) {
       const prefixRows = this.db.prepare(`
         SELECT * FROM memories WHERE key LIKE ? ESCAPE '\\' AND key != ? LIMIT ?
-      `).all(`${escapeLike(prefix)}%`, key, limit) as any[];
+      `).all(`${escapeLike(prefix)}%`, key, limit) as MemoryRow[];
       for (const r of prefixRows) {
         if (!similarKeys.has(r.key)) {
           similarKeys.add(r.key);
@@ -525,7 +579,7 @@ export class SqliteMemoryStore {
         GROUP BY m.key
         ORDER BY COUNT(mt.tag) DESC
         LIMIT ?
-      `).all(...tags, key, limit - results.length) as any[];
+      `).all(...tags, key, limit - results.length) as MemoryRow[];
       for (const r of tagRows) {
         if (!similarKeys.has(r.key)) {
           similarKeys.add(r.key);
@@ -599,7 +653,7 @@ export class SqliteMemoryStore {
   listConversationIndices(limit: number = 50): ConversationIndexEntry[] {
     const rows = this.db.prepare(`
       SELECT * FROM conversation_indices ORDER BY timestamp DESC LIMIT ?
-    `).all(limit) as any[];
+    `).all(limit) as ConversationIndexRow[];
     return rows.map(r => this.rowToIndexEntry(r));
   }
 
@@ -612,7 +666,7 @@ export class SqliteMemoryStore {
       SELECT * FROM conversation_indices
       WHERE title LIKE ? ESCAPE '\\' OR topics LIKE ? ESCAPE '\\'
       ORDER BY timestamp DESC LIMIT ?
-    `).all(likeQuery, likeQuery, limit) as any[];
+    `).all(likeQuery, likeQuery, limit) as ConversationIndexRow[];
     return rows.map(r => this.rowToIndexEntry(r));
   }
 
@@ -628,13 +682,13 @@ export class SqliteMemoryStore {
    * Count conversation indices.
    */
   countConversationIndices(): number {
-    const row = this.db.prepare("SELECT COUNT(*) as cnt FROM conversation_indices").get() as any;
+    const row = this.db.prepare("SELECT COUNT(*) as cnt FROM conversation_indices").get() as CountRow;
     return row?.cnt ?? 0;
   }
 
   // ── Helpers ──
 
-  private rowToEntry(row: any): MemoryEntry {
+  private rowToEntry(row: MemoryRow): MemoryEntry {
     const tags = this.db.prepare(
       "SELECT tag FROM memory_tags WHERE memory_key = ?"
     ).all(row.key) as { tag: string }[];
@@ -665,7 +719,7 @@ export class SqliteMemoryStore {
     return words.map((w) => `"${w.replace(/"/g, "")}"`).join(" OR ");
   }
 
-  private rowToIndexEntry(row: any): ConversationIndexEntry {
+  private rowToIndexEntry(row: ConversationIndexRow): ConversationIndexEntry {
     let topics: string[] = [];
     try {
       topics = JSON.parse(row.topics ?? "[]");

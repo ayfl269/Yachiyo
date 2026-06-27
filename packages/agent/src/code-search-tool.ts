@@ -90,7 +90,7 @@ async function searchSymbols(
     let entries;
     try {
       entries = await readdir(dir, { withFileTypes: true });
-    } catch { return; }
+    } catch (e) { console.warn(`[code-search] readdir failed for ${dir}:`, e); return; }
 
     for (const entry of entries) {
       if (results.length >= options.resultLimit) return;
@@ -146,7 +146,7 @@ async function searchSymbols(
               });
             }
           }
-        } catch { /* skip unreadable files */ }
+        } catch (e) { console.debug(`[code-search] skipping unreadable file:`, e); }
       }
     }
   }

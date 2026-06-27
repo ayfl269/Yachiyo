@@ -2,16 +2,22 @@ import { PipelineStage, registerStage } from "../stage.js";
 import type { PipelineContext } from "../context.js";
 import type { MessageEvent } from "@yachiyo/message/event.js";
 import { EventResult, ResultContentType } from "@yachiyo/message/event-result.js";
-import { ComponentType, type ImageComponent, type RecordComponent } from "@yachiyo/message/components.js";
+import { ComponentType, type ImageComponent, type RecordComponent, type PlainComponent } from "@yachiyo/message/components.js";
 import type { MessageChain } from "@yachiyo/agent/types.js";
 import type { ProviderType } from "@yachiyo/provider/types.js";
 import type { ToolLoopAgentRunner } from "@yachiyo/agent/runners/tool-loop-agent-runner.js";
+import type { RunAgentResult } from "@yachiyo/agent/agent-runner.js";
 import { EventType } from "@yachiyo/plugin/event-type.js";
 import type { StarHandlerMetadata } from "@yachiyo/plugin/handler.js";
 import type { ProviderStat } from "@yachiyo/conversation/store.js";
 import { registerActiveRunner, unregisterActiveRunner } from "../follow-up.js";
 import { buildSkillsPrompt } from "@yachiyo/skill/manager.js";
 import { EstimateTokenCounter } from "@yachiyo/agent/context/token-counter.js";
+
+/** Build a typed PlainComponent without duplicating the text or using `as any`. */
+function plainText(text: string): PlainComponent {
+  return { type: ComponentType.Plain, text, toDict: () => ({ type: "text", data: { text } }) };
+}
 
 @registerStage
 export class ProcessStage extends PipelineStage {
@@ -75,11 +81,7 @@ export class ProcessStage extends PipelineStage {
         const buildResult = await this.buildAgent(event, systemPrompt);
       if (!buildResult) {
         console.warn("[ProcessStage] buildAgent returned null - no provider available");
-        await event.send([{
-          type: ComponentType.Plain,
-          text: "抱歉，当前没有可用的模型来处理您的消息，请检查 Provider 配置。",
-          toDict() { return { type: "text", data: { text: "抱歉，当前没有可用的模型来处理您的消息，请检查 Provider 配置。" } }; },
-        } as any]);
+        await event.send([plainText("抱歉，当前没有可用的模型来处理您的消息，请检查 Provider 配置。")]);
         return;
       }
 
@@ -120,49 +122,7 @@ export class ProcessStage extends PipelineStage {
             // Record provider token stats after agent run completes
             await this.recordTokenStats(agentRunner);
 
-            if (runResult.finalResponse) {
-              const respText = runResult.finalResponse.completionText ?? (runResult.finalResponse.resultChain?.message ?? "");
-              // If finalResponse has no text, fall back to collected chains (e.g. fallback empty-response message)
-              const chainText = respText || runResult.chains
-                .filter(c => c.type === "text" && c.message)
-                .map(c => c.message)
-                .join("");
-              const assistantText = chainText || respText;
-              if (runResult.finalResponse.role === "err") {
-                event.setResult(
-                  new EventResult()
-                    .setResultContentType(ResultContentType.LLM_RESULT)
-                    .plain(assistantText)
-                );
-              } else {
-                await this.saveAssistantMessage(umo, convId, assistantText);
-                event.setResult(
-                  new EventResult()
-                    .setResultContentType(ResultContentType.LLM_RESULT)
-                    .plain(assistantText)
-                );
-                // Cache assistant text before yield — respond stage will clearResult()
-                event.setExtra("_cachedAssistantText", assistantText);
-              }
-            } else {
-              // No finalResponse — try to use collected chains as fallback
-              const chainText = runResult.chains
-                .filter(c => c.type === "text" && c.message)
-                .map(c => c.message)
-                .join("");
-              if (chainText) {
-                await this.saveAssistantMessage(umo, convId, chainText);
-                event.setResult(
-                  new EventResult()
-                    .setResultContentType(ResultContentType.LLM_RESULT)
-                    .plain(chainText)
-                );
-                // Cache assistant text before yield — respond stage will clearResult()
-                event.setExtra("_cachedAssistantText", chainText);
-              } else {
-                console.warn("[ProcessStage] No final response from agent!");
-              }
-            }
+            await this.applyNonStreamingResult(event, runResult, umo, convId);
             yield;
           }
         } finally {
@@ -177,12 +137,69 @@ export class ProcessStage extends PipelineStage {
         releaseLock();
       }
     } catch (e) {
-      const errMsg = e instanceof Error ? e.message : String(e);
-      await event.send([
-        { type: ComponentType.Plain, text: `Error: ${errMsg}`, toDict() { return { type: "text", data: { text: errMsg } }; } } as import("@yachiyo/message/components.js").MessageComponent
-      ]);
+      // Log the full error server-side for diagnostics; send the user a
+      // generic message so internal details (file paths, hostnames, SQL
+      // fragments, stack traces) cannot leak through the chat reply.
+      console.error("[ProcessStage] Pipeline error:", e);
+      await event.send([plainText("抱歉，处理您的消息时发生了内部错误，请稍后重试。")]);
     } finally {
       try { await event.stopTyping(); } catch { /* ignore */ }
+    }
+  }
+
+  /**
+   * Apply the non-streaming agent run result to the event: choose the
+   * assistant text from `finalResponse` (preferred) or fall back to the
+   * collected `chains`, persist it to conversation history, set the
+   * `EventResult`, and cache the text so {@link recordConversationToMemory}
+   * can still see it after `respond` clears the result.
+   */
+  private async applyNonStreamingResult(
+    event: MessageEvent,
+    runResult: RunAgentResult,
+    umo: string,
+    convId: string,
+  ): Promise<void> {
+    if (runResult.finalResponse) {
+      const respText = runResult.finalResponse.completionText
+        ?? (runResult.finalResponse.resultChain?.message ?? "");
+      const chainText = respText || runResult.chains
+        .filter(c => c.type === "text" && c.message)
+        .map(c => c.message)
+        .join("");
+      const assistantText = chainText || respText;
+      if (runResult.finalResponse.role === "err") {
+        // Don't persist error responses as assistant history.
+        event.setResult(
+          new EventResult()
+            .setResultContentType(ResultContentType.LLM_RESULT)
+            .plain(assistantText)
+        );
+      } else {
+        await this.saveAssistantMessage(umo, convId, assistantText);
+        event.setResult(
+          new EventResult()
+            .setResultContentType(ResultContentType.LLM_RESULT)
+            .plain(assistantText)
+        );
+        event.setExtra("_cachedAssistantText", assistantText);
+      }
+    } else {
+      const chainText = runResult.chains
+        .filter(c => c.type === "text" && c.message)
+        .map(c => c.message)
+        .join("");
+      if (chainText) {
+        await this.saveAssistantMessage(umo, convId, chainText);
+        event.setResult(
+          new EventResult()
+            .setResultContentType(ResultContentType.LLM_RESULT)
+            .plain(chainText)
+        );
+        event.setExtra("_cachedAssistantText", chainText);
+      } else {
+        console.warn("[ProcessStage] No final response from agent!");
+      }
     }
   }
 

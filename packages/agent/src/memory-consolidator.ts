@@ -618,7 +618,11 @@ ${bufferTexts.join("\n")}
   /** 安全执行 consolidate，捕获异常不影响定时器，防止并发 */
   private async runConsolidateSafe(): Promise<void> {
     if (this.consolidating) {
-      this.scheduleNextCheck(60000); // 忙碌中，1 分钟后再试
+      // Another consolidation is in progress. Its `finally` block will
+      // reschedule the next check, so we must NOT schedule here — doing so
+      // would create a competing timer that fires before the in-flight run
+      // completes (the previous code called scheduleNextCheck(60000) here,
+      // which was redundant and fragile).
       return;
     }
 

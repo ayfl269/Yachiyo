@@ -10,6 +10,10 @@ export class RateLimitStage extends PipelineStage {
   private strategy: "STALL" | "DISCARD" = "DISCARD";
   private counters: Map<string, { count: number; windowStart: number }> = new Map();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
+  /** Number of events currently blocked in the STALL strategy. */
+  private pendingStallCount: number = 0;
+  /** Max concurrent stalls before excess events are discarded (memory guard). */
+  private readonly maxPendingStall: number = 256;
 
   async initialize(ctx: PipelineContext): Promise<void> {
     this.rateLimitEnabled = ctx.config.rateLimitEnabled ?? false;
@@ -54,8 +58,20 @@ export class RateLimitStage extends PipelineStage {
       if (this.strategy === "DISCARD") {
         event.stopEvent();
       } else {
+        // Guard against unbounded memory growth: if too many events are
+        // already waiting, discard excess instead of blocking them.
+        if (this.pendingStallCount >= this.maxPendingStall) {
+          console.warn(`[RateLimitStage] STALL queue full (${this.pendingStallCount}/${this.maxPendingStall}), discarding event`);
+          event.stopEvent();
+          return;
+        }
         const waitMs = this.windowSeconds * 1000 - (now - counter.windowStart);
-        await new Promise(resolve => setTimeout(resolve, waitMs));
+        this.pendingStallCount++;
+        try {
+          await new Promise(resolve => setTimeout(resolve, waitMs));
+        } finally {
+          this.pendingStallCount--;
+        }
       }
     }
   }

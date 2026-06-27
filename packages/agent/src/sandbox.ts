@@ -524,7 +524,7 @@ public class JobObjectHelper {
 }
 '@
 
-$hJob = [JobObjectHelper]::CreateSandboxJob(${cfg.memoryLimitBytes ?? 0}, ${cfg.maxProcesses ?? 0}, $${cfg.killOnClose !== false ? "true" : "false"}, ${cfg.cpuRateWeight ?? 0})
+$hJob = [JobObjectHelper]::CreateSandboxJob(${cfg.memoryLimitBytes ?? 0}, ${cfg.maxProcesses ?? 0}, ${cfg.killOnClose !== false ? "$true" : "$false"}, ${cfg.cpuRateWeight ?? 0})
 
 try {
     $procInfo = Start-Process -FilePath '${escapedCommand}' -ArgumentList ${argsArrayLiteral} -PassThru -NoNewWindow${cfg.workingDir ? ` -WorkingDirectory '${cfg.workingDir.replace(/'/g, "''")}'` : ""}

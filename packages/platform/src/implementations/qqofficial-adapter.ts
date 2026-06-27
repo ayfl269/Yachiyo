@@ -289,6 +289,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
   private lastSeq: number | null = null;
   private reconnectAttempts: number = 0;
   private maxReconnectAttempts: number = 10;
+  private msgSeqCounter: number = 0;
 
   constructor(config: QQOfficialAdapterConfig, eventQueue: AsyncQueue<MessageEvent>) {
     super(config as unknown as Record<string, unknown>, eventQueue);
@@ -328,13 +329,13 @@ export class QQOfficialAdapter extends PlatformAdapter {
     }
 
     if (this.ws) {
-      try { this.ws.close(); } catch { /* ignore */ }
+      try { this.ws.close(); } catch (e) { console.warn(`[QQOfficial] ws.close() failed:`, e); }
       this.ws = null;
     }
 
     try {
       await super.stop();
-    } catch { /* ignore */ }
+    } catch (e) { console.warn(`[QQOfficial] super.stop() failed:`, e); }
   }
 
   meta(): PlatformMetadata {
@@ -829,9 +830,10 @@ export class QQOfficialAdapter extends PlatformAdapter {
     };
   }
 
-  /** Generate a random msg_seq for rate limit tracking */
-  private randomMsgSeq(): number {
-    return Math.floor(Math.random() * 100000) + 1;
+  /** Generate a monotonic msg_seq for idempotency tracking (QQ dedupes within 5s). */
+  private nextMsgSeq(): number {
+    this.msgSeqCounter = (this.msgSeqCounter + 1) % 1000000;
+    return this.msgSeqCounter;
   }
 
   /** Send group message via REST API */
@@ -841,7 +843,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
       content,
       msg_type: 0,
       msg_id: eventId,
-      msg_seq: this.randomMsgSeq(),
+      msg_seq: this.nextMsgSeq(),
     });
 
     const response = await fetch(url, {
@@ -863,7 +865,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
       content,
       msg_type: 0,
       msg_id: eventId,
-      msg_seq: this.randomMsgSeq(),
+      msg_seq: this.nextMsgSeq(),
     });
 
     const response = await fetch(url, {

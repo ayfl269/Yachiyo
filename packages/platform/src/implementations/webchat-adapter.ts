@@ -9,7 +9,7 @@ import { PlatformMessage } from "@yachiyo/message/platform-message.js";
 import { MessageType } from "@yachiyo/message/types.js";
 import { generateId } from "@yachiyo/common/id-generator.js";
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "http";
-import { timingSafeEqual, createHash } from "crypto";
+import { timingSafeEqual, createHash, randomUUID } from "crypto";
 
 export interface WebChatConfig {
   id: string;
@@ -366,7 +366,7 @@ export class WebChatAdapter extends PlatformAdapter {
       return;
     }
 
-    const sessionId = parsed.session_id ?? `webchat_${Date.now()}`;
+    const sessionId = parsed.session_id ?? `webchat_${randomUUID()}`;
     const userId = parsed.user_id ?? "webchat_user";
     const userName = parsed.user_name ?? "WebChatUser";
 

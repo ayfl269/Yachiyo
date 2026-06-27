@@ -1327,7 +1327,7 @@ export class DashboardServer {
           // Use POST /api/providers/models with a JSON body for the "type a new
           // key and fetch models" scenario instead.
           const sqliteStore = (this.ctx.providerManager as any).sqliteStore;
-          let providerConfig = this.ctx.providerManager.getProviderConfigById(sourceId, true);
+          let providerConfig = this.ctx.providerManager.getProviderConfigById(sourceId, true, true);
 
           if (!providerConfig && sqliteStore) {
             try {
@@ -1747,7 +1747,7 @@ export class DashboardServer {
       }
 
       try {
-        const providerConfig = this.ctx.providerManager.getProviderConfigById(providerId, true);
+        const providerConfig = this.ctx.providerManager.getProviderConfigById(providerId, true, true);
         if (!providerConfig) {
           res.writeHead(200);
           res.end(JSON.stringify({ status: "ok", data: { error: `提供商 ${providerId} 不存在` } }));

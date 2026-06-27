@@ -74,6 +74,48 @@ export const KNOWLEDGE_MIGRATIONS: Migration[] = [
   },
 ];
 
+// ── Row Types ──
+
+/** Row type for the knowledge_bases table. */
+interface KbMetadataRow {
+  id: string;
+  name: string;
+  description: string;
+  emoji: string;
+  embedding_provider_id: string;
+  rerank_provider_id: string | null;
+  chunk_size: number;
+  chunk_overlap: number;
+  top_k_dense: number;
+  top_k_sparse: number;
+  top_m_final: number;
+  created_at: string;
+}
+
+/** Row type for the kb_documents table. */
+interface KbDocumentRow {
+  id: string;
+  kb_id: string;
+  name: string;
+  url: string | null;
+  type: string;
+  chunk_count: number;
+  created_at: number;
+}
+
+/** Row type for SELECT chunk_id, embedding, content, doc_name FROM kb_vectors. */
+interface KbVectorRow {
+  chunk_id: string;
+  embedding: Buffer;
+  content: string;
+  doc_name: string;
+}
+
+/** Row type for COUNT(*) as cnt queries. */
+interface CountRow {
+  cnt: number;
+}
+
 // ── KB Metadata Store ──
 
 export class SqliteKBMetadataStore {
@@ -99,17 +141,17 @@ export class SqliteKBMetadataStore {
   }
 
   getKb(id: string): KnowledgeBase | null {
-    const row = this.db.prepare("SELECT * FROM knowledge_bases WHERE id = ?").get(id) as any;
+    const row = this.db.prepare("SELECT * FROM knowledge_bases WHERE id = ?").get(id) as KbMetadataRow;
     return row ? this.rowToKb(row) : null;
   }
 
   getKbByName(name: string): KnowledgeBase | null {
-    const row = this.db.prepare("SELECT * FROM knowledge_bases WHERE name = ?").get(name) as any;
+    const row = this.db.prepare("SELECT * FROM knowledge_bases WHERE name = ?").get(name) as KbMetadataRow;
     return row ? this.rowToKb(row) : null;
   }
 
   getAllKbs(): KnowledgeBase[] {
-    const rows = this.db.prepare("SELECT * FROM knowledge_bases ORDER BY name").all() as any[];
+    const rows = this.db.prepare("SELECT * FROM knowledge_bases ORDER BY name").all() as KbMetadataRow[];
     return rows.map((r) => this.rowToKb(r));
   }
 
@@ -127,7 +169,7 @@ export class SqliteKBMetadataStore {
   }
 
   getDocumentsByKb(kbId: string): KBDocument[] {
-    const rows = this.db.prepare("SELECT * FROM kb_documents WHERE kb_id = ?").all(kbId) as any[];
+    const rows = this.db.prepare("SELECT * FROM kb_documents WHERE kb_id = ?").all(kbId) as KbDocumentRow[];
     return rows.map((r) => this.rowToDoc(r));
   }
 
@@ -158,7 +200,7 @@ export class SqliteKBMetadataStore {
 
   // ── Helpers ──
 
-  private rowToKb(row: any): KnowledgeBase {
+  private rowToKb(row: KbMetadataRow): KnowledgeBase {
     return {
       id: row.id,
       name: row.name,
@@ -174,7 +216,7 @@ export class SqliteKBMetadataStore {
     };
   }
 
-  private rowToDoc(row: any): KBDocument {
+  private rowToDoc(row: KbDocumentRow): KBDocument {
     return {
       id: row.id,
       kbId: row.kb_id,
@@ -276,7 +318,7 @@ export class SqliteVectorStore extends VectorStore {
 
     const rows = (kbId
       ? this.db.prepare(sql).all(kbId, MAX_SCAN_ROWS)
-      : this.db.prepare(sql).all(MAX_SCAN_ROWS)) as any[];
+      : this.db.prepare(sql).all(MAX_SCAN_ROWS)) as KbVectorRow[];
 
     const queryArr = new Float32Array(queryEmbedding);
     const len = queryArr.length;
@@ -351,10 +393,10 @@ export class SqliteVectorStore extends VectorStore {
 
   async count(kbId?: string): Promise<number> {
     if (!kbId) {
-      const row = this.db.prepare("SELECT COUNT(*) as cnt FROM kb_vectors").get() as any;
+      const row = this.db.prepare("SELECT COUNT(*) as cnt FROM kb_vectors").get() as CountRow;
       return row?.cnt ?? 0;
     }
-    const row = this.db.prepare("SELECT COUNT(*) as cnt FROM kb_vectors WHERE kb_id = ?").get(kbId) as any;
+    const row = this.db.prepare("SELECT COUNT(*) as cnt FROM kb_vectors WHERE kb_id = ?").get(kbId) as CountRow;
     return row?.cnt ?? 0;
   }
 }

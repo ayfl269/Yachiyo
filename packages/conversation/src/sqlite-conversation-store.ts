@@ -148,6 +148,113 @@ export const CHAT_MIGRATIONS: Migration[] = [
   },
 ];
 
+// ── Row Types ──
+
+/** Row type for the conversations table. */
+interface ConversationRow {
+  id: string;
+  unified_msg_origin: string;
+  persona_id: string | null;
+  history: string;
+  platform_id: string;
+  title: string;
+  token_usage: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Row type for the platform_message_history table. */
+interface PlatformMessageHistoryRow {
+  id: string;
+  platform_id: string;
+  user_id: string;
+  sender_id: string;
+  sender_name: string;
+  content: string;
+  llm_checkpoint_id: string | null;
+  created_at: string;
+}
+
+/** Row type for the webchat_threads table. */
+interface WebchatThreadRow {
+  id: string;
+  session_id: string;
+  title: string;
+  created_at: string;
+}
+
+/** Row type for the attachments table. */
+interface AttachmentRow {
+  id: string;
+  url: string;
+  name: string;
+  size: number;
+  type: string;
+  created_at: string;
+}
+
+/** Row type for the api_keys table. */
+interface ApiKeyRow {
+  id: string;
+  key_hash: string;
+  key_prefix: string;
+  name: string;
+  scopes: string | null;
+  created_by: string;
+  created_at: string;
+  last_used_at: string | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+}
+
+/** Row type for the preferences table. */
+interface PreferenceRow {
+  key: string;
+  value: string;
+  namespace: string;
+}
+
+/** Row type for the command_configs table. */
+interface CommandConfigRow {
+  command_name: string;
+  config: string;
+}
+
+/** Row type for the platform_sessions table. */
+interface PlatformSessionRow {
+  id: string;
+  platform_id: string;
+  session_id: string;
+  provider_id: string | null;
+  persona_id: string | null;
+  config: string;
+  created_at: string;
+}
+
+/** Row type for the provider_stats table. */
+interface ProviderStatRow {
+  id: string;
+  provider_id: string;
+  model: string;
+  token_input_other: number;
+  token_input_cached: number;
+  token_output: number;
+  start_time: number;
+  end_time: number;
+  time_to_first_token: number;
+  created_at: string;
+}
+
+/** Row type for SELECT conversation_id FROM session_conversations. */
+interface SessionConversationRow {
+  conversation_id: string;
+}
+
+/** Row type for COUNT(*) as cnt queries. */
+interface CountRow {
+  cnt: number;
+}
+
 // ── SqliteConversationStore ──
 
 export class SqliteConversationStore extends ConversationStore {
@@ -187,12 +294,12 @@ export class SqliteConversationStore extends ConversationStore {
   }
 
   async getConversationById(id: string): Promise<ConversationRecord | null> {
-    const row = this.db.prepare("SELECT * FROM conversations WHERE id = ?").get(id) as any;
+    const row = this.db.prepare("SELECT * FROM conversations WHERE id = ?").get(id) as ConversationRow;
     return row ? this.rowToConversation(row) : null;
   }
 
   async getAllConversations(): Promise<ConversationRecord[]> {
-    const rows = this.db.prepare("SELECT * FROM conversations ORDER BY updated_at DESC").all() as any[];
+    const rows = this.db.prepare("SELECT * FROM conversations ORDER BY updated_at DESC").all() as ConversationRow[];
     return rows.map((r) => this.rowToConversation(r));
   }
 
@@ -220,7 +327,7 @@ export class SqliteConversationStore extends ConversationStore {
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
     // Count total
-    const countRow = this.db.prepare(`SELECT COUNT(*) as cnt FROM conversations ${where}`).get(...params) as any;
+    const countRow = this.db.prepare(`SELECT COUNT(*) as cnt FROM conversations ${where}`).get(...params) as CountRow;
     const total: number = countRow?.cnt ?? 0;
 
     // Paginate
@@ -230,7 +337,7 @@ export class SqliteConversationStore extends ConversationStore {
 
     const rows = this.db.prepare(
       `SELECT * FROM conversations ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`
-    ).all(...params, pageSize, offset) as any[];
+    ).all(...params, pageSize, offset) as ConversationRow[];
 
     return [rows.map((r) => this.rowToConversation(r)), total];
   }
@@ -289,7 +396,7 @@ export class SqliteConversationStore extends ConversationStore {
       SELECT * FROM platform_message_history
       WHERE platform_id = ? AND user_id = ?
       ORDER BY created_at DESC LIMIT ?
-    `).all(options.platformId, options.userId, limit) as any[];
+    `).all(options.platformId, options.userId, limit) as PlatformMessageHistoryRow[];
 
     return rows.reverse().map((r) => ({
       id: r.id,
@@ -307,12 +414,12 @@ export class SqliteConversationStore extends ConversationStore {
     if (options?.since) {
       const row = this.db.prepare(
         `SELECT COUNT(*) as cnt FROM conversations, json_each(history) WHERE json_extract(value, '$.role') = 'user' AND updated_at >= ?`
-      ).get(options.since.toISOString()) as any;
+      ).get(options.since.toISOString()) as CountRow;
       return row?.cnt ?? 0;
     }
     const row = this.db.prepare(
       `SELECT COUNT(*) as cnt FROM conversations, json_each(history) WHERE json_extract(value, '$.role') = 'user'`
-    ).get() as any;
+    ).get() as CountRow;
     return row?.cnt ?? 0;
   }
 
@@ -326,7 +433,7 @@ export class SqliteConversationStore extends ConversationStore {
   }
 
   async getWebchatThread(threadId: string): Promise<WebchatThread | null> {
-    const row = this.db.prepare("SELECT * FROM webchat_threads WHERE id = ?").get(threadId) as any;
+    const row = this.db.prepare("SELECT * FROM webchat_threads WHERE id = ?").get(threadId) as WebchatThreadRow;
     if (!row) return null;
     return { id: row.id, sessionId: row.session_id, title: row.title, createdAt: new Date(row.created_at) };
   }
@@ -345,7 +452,7 @@ export class SqliteConversationStore extends ConversationStore {
   }
 
   async getAttachment(id: string): Promise<Attachment | null> {
-    const row = this.db.prepare("SELECT * FROM attachments WHERE id = ?").get(id) as any;
+    const row = this.db.prepare("SELECT * FROM attachments WHERE id = ?").get(id) as AttachmentRow;
     if (!row) return null;
     return { id: row.id, url: row.url, name: row.name, size: row.size, type: row.type, createdAt: new Date(row.created_at) };
   }
@@ -372,12 +479,12 @@ export class SqliteConversationStore extends ConversationStore {
   }
 
   async listApiKeys(): Promise<ApiKey[]> {
-    const rows = this.db.prepare("SELECT * FROM api_keys ORDER BY created_at DESC").all() as any[];
+    const rows = this.db.prepare("SELECT * FROM api_keys ORDER BY created_at DESC").all() as ApiKeyRow[];
     return rows.map((r) => this.rowToApiKey(r));
   }
 
   async getApiKeyByHash(keyHash: string): Promise<ApiKey | null> {
-    const row = this.db.prepare("SELECT * FROM api_keys WHERE key_hash = ?").get(keyHash) as any;
+    const row = this.db.prepare("SELECT * FROM api_keys WHERE key_hash = ?").get(keyHash) as ApiKeyRow;
     return row ? this.rowToApiKey(row) : null;
   }
 
@@ -394,7 +501,7 @@ export class SqliteConversationStore extends ConversationStore {
   }
 
   async getPreference(key: string): Promise<Preference | null> {
-    const row = this.db.prepare("SELECT * FROM preferences WHERE key = ?").get(key) as any;
+    const row = this.db.prepare("SELECT * FROM preferences WHERE key = ?").get(key) as PreferenceRow;
     if (!row) return null;
     return { key: row.key, value: row.value, namespace: row.namespace };
   }
@@ -406,7 +513,7 @@ export class SqliteConversationStore extends ConversationStore {
   // === Command Config ===
 
   async getCommandConfig(commandName: string): Promise<CommandConfig | null> {
-    const row = this.db.prepare("SELECT * FROM command_configs WHERE command_name = ?").get(commandName) as any;
+    const row = this.db.prepare("SELECT * FROM command_configs WHERE command_name = ?").get(commandName) as CommandConfigRow;
     if (!row) return null;
     return { commandName: row.command_name, config: JSON.parse(row.config) };
   }
@@ -435,7 +542,7 @@ export class SqliteConversationStore extends ConversationStore {
   }
 
   async getPlatformSession(sessionId: string): Promise<PlatformSession | null> {
-    const row = this.db.prepare("SELECT * FROM platform_sessions WHERE session_id = ?").get(sessionId) as any;
+    const row = this.db.prepare("SELECT * FROM platform_sessions WHERE session_id = ?").get(sessionId) as PlatformSessionRow;
     if (!row) return null;
     return {
       id: row.id,
@@ -509,7 +616,7 @@ export class SqliteConversationStore extends ConversationStore {
         ORDER BY created_at DESC
         LIMIT ?
       `).all(limit);
-    return (rows as any[]).map(row => this.rowToProviderStat(row));
+    return (rows as ProviderStatRow[]).map(row => this.rowToProviderStat(row));
   }
 
   // === Session Conversations ===
@@ -525,7 +632,7 @@ export class SqliteConversationStore extends ConversationStore {
   async getSessionConversation(umo: string): Promise<string | null> {
     const row = this.db.prepare(
       "SELECT conversation_id FROM session_conversations WHERE unified_msg_origin = ?"
-    ).get(umo) as any;
+    ).get(umo) as SessionConversationRow;
     return row?.conversation_id ?? null;
   }
 
@@ -535,7 +642,7 @@ export class SqliteConversationStore extends ConversationStore {
 
   // ── Row Mapping Helpers ──
 
-  private rowToProviderStat(row: any): ProviderStat {
+  private rowToProviderStat(row: ProviderStatRow): ProviderStat {
     return {
       id: row.id,
       providerId: row.provider_id,
@@ -550,7 +657,7 @@ export class SqliteConversationStore extends ConversationStore {
     };
   }
 
-  private rowToConversation(row: any): ConversationRecord {
+  private rowToConversation(row: ConversationRow): ConversationRecord {
     return {
       id: row.id,
       unifiedMsgOrigin: row.unified_msg_origin,
@@ -564,7 +671,7 @@ export class SqliteConversationStore extends ConversationStore {
     };
   }
 
-  private rowToApiKey(row: any): ApiKey {
+  private rowToApiKey(row: ApiKeyRow): ApiKey {
     return {
       id: row.id,
       keyHash: row.key_hash,

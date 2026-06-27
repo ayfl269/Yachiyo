@@ -13,11 +13,15 @@ export abstract class ContentSafetyStrategy {
   abstract check(content: string): ContentSafetyCheckResult;
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export class KeywordsStrategy extends ContentSafetyStrategy {
   private keywords: RegExp[];
   constructor(keywords: string[]) {
     super();
-    this.keywords = keywords.map(kw => new RegExp(kw, "i"));
+    this.keywords = keywords.map(kw => new RegExp(escapeRegExp(kw), "i"));
   }
   check(content: string): ContentSafetyCheckResult {
     for (const regex of this.keywords) {

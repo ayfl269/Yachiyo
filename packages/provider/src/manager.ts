@@ -308,14 +308,35 @@ export class ProviderManager {
 
   /**
    * Get a provider's configuration by ID.
+   *
+   * @param includeSecrets - When false (default), sensitive fields
+   *   (apiKey, apiSecret, secretKey, token, …) are replaced with `"***"`
+   *   so that logging or serializing the result cannot leak credentials.
+   *   Pass `true` only when the secrets are actually needed (e.g. to make
+   *   an upstream API call).
    */
-  getProviderConfigById(providerId: string, merged?: boolean): Record<string, unknown> | null {
+  getProviderConfigById(providerId: string, merged?: boolean, includeSecrets?: boolean): Record<string, unknown> | null {
     const config = this.providerConfigs.get(providerId);
     if (!config) return null;
-    if (merged) {
-      return this.getMergedProviderConfig(config);
+    const result = merged ? this.getMergedProviderConfig(config) : { ...config };
+    return includeSecrets ? result : ProviderManager.redactSecrets(result);
+  }
+
+  private static readonly SECRET_KEYS = new Set([
+    "apiKey", "api_key", "apiSecret", "api_secret", "secretKey", "secret_key",
+    "secret", "token", "accessToken", "access_token", "refreshToken", "refresh_token",
+    "password", "passwd",
+  ]);
+
+  /** Return a shallow copy of `config` with secret fields masked as `"***"`. */
+  static redactSecrets(config: Record<string, unknown>): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(config)) {
+      out[k] = ProviderManager.SECRET_KEYS.has(k) && typeof v === "string" && v.length > 0
+        ? "***"
+        : v;
     }
-    return { ...config };
+    return out;
   }
 
   // ── Lifecycle: Initialize / Terminate ──

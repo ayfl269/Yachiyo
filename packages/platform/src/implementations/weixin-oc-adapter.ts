@@ -350,13 +350,13 @@ class WeixinOCEvent extends MessageEvent {
   async sendTyping(): Promise<void> {
     try {
       await this.adapter.startTyping(this.targetUserId, "event");
-    } catch { /* ignore */ }
+    } catch (e) { console.warn(`[WeixinOC] startTyping failed:`, e); }
   }
 
   async stopTyping(): Promise<void> {
     try {
       await this.adapter.stopTyping(this.targetUserId, "event");
-    } catch { /* ignore */ }
+    } catch (e) { console.warn(`[WeixinOC] stopTyping failed:`, e); }
   }
 
   private extractPlainText(components: MessageComponent[]): string {
@@ -434,8 +434,12 @@ export class WeixinOCAdapter extends PlatformAdapter {
     this._status = "running";
     this.shutdownRequested = false;
 
-    // Run the main loop in the background (non-blocking, like QQOfficial adapter)
+    // Run the main loop in the background (non-blocking, like QQOfficial adapter).
+    // An outer recovery loop ensures the adapter does not die silently if an
+    // unexpected error escapes the inner try/catch blocks — it logs, waits,
+    // and re-enters the loop instead of leaving _status = "error" forever.
     (async () => {
+    while (!this.shutdownRequested) {
       try {
         while (!this.shutdownRequested) {
         if (!this.token) {
@@ -493,8 +497,12 @@ export class WeixinOCAdapter extends PlatformAdapter {
       }
     } catch (e: unknown) {
       console.error(`[WeixinOC] Run loop crashed:`, e);
-      this._status = "error";
+      if (this.shutdownRequested) break;
+      console.info(`[WeixinOC] Attempting recovery in 10s...`);
+      await this.sleep(10000);
     }
+    }
+    if (this._status === "running") this._status = "stopped";
     })();
   }
 
@@ -504,7 +512,7 @@ export class WeixinOCAdapter extends PlatformAdapter {
 
     try {
       await super.stop();
-    } catch { /* ignore */ }
+    } catch (e) { console.warn(`[WeixinOC] super.stop() failed:`, e); }
   }
 
   meta(): PlatformMetadata {
@@ -963,6 +971,10 @@ export class WeixinOCAdapter extends PlatformAdapter {
           if (state) state.refreshAfter = 0;
         }
       }, this.typingKeepaliveInterval);
+      // Allow the Node.js process to exit even if this keepalive timer is active
+      if (typeof state.keepaliveTimer === "object" && "unref" in state.keepaliveTimer) {
+        state.keepaliveTimer.unref();
+      }
     }
   }
 
@@ -979,14 +991,16 @@ export class WeixinOCAdapter extends PlatformAdapter {
       state.keepaliveTimer = null;
     }
 
-    // Send cancel typing after a brief delay
+    // Send cancel typing after a brief debounce. startTyping() clears this
+    // timer, so a real delay (rather than 0ms) ensures that a rapid
+    // stop→start cycle cancels the stop indicator instead of racing it.
     if (state.ticket) {
       const ticket = state.ticket;
       state.cancelTimer = setTimeout(async () => {
         try {
           await this.sendTypingState(userId, ticket, true);
-        } catch { /* ignore */ }
-      }, 0);
+        } catch (e) { console.warn(`[WeixinOC] cancel typing failed for ${userId}:`, e); }
+      }, 300);
     }
   }
 
