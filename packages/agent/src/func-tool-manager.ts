@@ -1,8 +1,8 @@
 import type { FunctionTool, ToolHandler } from "./tool.js";
 import { ToolSet, createFunctionTool } from "./tool.js";
-import type { MCPClient, MCPToolDefinition } from "./mcp-client.js";
-import { createMCPTool, type MCPToolInstance } from "./mcp-tool.js";
-import type { CallToolResult, Provider } from "./types.js";
+import type { MCPClient } from "./mcp-client.js";
+import { type MCPToolInstance } from "./mcp-tool.js";
+import type { Provider } from "./types.js";
 
 export interface BuiltinToolConstructor {
   new (): FunctionTool;

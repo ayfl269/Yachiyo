@@ -61,12 +61,6 @@ const ITEM_TYPE = {
   VIDEO: 5,
 } as const;
 
-const UPLOAD_MEDIA_TYPE = {
-  IMAGE: 1,
-  VIDEO: 2,
-  FILE: 3,
-} as const;
-
 const SESSION_TIMEOUT_ERRCODE = -14;
 
 // ── AES-ECB Helpers ──
@@ -96,16 +90,14 @@ function aesEcbDecrypt(cipher: Buffer, key: Buffer): Buffer {
   return pkcs7Unpad(Buffer.concat([decipher.update(cipher), decipher.final()]));
 }
 
-function aesPaddedSize(size: number): number {
-  return size + (16 - (size % 16) || 16);
-}
-
 function parseMediaAesKey(aesKeyValue: string): Buffer {
   const normalized = aesKeyValue.trim();
   if (!normalized) throw new Error("empty media aes key");
 
-  // Try base64 decode
-  const padded = normalized + "=".repeat(-normalized.length % 4);
+  // Try base64 decode — (4 - len % 4) % 4 yields 0/1/2/3, never negative.
+  // The old `-len % 4` produced -1/-2/-3 for non-multiple lengths, causing
+  // String.prototype.repeat() to throw RangeError on every non-aligned input.
+  const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
   const decoded = Buffer.from(padded, "base64");
 
   if (decoded.length === 16) return decoded;

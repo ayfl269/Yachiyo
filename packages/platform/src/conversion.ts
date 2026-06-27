@@ -1,4 +1,4 @@
-import { ComponentType, type MessageComponent, type PlainComponent, type AtComponent } from "@yachiyo/message/components.js";
+import { ComponentType, type PlainComponent, type AtComponent } from "@yachiyo/message/components.js";
 import { PlatformMessage } from "@yachiyo/message/platform-message.js";
 
 export abstract class MessageConverter<TPlatformMessage> {

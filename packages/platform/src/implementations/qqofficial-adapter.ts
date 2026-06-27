@@ -15,7 +15,6 @@ import type { MessageComponent, PlainComponent, ImageComponent } from "@yachiyo/
 import { ComponentType } from "@yachiyo/message/components.js";
 import { PlatformMessage } from "@yachiyo/message/platform-message.js";
 import { MessageType } from "@yachiyo/message/types.js";
-import { generateId } from "@yachiyo/common/id-generator.js";
 import type { MessageChain } from "@yachiyo/agent/types.js";
 
 import { WebSocket } from "ws";
@@ -217,16 +216,50 @@ class QQOfficialEvent extends MessageEvent {
   }
 
   async sendStreaming(generator: AsyncGenerator<MessageChain, void>): Promise<void> {
-    const parts: string[] = [];
-    for await (const chunk of generator) {
-      if (chunk.message) parts.push(chunk.message);
-    }
-    if (parts.length > 0) {
+    // Send chunks progressively instead of buffering the entire response.
+    // QQ Official API does not support message editing, so we flush the
+    // accumulated text periodically (every 500ms or 500 chars) to give the
+    // user a streaming feel without flooding the chat with tiny messages.
+    const FLUSH_INTERVAL_MS = 500;
+    const FLUSH_CHAR_THRESHOLD = 500;
+
+    let buffer = "";
+    let lastFlush = Date.now();
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const flush = async (): Promise<void> => {
+      if (buffer.length === 0) return;
+      const text = buffer;
+      buffer = "";
+      lastFlush = Date.now();
       await this.send([{
         type: ComponentType.Plain,
-        text: parts.join(""),
-        toDict() { return { type: "text", data: { text: parts.join("") } }; },
+        text,
+        toDict() { return { type: "text", data: { text } }; },
       } as MessageComponent]);
+    };
+
+    // Periodic flush timer ensures partial output is sent even if the
+    // generator stalls between chunks.
+    flushTimer = setInterval(() => {
+      if (buffer.length > 0 && Date.now() - lastFlush >= FLUSH_INTERVAL_MS) {
+        flush().catch((e: unknown) => console.error("[QQOfficial] Streaming flush failed:", e));
+      }
+    }, FLUSH_INTERVAL_MS);
+
+    try {
+      for await (const chunk of generator) {
+        if (chunk.message) {
+          buffer += chunk.message;
+          if (buffer.length >= FLUSH_CHAR_THRESHOLD) {
+            await flush();
+          }
+        }
+      }
+      // Final flush for any remaining buffered text.
+      await flush();
+    } finally {
+      if (flushTimer) clearInterval(flushTimer);
     }
   }
 
@@ -361,6 +394,12 @@ export class QQOfficialAdapter extends PlatformAdapter {
       console.info("[QQOfficial] Token refreshed successfully");
     } catch (e: unknown) {
       console.error("[QQOfficial] Token refresh failed:", e);
+      // Clear any existing timer before scheduling a retry to prevent
+      // overlapping timer chains on repeated failures.
+      if (this.tokenRefreshTimer) {
+        clearTimeout(this.tokenRefreshTimer);
+        this.tokenRefreshTimer = null;
+      }
       // Retry after 30 seconds
       this.tokenRefreshTimer = setTimeout(() => {
         this.refreshToken().catch(() => { /* will retry again */ });

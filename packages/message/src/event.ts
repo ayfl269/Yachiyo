@@ -1,5 +1,5 @@
-import { MessageType, type MessageMember, type PlatformMetadata } from "./types.js";
-import { ComponentType, type MessageComponent, type PlainComponent, type AtComponent } from "./components.js";
+import { MessageType, type PlatformMetadata } from "./types.js";
+import { ComponentType, type MessageComponent } from "./components.js";
 import { PlatformMessage } from "./platform-message.js";
 import { MessageSession } from "./message-session.js";
 import { EventResult } from "./event-result.js";

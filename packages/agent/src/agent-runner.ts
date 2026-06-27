@@ -1,5 +1,5 @@
 import type { ToolLoopAgentRunner } from "./runners/tool-loop-agent-runner.js";
-import type { AgentResponse, LLMResponse, MessageChain, ContextWrapper } from "./types.js";
+import type { LLMResponse, MessageChain } from "./types.js";
 import { createMessageChain } from "./types.js";
 
 export interface RunAgentOptions {
@@ -40,8 +40,6 @@ export async function runAgent<TContext = unknown>(
 ): Promise<RunAgentResult> {
   const {
     maxStep = 30,
-    showToolUse = true,
-    showToolCallResult = false,
     streamToGeneral = false,
     showReasoning = false,
     bufferIntermediateMessages = false,

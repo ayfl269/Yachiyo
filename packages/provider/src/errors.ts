@@ -18,7 +18,18 @@ export class RateLimitError extends ProviderAPIError {
   constructor(provider: string, retryAfter?: string) {
     super(provider, 429, "rate_limit_exceeded", "Rate limit exceeded");
     this.name = "RateLimitError";
-    if (retryAfter) this.retryAfterMs = parseInt(retryAfter, 10) * 1000;
+    if (retryAfter) {
+      // Try integer seconds first, then fall back to HTTP-date format.
+      const asInt = parseInt(retryAfter, 10);
+      if (!Number.isNaN(asInt)) {
+        this.retryAfterMs = asInt * 1000;
+      } else {
+        const asDate = Date.parse(retryAfter);
+        if (!Number.isNaN(asDate)) {
+          this.retryAfterMs = Math.max(0, asDate - Date.now());
+        }
+      }
+    }
   }
 }
 
@@ -32,6 +43,7 @@ export class ContextLengthExceededError extends ProviderAPIError {
 /**
  * 安全解析 API 响应为 JSON。
  * 如果响应体不是有效 JSON（如 HTML 错误页面），返回包含原始文本的错误信息。
+ * Body 只读取一次并缓冲，两个错误分支复用同一文本。
  */
 export async function safeParseJsonResponse(
   response: Response,
@@ -39,9 +51,12 @@ export async function safeParseJsonResponse(
 ): Promise<Record<string, unknown>> {
   const contentType = response.headers.get("content-type") ?? "";
 
+  // Buffer the body once — response.text() consumes the stream and a second
+  // call returns "". Reading upfront lets both error paths show a preview.
+  const bodyText = await response.text().catch(() => "");
+  const preview = bodyText.slice(0, 200);
+
   if (!contentType.includes("application/json")) {
-    const text = await response.text().catch(() => "");
-    const preview = text.slice(0, 200);
     throw new ProviderAPIError(
       providerName,
       response.status,
@@ -52,10 +67,8 @@ export async function safeParseJsonResponse(
   }
 
   try {
-    return (await response.json()) as Record<string, unknown>;
+    return JSON.parse(bodyText) as Record<string, unknown>;
   } catch {
-    const text = await response.text().catch(() => "");
-    const preview = text.slice(0, 200);
     throw new ProviderAPIError(
       providerName,
       response.status,

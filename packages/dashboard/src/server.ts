@@ -957,7 +957,7 @@ export class DashboardServer {
         }
         res.writeHead(200);
         res.end(JSON.stringify(providers));
-      } catch (err: any) {
+      } catch (_err: any) {
         res.writeHead(200);
         res.end(JSON.stringify([]));
       }
@@ -1947,7 +1947,7 @@ export class DashboardServer {
 
         res.writeHead(200);
         res.end(JSON.stringify(servers));
-      } catch (err: any) {
+      } catch (_err: any) {
         res.writeHead(200);
         res.end(JSON.stringify([]));
       }
@@ -2113,7 +2113,7 @@ export class DashboardServer {
         }));
         res.writeHead(200);
         res.end(JSON.stringify(files));
-      } catch (err: any) {
+      } catch (_err: any) {
         res.writeHead(200);
         res.end(JSON.stringify([]));
       }
@@ -2218,7 +2218,7 @@ export class DashboardServer {
         const memories = memoryStore.search(query, limit, filterOptions);
         res.writeHead(200);
         res.end(JSON.stringify(memories));
-      } catch (err: any) {
+      } catch (_err: any) {
         res.writeHead(200);
         res.end(JSON.stringify([]));
       }
@@ -2439,7 +2439,7 @@ export class DashboardServer {
       const umo = `debug:webhook:${sessionId}`;
 
       try {
-        const { MessageEvent: ME, PlatformMessage, MessageSession, ResultContentType: RCT } = await import("@yachiyo/message/index.js");
+        const { MessageEvent: ME, PlatformMessage, ResultContentType: RCT } = await import("@yachiyo/message/index.js");
         const { ComponentType } = await import("@yachiyo/message/components.js");
         const { MessageType } = await import("@yachiyo/message/types.js");
         const { generateId: gid } = await import("@yachiyo/common/id-generator.js");
@@ -2619,9 +2619,19 @@ export class DashboardServer {
   }
 
   private async readBody(req: IncomingMessage): Promise<string> {
+    const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB — reject oversized payloads
     return new Promise((resolve, reject) => {
       const chunks: Buffer[] = [];
-      req.on("data", (chunk) => chunks.push(chunk));
+      let totalBytes = 0;
+      req.on("data", (chunk) => {
+        totalBytes += chunk.length;
+        if (totalBytes > MAX_BODY_BYTES) {
+          req.destroy();
+          reject(new Error("Request body exceeds 10 MB limit"));
+          return;
+        }
+        chunks.push(chunk);
+      });
       req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
       req.on("error", (err) => reject(err));
     });

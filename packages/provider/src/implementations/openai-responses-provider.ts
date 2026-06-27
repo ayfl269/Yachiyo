@@ -1,7 +1,7 @@
 import type { Provider, ProviderChatParams } from "../provider.js";
 import type { LLMResponse, ProviderConfig, TokenUsage } from "@yachiyo/common/llm-types.js";
 import type { Message } from "@yachiyo/common/llm-message.js";
-import { messageToResponsesInput, extractFunctionCalls } from "../converters/openai-responses-converter.js";
+import { messageToResponsesInput } from "../converters/openai-responses-converter.js";
 import { parseResponsesStream } from "../parsers/openai-responses-stream-parser.js";
 import { sanitizeContextsByModalities } from "../modalities.js";
 import { withRetry } from "../retry.js";

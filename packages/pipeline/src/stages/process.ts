@@ -376,7 +376,6 @@ export class ProcessStage extends PipelineStage {
     agentRunner: ToolLoopAgentRunner,
     event: MessageEvent,
   ): AsyncGenerator<MessageChain, void> {
-    let chunkCount = 0;
     let steps = 0;
     try {
       // Loop through agent steps (like runAgent does) to handle tool calls
@@ -389,13 +388,10 @@ export class ProcessStage extends PipelineStage {
 
         for await (const resp of agentRunner.step()) {
           if (resp.type === "streaming_delta") {
-            chunkCount++;
             yield resp.data.chain;
           } else if (resp.type === "llm_result") {
-            chunkCount++;
             yield resp.data.chain;
           } else if (resp.type === "err") {
-            chunkCount++;
             yield resp.data.chain;
           } else if (resp.type === "aborted") {
             return;
@@ -529,15 +525,13 @@ export class ProcessStage extends PipelineStage {
    * Injects: user profile, long-term memories, history index.
    * All limits are configurable via AgentConfig.
    */
-  private buildMemoryContext(event: MessageEvent): string | null {
+  private buildMemoryContext(_event: MessageEvent): string | null {
     const store = this.ctx.memoryStore;
     if (!store) return null;
 
     const config = this.ctx.config;
     if (!config.memoryEnabled) return null;
 
-    const userId = event.getSenderId();
-    const umo = event.unifiedMsgOrigin;
     const parts: string[] = [];
 
     try {
@@ -598,7 +592,6 @@ export class ProcessStage extends PipelineStage {
     if (!this.ctx.config.memoryEnabled) return;
 
     try {
-      const userId = event.getSenderId();
       const umo = event.unifiedMsgOrigin;
       const userMessage = event.messageStr?.trim() ?? "";
       // Try result first; fall back to cached text (respond stage clears result after sending)

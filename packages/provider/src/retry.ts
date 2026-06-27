@@ -44,7 +44,23 @@ export async function withRetry<T>(
         waitMs = err.retryAfterMs;
       }
 
-      await new Promise(resolve => setTimeout(resolve, waitMs));
+      // Abortable sleep: reject immediately if the caller signals abort
+      // during the backoff window instead of waiting the full delay.
+      await new Promise<void>((resolve, reject) => {
+        if (abortSignal?.aborted) {
+          reject(new Error("Aborted"));
+          return;
+        }
+        const timerId = setTimeout(() => {
+          abortSignal?.removeEventListener("abort", onAbort);
+          resolve();
+        }, waitMs);
+        const onAbort = () => {
+          clearTimeout(timerId);
+          reject(new Error("Aborted"));
+        };
+        abortSignal?.addEventListener("abort", onAbort, { once: true });
+      });
     }
   }
 

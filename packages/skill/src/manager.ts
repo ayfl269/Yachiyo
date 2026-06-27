@@ -1,6 +1,6 @@
 import type { SqliteSkillStore } from "@yachiyo/config/sqlite-config-extras-store.js";
-import { readdir, readFile, stat, mkdir } from "fs/promises";
-import { join, extname, dirname } from "path";
+import { readdir, readFile } from "fs/promises";
+import { join, dirname } from "path";
 import { existsSync } from "fs";
 import type { SkillInfo } from "@yachiyo/common/skill-types.js";
 

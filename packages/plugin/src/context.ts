@@ -6,13 +6,11 @@ import type { AsyncQueue } from "@yachiyo/common/async-queue.js";
 import type { MessageEvent } from "@yachiyo/message/event.js";
 import type { MessageSession } from "@yachiyo/message/message-session.js";
 import type { MessageComponent } from "@yachiyo/message/components.js";
-import type { LLMResponse, ProviderRequest } from "@yachiyo/agent/types.js";
-import type { ToolSet } from "@yachiyo/agent/tool.js";
-import type { FunctionTool } from "@yachiyo/agent/tool.js";
+import type { LLMResponse } from "@yachiyo/agent/types.js";
 import type { Message } from "@yachiyo/agent/message.js";
 import type { Provider } from "@yachiyo/provider/provider.js";
 import type { ProviderType } from "@yachiyo/provider/types.js";
-import { createContextWrapper, type ContextWrapper } from "@yachiyo/agent/types.js";
+import { createContextWrapper } from "@yachiyo/agent/types.js";
 
 export class PluginContext {
   private providerManager: ProviderManager;
@@ -59,7 +57,7 @@ export class PluginContext {
     return this.eventQueue;
   }
 
-  async sendMessage(session: MessageSession, components: MessageComponent[]): Promise<void> {
+  async sendMessage(session: MessageSession, _components: MessageComponent[]): Promise<void> {
     let forceStopped = false;
     const tempFiles: string[] = [];
     const syntheticEvent = {

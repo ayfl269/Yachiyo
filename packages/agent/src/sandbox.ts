@@ -315,7 +315,7 @@ export async function teardownLinuxCgroup(agentName: string): Promise<void> {
     return;
   }
 
-  const { rmdir, writeFile } = await import("fs/promises");
+  const { writeFile } = await import("fs/promises");
   const { join } = await import("path");
 
   const cgroupBase = "/sys/fs/cgroup";

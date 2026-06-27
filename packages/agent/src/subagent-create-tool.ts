@@ -16,11 +16,6 @@ export interface SubAgentCreateToolContext {
   };
 }
 
-function getToolContext(_ctx: unknown): SubAgentCreateToolContext {
-  const wrapper = _ctx as ContextWrapper<SubAgentCreateToolContext> | undefined;
-  return wrapper?.context ?? ({} as SubAgentCreateToolContext);
-}
-
 // ── Registry for dynamically created sub-agents ──
 
 /**
@@ -77,7 +72,7 @@ export const dynamicSubAgentRegistry = new DynamicSubAgentRegistry();
 
 // ── Create Sub-Agent Tool ──
 
-export function createSubAgentCreateTool(workspaceRoot?: string): FunctionTool<SubAgentCreateToolContext> {
+export function createSubAgentCreateTool(_workspaceRoot?: string): FunctionTool<SubAgentCreateToolContext> {
   return createFunctionTool<SubAgentCreateToolContext>({
     name: "create_subagent",
     description:
@@ -113,7 +108,6 @@ export function createSubAgentCreateTool(workspaceRoot?: string): FunctionTool<S
       const instructions = String(args[1] ?? "").trim();
       const description = args[2] != null ? String(args[2]).trim() : undefined;
       const tools = args[3] as string[] | undefined;
-      const context = getToolContext(_ctx);
 
       // Validate name
       if (!name) {
@@ -234,7 +228,6 @@ export function createDeleteSubAgentTool(): FunctionTool<SubAgentCreateToolConte
     active: true,
     handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
       const name = String(args[0] ?? "").trim();
-      const context = getToolContext(_ctx);
 
       if (!name) {
         return { content: [{ type: "text", text: "error: Sub-agent name is required." }], isError: true };

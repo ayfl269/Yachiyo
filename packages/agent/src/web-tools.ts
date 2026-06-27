@@ -3,7 +3,7 @@
  */
 
 import { createFunctionTool, type FunctionTool } from "./tool.js";
-import type { ContextWrapper, CallToolResult, ImageContent } from "./types.js";
+import type { CallToolResult, ImageContent } from "./types.js";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { safeFetch, assertSafeUrl } from "@yachiyo/common/ssrf-guard.js";
 
@@ -17,11 +17,6 @@ export interface WebToolContext {
     web_search_api_url?: string;
     web_search_api_key?: string;
   };
-}
-
-function getToolContext(_ctx: unknown): WebToolContext {
-  const wrapper = _ctx as ContextWrapper<WebToolContext> | undefined;
-  return wrapper?.context ?? ({} as WebToolContext);
 }
 
 function htmlToMarkdown(html: string): string {
@@ -108,7 +103,6 @@ export function createWebFetchTool(): FunctionTool<WebToolContext> {
       const maxLength = args[5] != null ? Number(args[5]) : 50000;
       const format = (args[6] as string) ?? "markdown";
       const screenshot = args[7] === true;
-      const context = getToolContext(_ctx);
 
       try {
         const controller = new AbortController();
@@ -147,22 +141,22 @@ export function createWebFetchTool(): FunctionTool<WebToolContext> {
         const contentParts: CallToolResult["content"] = [{ type: "text", text: `${header}\n\n${text}` }];
 
         if (screenshot) {
+          let browser: Browser | null = null;
+          let browserContext: BrowserContext | null = null;
+          let page: Page | null = null;
           try {
             // Re-validate the URL before handing it to Playwright, which
             // bypasses safeFetch. Defense-in-depth against DNS rebinding.
             await assertSafeUrl(url);
-            const browser = await chromium.launch({ headless: true, args: ["--disable-blink-features=AutomationControlled", "--no-sandbox"] });
-            const browserContext = await browser.newContext({
+            browser = await chromium.launch({ headless: true, args: ["--disable-blink-features=AutomationControlled", "--no-sandbox"] });
+            browserContext = await browser.newContext({
               userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
               viewport: { width: 1920, height: 1080 },
             });
-            const page = await browserContext.newPage();
+            page = await browserContext.newPage();
             await page.goto(url, { waitUntil: "networkidle", timeout: 30000 });
             await page.waitForTimeout(1000);
             const screenshotBuffer = await page.screenshot({ fullPage: false, type: "png" });
-            await page.close();
-            await browserContext.close();
-            await browser.close();
 
             contentParts.push({
               type: "image",
@@ -172,6 +166,12 @@ export function createWebFetchTool(): FunctionTool<WebToolContext> {
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
             contentParts.push({ type: "text", text: `[Screenshot failed: ${msg}]` });
+          } finally {
+            // Ensure Chromium is always released even if any step between
+            // launch() and close() throws — otherwise the process leaks.
+            try { await page?.close(); } catch { /* ignore */ }
+            try { await browserContext?.close(); } catch { /* ignore */ }
+            try { await browser?.close(); } catch { /* ignore */ }
           }
         }
 
@@ -358,6 +358,17 @@ class PlaywrightSearchProviderBase implements WebSearchProvider {
     })();
 
     return this._launchPromise;
+  }
+
+  /** Close the singleton browser instance. Called during shutdown. */
+  async close(): Promise<void> {
+    if (this._launchPromise) {
+      try { await this._launchPromise; } catch { /* ignore launch errors */ }
+    }
+    if (this._browser) {
+      try { await this._browser.close(); } catch { /* ignore */ }
+      this._browser = null;
+    }
   }
 
   protected async createContext(): Promise<BrowserContext> {
@@ -595,6 +606,21 @@ export function getSearchProvider(engine: SearchEngine): WebSearchProvider {
   }
 }
 
+/**
+ * Release the singleton Playwright browser instances held by the search
+ * providers. Call during shutdown to prevent Chromium process leaks.
+ */
+export async function closeWebSearchProviders(): Promise<void> {
+  if (_playwrightGoogleProvider) {
+    await _playwrightGoogleProvider.close?.();
+    _playwrightGoogleProvider = null;
+  }
+  if (_playwrightBingProvider) {
+    await _playwrightBingProvider.close?.();
+    _playwrightBingProvider = null;
+  }
+}
+
 export function createWebSearchTool(customProvider?: WebSearchProvider, engine: SearchEngine = "bing"): FunctionTool<WebToolContext> {
   const provider = customProvider ?? getSearchProvider(engine);
 
@@ -615,7 +641,6 @@ export function createWebSearchTool(customProvider?: WebSearchProvider, engine: 
       const query = String(args[0] ?? "");
       const maxResults = args[1] != null ? Number(args[1]) : 5;
       const fetchContent = args[2] === true;
-      const context = getToolContext(_ctx);
 
       try {
         const results = await provider.search(query, maxResults);
@@ -698,7 +723,6 @@ export function createHttpRequestTool(): FunctionTool<WebToolContext> {
       const contentType = (args[4] as string) ?? "application/json";
       const timeout = args[5] != null ? Number(args[5]) : 30;
       const followRedirects = args[6] !== false;
-      const context = getToolContext(_ctx);
 
       try {
         const controller = new AbortController();

@@ -1,4 +1,5 @@
 import type { ContextWrapper, CallToolResult } from "./types.js";
+import { ToolTimeoutError } from "./types.js";
 import type { FunctionTool } from "./tool.js";
 import type { HandoffTool } from "./handoff.js";
 import type { MCPToolInstance } from "./mcp-tool.js";
@@ -8,7 +9,7 @@ import { createContextWrapper } from "./types.js";
 import { EmptyAgentHooks } from "./hooks.js";
 import { validateMessage } from "./message.js";
 import type { Message } from "./message.js";
-import { collectAndValidateImageUrls, collectImageUrlsFromArgs } from "./image-ref-utils.js";
+import { collectAndValidateImageUrls } from "./image-ref-utils.js";
 import {
   applySandboxPolicyToToolSet,
   DEFAULT_DYNAMIC_SUBAGENT_POLICY,
@@ -594,17 +595,21 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
     _taskId: string,
     toolArgs: Record<string, unknown>
   ): Promise<void> {
-    // Background tasks use a longer timeout (3600s) than regular tool calls
-    const originalTimeout = runContext.toolCallTimeout;
-    runContext.toolCallTimeout = 3600;
+    // Background tasks use a longer timeout (3600s) than regular tool calls.
+    // Create a shallow copy of the runContext with the extended timeout so
+    // the shared context is NOT mutated — otherwise a concurrent foreground
+    // tool could inherit the 3600s timeout.
+    const backgroundContext: ContextWrapper<TContext> = {
+      ...runContext,
+      toolCallTimeout: 3600,
+    };
     try {
-      for await (const _ of this.executeLocal(tool, runContext, toolArgs)) {
+      const iter = this.executeLocal(tool, backgroundContext, toolArgs);
+      while (!(await iter.next()).done) {
         // Consume results silently for background tasks
       }
     } catch (e) {
       console.error(`Background task error: ${e}`);
-    } finally {
-      runContext.toolCallTimeout = originalTimeout;
     }
   }
 
@@ -684,7 +689,7 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
         }
       }
     } catch (e: unknown) {
-      if (e instanceof Error && e.message === "timeout") {
+      if (e instanceof ToolTimeoutError) {
         throw new Error(`tool ${tool.name} execution timeout after ${timeout} seconds.`);
       }
       console.error(`[ToolExecutor] ${tool.name} execution error:`, e);

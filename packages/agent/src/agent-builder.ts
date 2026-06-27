@@ -212,13 +212,3 @@ const SKILLS_LIKE_TOOL_CALL_PROMPT = `When you decide to use a tool, first selec
 - Always verify that the tool exists before calling it.
 - Do not make up values for or fabricate tool results.`;
 
-const BACKGROUND_TASK_RESULT_WOKE_SYSTEM_PROMPT = `
-[Background Task Result]
-A background task has completed. Here is the result:
-{background_task_result}
-
-You should:
-1. Inform the user about the background task result.
-2. If the result contains useful information, summarize it for the user.
-3. Use the send_message_to_user tool if you need to deliver the result directly.
-`;

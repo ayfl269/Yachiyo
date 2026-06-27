@@ -14,7 +14,7 @@ export class CommandFilter extends HandlerFilter {
     this.alias = alias;
   }
 
-  filter(event: MessageEvent, cfg: Record<string, unknown>): boolean {
+  filter(event: MessageEvent, _cfg: Record<string, unknown>): boolean {
     const msg = event.getMessageStr();
     return msg.startsWith(this.commandName) || this.alias.some(a => msg.startsWith(a));
   }
@@ -28,7 +28,7 @@ export class RegexFilter extends HandlerFilter {
     this.pattern = typeof pattern === "string" ? new RegExp(pattern) : pattern;
   }
 
-  filter(event: MessageEvent, cfg: Record<string, unknown>): boolean {
+  filter(event: MessageEvent, _cfg: Record<string, unknown>): boolean {
     return this.pattern.test(event.getMessageStr());
   }
 }
@@ -43,7 +43,7 @@ export class EventMessageTypeFilter extends HandlerFilter {
     this.requiredType = requiredType;
   }
 
-  filter(event: MessageEvent, cfg: Record<string, unknown>): boolean {
+  filter(event: MessageEvent, _cfg: Record<string, unknown>): boolean {
     if (this.requiredType === EventMessageType.ALL) return true;
     if (this.requiredType === EventMessageType.GROUP_MESSAGE) return !event.isPrivateChat();
     if (this.requiredType === EventMessageType.PRIVATE_MESSAGE) return event.isPrivateChat();
@@ -59,7 +59,7 @@ export class CommandGroupFilter extends HandlerFilter {
     this.commands = commands;
   }
 
-  filter(event: MessageEvent, cfg: Record<string, unknown>): boolean {
+  filter(event: MessageEvent, _cfg: Record<string, unknown>): boolean {
     const msg = event.getMessageStr();
     return this.commands.some(cmd => msg.startsWith(cmd));
   }
@@ -73,7 +73,7 @@ export class PlatformAdapterTypeFilter extends HandlerFilter {
     this.platformName = platformName;
   }
 
-  filter(event: MessageEvent, cfg: Record<string, unknown>): boolean {
+  filter(event: MessageEvent, _cfg: Record<string, unknown>): boolean {
     return event.getPlatformName() === this.platformName;
   }
 }

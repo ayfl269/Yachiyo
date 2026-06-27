@@ -1,7 +1,6 @@
 import { AgentState } from "../types.js";
 import type {
   AgentResponse,
-  AgentResponseData,
   AgentStats,
   CallToolResult,
   ContextWrapper,
@@ -9,7 +8,6 @@ import type {
   Provider,
   ProviderChatParams,
   ProviderRequest,
-  TokenUsage,
   TextContent,
   ImageContent,
   EmbeddedResource,
@@ -33,6 +31,7 @@ import {
   type Message,
 } from "../message.js";
 import { createAgentStats, createMessageChain } from "../types.js";
+import { ToolTimeoutError } from "../types.js";
 import { sanitizeContextsByModalities, logContextSanitizeStats } from "@yachiyo/provider/modalities.js";
 import { toolImageCache } from "../tool-image-cache.js";
 import type { CachedImage } from "../tool-image-cache.js";
@@ -390,7 +389,6 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
     );
 
     // Call LLM with fallback
-    let llmCallCount = 0;
     // Accumulate text/reasoning across streaming chunks so final usage chunk doesn't lose content
     let accumulatedText = "";
     let accumulatedReasoning = "";
@@ -399,7 +397,6 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
     let accumulatedToolCallArgs: Record<string, unknown>[] = [];
 
     for await (const llmResponse of this.iterLlmResponsesWithFallback()) {
-      llmCallCount++;
 
       if (llmResponse.isChunk) {
         if (this.stats.timeToFirstToken === 0) {
@@ -1296,9 +1293,18 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
           );
         }
 
+        // Create a fresh AbortController for each tool call so the
+        // underlying tool can be cancelled on timeout instead of
+        // continuing to run in the background after the race is lost.
+        const abortController = new AbortController();
+        this.runContext._toolAbortController = abortController;
+
         let timerId: ReturnType<typeof setTimeout> | undefined;
         const timeoutPromise = new Promise<IteratorResult<CallToolResult | null>>((_, reject) => {
-          timerId = setTimeout(() => reject(new Error("timeout")), this.runContext.toolCallTimeout * 1000);
+          timerId = setTimeout(
+            () => reject(new ToolTimeoutError(this.runContext.toolCallTimeout)),
+            this.runContext.toolCallTimeout * 1000,
+          );
         });
 
         try {
@@ -1317,13 +1323,17 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
           if (timerId) {
             clearTimeout(timerId);
           }
-          if (e instanceof Error && e.message === "timeout") {
-            throw new Error(
-              `Tool execution timeout after ${this.runContext.toolCallTimeout} seconds.`
-            );
+          if (e instanceof ToolTimeoutError) {
+            // Abort the underlying tool so file writes, shell commands,
+            // and network calls stop instead of running orphaned.
+            abortController.abort();
+            throw e;
           }
           if (e instanceof ToolExecutionInterrupted) throw e;
           throw e;
+        } finally {
+          // Clear the reference so the next iteration sets a fresh one.
+          this.runContext._toolAbortController = undefined;
         }
       }
     } finally {

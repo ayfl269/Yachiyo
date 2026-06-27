@@ -1,4 +1,4 @@
-import { ComponentType, MessageComponent, PlainComponent, ImageComponent, RecordComponent, VideoComponent, FileComponent, FaceComponent, AtComponent, AtAllComponent, ReplyComponent, NodeComponent, NodesComponent, PokeComponent, JsonComponent, ShareComponent, LocationComponent, ForwardComponent, MusicComponent, ContactComponent } from "./components.js";
+import { ComponentType, MessageComponent } from "./components.js";
 
 export interface SerializedComponent {
   type: string;

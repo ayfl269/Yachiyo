@@ -4,7 +4,7 @@ import type { MessageEvent } from "@yachiyo/message/event.js";
 import { ComponentType, type MessageComponent, type PlainComponent, type ImageComponent } from "@yachiyo/message/components.js";
 import { ResultContentType } from "@yachiyo/message/event-result.js";
 import { EventType } from "@yachiyo/plugin/event-type.js";
-import { MarkdownToImageRenderer, type T2IConfig } from "@yachiyo/t2i/renderer.js";
+import { MarkdownToImageRenderer } from "@yachiyo/t2i/renderer.js";
 
 @registerStage
 export class ResultDecorateStage extends PipelineStage {

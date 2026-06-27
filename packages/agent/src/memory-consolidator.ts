@@ -14,7 +14,7 @@
  * - Structured history index: {title, topics[]} format
  */
 
-import type { SqliteMemoryStore, MemoryEntry, MemoryType, MemoryScope } from "./sqlite-memory-store.js";
+import type { SqliteMemoryStore, MemoryEntry } from "./sqlite-memory-store.js";
 import type { Provider } from "./types.js";
 
 // ── Types ──

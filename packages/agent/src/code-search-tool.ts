@@ -4,7 +4,7 @@
  */
 
 import { createFunctionTool, type FunctionTool } from "./tool.js";
-import type { ContextWrapper, CallToolResult } from "./types.js";
+import type { CallToolResult } from "./types.js";
 import { readFile, readdir, stat } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
@@ -15,11 +15,6 @@ export interface CodeSearchToolContext {
   event?: {
     unifiedMsgOrigin?: string;
   };
-}
-
-function getToolContext(_ctx: unknown): CodeSearchToolContext {
-  const wrapper = _ctx as ContextWrapper<CodeSearchToolContext> | undefined;
-  return wrapper?.context ?? ({} as CodeSearchToolContext);
 }
 
 // ── Symbol patterns for different languages ──

@@ -1,10 +1,8 @@
 import { BaseAgentRunHooks } from "@yachiyo/agent/hooks.js";
 import type { ContextWrapper } from "@yachiyo/agent/types.js";
 import type { LLMResponse } from "@yachiyo/agent/types.js";
-import type { MessageChain } from "@yachiyo/agent/types.js";
 import type { FunctionTool } from "@yachiyo/agent/tool.js";
 import type { MessageEvent } from "@yachiyo/message/event.js";
-import type { EventType } from "@yachiyo/plugin/event-type.js";
 import type { StarHandlerMetadata } from "@yachiyo/plugin/handler.js";
 import { callEventHook } from "./handler-utils.js";
 

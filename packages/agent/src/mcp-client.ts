@@ -1,6 +1,4 @@
-import { promises as fs } from "fs";
 import path from "path";
-import os from "os";
 import type { CallToolResult } from "./types.js";
 
 // ---- Custom Error Types ----
@@ -150,11 +148,6 @@ function prepareConfig(config: Record<string, unknown>): Record<string, unknown>
   }
   delete config.active;
   return config;
-}
-
-function isStdioConfig(config: Record<string, unknown>): boolean {
-  const cfg = prepareConfig({ ...config });
-  return !("url" in cfg);
 }
 
 function validateStdioArgs(commandName: string, args: unknown): void {
@@ -350,8 +343,6 @@ export class MCPClient {
   ): Promise<void> {
     const url = cfg.url as string;
     const headers = (cfg.headers as Record<string, string>) ?? {};
-    const timeout = (cfg.timeout as number) ?? 30;
-    const sseReadTimeout = (cfg.sse_read_timeout as number) ?? 300;
 
     // Quick test connection
     const [success, error] = await quickTestMcpConnection(cfg);

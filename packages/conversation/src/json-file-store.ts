@@ -2,7 +2,6 @@ import { ConversationStore, type PlatformMessageHistory, type WebchatThread, typ
 import type { ConversationRecord } from "./manager.js";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from "fs";
 import { join } from "path";
-import { randomUUID } from "crypto";
 
 interface SerializedConversationRecord {
   id: string;

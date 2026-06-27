@@ -170,7 +170,7 @@ export class ProviderManager {
    * Priority: defaultProviderId > first registered non-disabled provider.
    * @param providerType 请求的 provider 类型（当前仅支持 chat_completion）
    */
-  getUsingProvider(providerType: ProviderType, _umo?: string): Provider | null {
+  getUsingProvider(_providerType: ProviderType, _umo?: string): Provider | null {
     // 当前所有 chat provider 都通过 textChat 接口访问，providerType 参数保留用于未来扩展
     // 如需按子类型（如 streaming 能力）区分，可在此处添加过滤逻辑
     if (this.defaultProviderId && !this.disabledIds.has(this.defaultProviderId)) {

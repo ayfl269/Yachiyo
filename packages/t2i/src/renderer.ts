@@ -8,7 +8,7 @@
  */
 
 import { chromium, type Browser, type Page } from "playwright";
-import { writeFileSync, mkdirSync, existsSync } from "fs";
+import { mkdirSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { randomUUID } from "crypto";

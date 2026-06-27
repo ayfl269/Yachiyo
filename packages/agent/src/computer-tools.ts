@@ -337,7 +337,6 @@ export function createShellTool(workspaceRoot?: string): FunctionTool<ComputerTo
       const background = args[1] === true;
       const timeout = args[2] != null ? Number(args[2]) : undefined;
       const env = (args[3] as Record<string, string>) ?? undefined;
-      const context = getToolContext(_ctx);
 
       // Defense-in-depth guard: block obviously destructive commands.
       // NOTE: this is NOT a security boundary — see isDestructiveCommand docs.
@@ -390,7 +389,7 @@ export function createShellTool(workspaceRoot?: string): FunctionTool<ComputerTo
           child.stdout?.on("data", (data: Buffer) => { stdout += data.toString(); });
           child.stderr?.on("data", (data: Buffer) => { stderr += data.toString(); });
           child.on("close", (code) => { resolvePromise({ stdout, stderr, code: code ?? 0 }); });
-          child.on("error", (err) => { resolvePromise({ stdout, stderr, code: -1 }); });
+          child.on("error", (_err) => { resolvePromise({ stdout, stderr, code: -1 }); });
         });
 
         let output = "";
@@ -430,8 +429,6 @@ export function createLocalPythonTool(workspaceRoot?: string): FunctionTool<Comp
       const code = String(args[0] ?? "");
       const silent = args[1] === true;
       const timeout = args[2] != null ? Number(args[2]) : undefined;
-      const context = getToolContext(_ctx);
-
       const timeoutMs = (timeout ?? 30) * 1000;
       const cwd = workspaceRoot ?? process.cwd();
 
@@ -678,8 +675,6 @@ export function createLocalNodeTool(workspaceRoot?: string): FunctionTool<Comput
       const code = String(args[0] ?? "");
       const silent = args[1] === true;
       const timeout = args[2] != null ? Number(args[2]) : undefined;
-      const context = getToolContext(_ctx);
-
       const timeoutMs = (timeout ?? 30) * 1000;
       const cwd = workspaceRoot ?? process.cwd();
 

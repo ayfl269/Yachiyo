@@ -2,7 +2,6 @@ import { PipelineStage, registerStage } from "../stage.js";
 import type { PipelineContext } from "../context.js";
 import type { MessageEvent } from "@yachiyo/message/event.js";
 import { ComponentType, type AtComponent } from "@yachiyo/message/components.js";
-import { MessageType } from "@yachiyo/message/types.js";
 import { EventType } from "@yachiyo/plugin/event-type.js";
 import type { StarHandlerMetadata } from "@yachiyo/plugin/handler.js";
 import type { PluginManager } from "@yachiyo/plugin/manager.js";

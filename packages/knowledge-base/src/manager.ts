@@ -4,7 +4,7 @@ import { generateId } from "@yachiyo/common/id-generator.js";
 import { KnowledgeBaseUploadError } from "@yachiyo/common/errors.js";
 import { KBHelper } from "./kb-helper.js";
 import { InMemoryVectorStore } from "./stores/in-memory-vector-store.js";
-import { SqliteKBMetadataStore, SqliteVectorStore } from "./stores/sqlite-kb-store.js";
+import { SqliteKBMetadataStore } from "./stores/sqlite-kb-store.js";
 import { TextChunker } from "./chunker.js";
 import type { VectorStore } from "./vector-store.js";
 

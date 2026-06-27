@@ -1,5 +1,5 @@
-import type { ContentPart, Message } from "./message.js";
-import type { Provider, ProviderChatParams, LLMResponse, Conversation } from "@yachiyo/common/llm-types.js";
+import type { Message } from "./message.js";
+import type { Provider } from "@yachiyo/common/llm-types.js";
 
 // Re-export extracted types for compatibility
 export type {
@@ -55,9 +55,30 @@ export interface ContextWrapper<TContext = unknown> {
   context: TContext;
   messages: Message[];
   toolCallTimeout: number;
+  /**
+   * AbortController for the currently-executing tool. Set by the tool
+   * executor before each call and aborted on timeout so long-running
+   * operations (shell, fetch, file I/O) can be cancelled cleanly.
+   */
+  _toolAbortController?: AbortController;
   _toolMgr?: import("./func-tool-manager.js").FunctionToolManager;
   _funcToolSet?: import("./tool.js").ToolSet;
   _provider?: Provider;
+}
+
+/**
+ * Sentinel error class for tool execution timeouts. Using a dedicated
+ * class instead of string matching on `e.message === "timeout"` avoids
+ * misclassifying errors from third-party libraries that happen to use
+ * the same message literal.
+ */
+export class ToolTimeoutError extends Error {
+  public readonly timeoutSeconds: number;
+  constructor(timeoutSeconds: number) {
+    super(`Tool execution timeout after ${timeoutSeconds} seconds.`);
+    this.name = "ToolTimeoutError";
+    this.timeoutSeconds = timeoutSeconds;
+  }
 }
 
 export function createContextWrapper<TContext = unknown>(

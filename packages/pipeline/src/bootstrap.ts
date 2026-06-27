@@ -1,6 +1,3 @@
-import { getRegisteredStages, clearRegisteredStages } from "./stage.js";
-import { STAGES_ORDER } from "./scheduler.js";
-
 import "./stages/waking-check.js";
 import "./stages/session-status-check.js";
 import "./stages/rate-limit.js";

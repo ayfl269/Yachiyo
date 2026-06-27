@@ -1,6 +1,6 @@
 import { spawn } from "child_process";
 import { existsSync } from "fs";
-import { basename, join, extname } from "path";
+import { extname } from "path";
 
 export const IMAGE_COMPRESS_DEFAULT_MAX_SIZE = 1280;
 export const IMAGE_COMPRESS_DEFAULT_QUALITY = 95;
@@ -102,7 +102,6 @@ export async function compressImage(
   quality: number = IMAGE_COMPRESS_DEFAULT_QUALITY,
 ): Promise<string> {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const sharp = require("sharp");
     const inputPath = urlOrPath;
     if (!existsSync(inputPath)) return urlOrPath;

@@ -62,7 +62,7 @@ export class KBHelper {
     await this.uploadText(text, docName, finalUrl);
   }
 
-  async uploadText(text: string, docName: string, url?: string | null): Promise<void> {
+  async uploadText(text: string, docName: string, _url?: string | null): Promise<void> {
     const chunks = this.chunker.chunk(text);
     if (chunks.length === 0) {
       throw new KnowledgeBaseUploadError({

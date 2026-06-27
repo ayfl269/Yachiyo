@@ -1,4 +1,4 @@
-import type { LLMResponse, TokenUsage } from "@yachiyo/common/llm-types.js";
+import type { LLMResponse } from "@yachiyo/common/llm-types.js";
 import { parseSSEStream } from "./sse-parser.js";
 
 interface ResponsesUsage {

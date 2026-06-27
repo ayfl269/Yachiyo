@@ -11,7 +11,7 @@ export interface ToolSchema {
 export type ToolExecResult = string | CallToolResult;
 
 // Handler function types
-export type ToolHandler<TContext = unknown> = (
+export type ToolHandler<_TContext = unknown> = (
   event: unknown,
   ...args: unknown[]
 ) => Promise<ToolExecResult | null> | AsyncGenerator<ToolExecResult | string | null, void, unknown>;

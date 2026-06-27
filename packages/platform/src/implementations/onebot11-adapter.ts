@@ -62,20 +62,6 @@ interface OB11MessageEvent {
   };
 }
 
-interface OB11MetaEvent {
-  post_type: "meta_event";
-  meta_event_type: string;
-  [key: string]: any;
-}
-
-interface OB11ApiResponse {
-  status: string;
-  retcode: number;
-  data: any;
-  message: string;
-  echo?: string;
-}
-
 // ── OneBot11Event ──
 
 class OneBot11Event extends MessageEvent {

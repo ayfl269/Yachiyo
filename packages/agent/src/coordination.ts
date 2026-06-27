@@ -4,7 +4,6 @@
  */
 
 import { EventEmitter } from "events";
-import type { CallToolResult } from "./types.js";
 
 // ── File Lock Manager ──
 
@@ -86,6 +85,20 @@ export class FileLockManager {
   }
 
   /**
+   * Clear all locks and resolve all pending waiters with `false` (not
+   * granted). Intended for test isolation — the module-level singleton
+   * otherwise leaks locks across test runs, causing mysterious deadlocks.
+   */
+  reset(): void {
+    this.locks = [];
+    const queue = this.waitQueue.splice(0);
+    queue.forEach((w) => {
+      clearTimeout(w.timeout);
+      w.resolve(false);
+    });
+  }
+
+  /**
    * Check if a path is currently locked (by anyone other than the holder).
    */
   isLocked(path: string, holderId?: string): boolean {
@@ -152,6 +165,14 @@ export class FileLockManager {
 
 /** Global file lock manager singleton. */
 export const fileLockManager = new FileLockManager();
+
+/**
+ * Reset the global file lock manager. Call in test setup/teardown to
+ * prevent lock state from leaking between test runs.
+ */
+export function resetFileLockManager(): void {
+  fileLockManager.reset();
+}
 
 // ── Parallel Sub-Agent Task Manager ──
 
@@ -436,9 +457,19 @@ export async function executeParallelSubAgents(
     const task = manager.getTask(taskId)!;
 
     const executeWhenReady = async (): Promise<void> => {
-      // Wait for capacity
+      // Wait for capacity using event-driven notification instead of
+      // 50ms busy-wait polling. The manager emits "task_completed" and
+      // "task_failed" when a slot frees up.
       while (!manager.hasCapacity) {
-        await new Promise((r) => setTimeout(r, 50));
+        await new Promise<void>((resolve) => {
+          const onSlotFree = (): void => {
+            manager.removeListener("task_completed", onSlotFree);
+            manager.removeListener("task_failed", onSlotFree);
+            resolve();
+          };
+          manager.addListener("task_completed", onSlotFree);
+          manager.addListener("task_failed", onSlotFree);
+        });
       }
 
       if (!manager.startTask(taskId)) return;

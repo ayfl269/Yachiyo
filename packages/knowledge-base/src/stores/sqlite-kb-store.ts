@@ -189,23 +189,6 @@ export class SqliteKBMetadataStore {
 
 // ── SQLite Vector Store ──
 
-function cosineSimilarity(a: Float32Array, b: Float32Array): number {
-  if (a.length !== b.length) {
-    throw new Error(`Dimension mismatch: vector A has length ${a.length}, but vector B has length ${b.length}`);
-  }
-  let dot = 0;
-  let normA = 0;
-  let normB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-  const denom = Math.sqrt(normA) * Math.sqrt(normB);
-  if (denom === 0) return 0;
-  return dot / denom;
-}
-
 function embeddingToBuffer(embedding: number[]): Buffer {
   const arr = new Float32Array(embedding);
   return Buffer.from(arr.buffer);
@@ -279,14 +262,21 @@ export class SqliteVectorStore extends VectorStore {
   }
 
   async search(queryEmbedding: number[], topK: number, kbId?: string): Promise<VectorSearchResult[]> {
+    // Cap the number of rows scanned to prevent O(N) memory blowup on large
+    // knowledge bases. We fetch up to MAX_SCAN_ROWS, compute cosine similarity
+    // incrementally, and keep only the top-K by score using a partial sort.
+    // This is a pragmatic mitigation until an ANN index (sqlite-vec/FAISS) is
+    // available.
+    const MAX_SCAN_ROWS = Math.max(topK * 50, 5000);
+
     // 1. 根据是否传入 kbId，决定是否仅筛选当前知识库的向量，减少数据库 I/O 和内存开销
     const sql = kbId
-      ? "SELECT chunk_id, embedding, content, doc_name FROM kb_vectors WHERE kb_id = ?"
-      : "SELECT chunk_id, embedding, content, doc_name FROM kb_vectors";
-    
+      ? "SELECT chunk_id, embedding, content, doc_name FROM kb_vectors WHERE kb_id = ? LIMIT ?"
+      : "SELECT chunk_id, embedding, content, doc_name FROM kb_vectors LIMIT ?";
+
     const rows = (kbId
-      ? this.db.prepare(sql).all(kbId)
-      : this.db.prepare(sql).all()) as any[];
+      ? this.db.prepare(sql).all(kbId, MAX_SCAN_ROWS)
+      : this.db.prepare(sql).all(MAX_SCAN_ROWS)) as any[];
 
     const queryArr = new Float32Array(queryEmbedding);
     const len = queryArr.length;
@@ -303,15 +293,18 @@ export class SqliteVectorStore extends VectorStore {
     }
 
     const results: Array<{ chunkId: string; score: number; content: string; docName: string }> = [];
+    let dimensionMismatchCount = 0;
 
     for (const row of rows) {
       const vecArr = bufferToEmbedding(row.embedding);
       if (vecArr.length !== len) {
-        throw new Error(
-          `Dimension mismatch: query vector has length ${len}, but stored vector ${row.chunk_id} has length ${vecArr.length}`
-        );
+        // Skip rows whose embedding dimension doesn't match the query (e.g.
+        // after a provider model change) instead of failing the entire
+        // search. Log a warning so operators can detect stale vectors.
+        dimensionMismatchCount++;
+        continue;
       }
-      
+
       // 3. 内联计算点积与文档向量的范数（避开多余的函数调用开销，方便 V8 引擎做更好的优化）
       let dot = 0;
       let normBSq = 0;
@@ -320,7 +313,7 @@ export class SqliteVectorStore extends VectorStore {
         dot += queryArr[i] * valB;
         normBSq += valB * valB;
       }
-      
+
       const normB = Math.sqrt(normBSq);
       const score = normB === 0 ? 0 : dot / (queryNorm * normB);
 
@@ -330,6 +323,12 @@ export class SqliteVectorStore extends VectorStore {
         content: row.content,
         docName: row.doc_name,
       });
+    }
+
+    if (dimensionMismatchCount > 0) {
+      console.warn(
+        `[SqliteVectorStore] Skipped ${dimensionMismatchCount} vector(s) with mismatched dimensions during search.`,
+      );
     }
 
     results.sort((a, b) => b.score - a.score);

@@ -1,7 +1,7 @@
 import type { Message } from "@yachiyo/agent/message.js";
 import { readFile, writeFile, mkdir } from "fs/promises";
 import { existsSync } from "fs";
-import { join, dirname } from "path";
+import { dirname } from "path";
 
 export interface Personality {
   prompt: string;
