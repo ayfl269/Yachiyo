@@ -26,6 +26,7 @@ import { CONFIG_EXTRAS_MIGRATIONS, SqlitePluginStore, SqliteSkillStore, SqliteSe
 import { PROVIDER_CONFIG_MIGRATIONS, SqliteProviderStore } from "./provider/sqlite-provider-store.js";
 import { PERSONA_MIGRATIONS, SqlitePersonaStore } from "./persona/sqlite-persona-store.js";
 import { KNOWLEDGE_MIGRATIONS, SqliteKBMetadataStore, SqliteVectorStore } from "./knowledge-base/stores/sqlite-kb-store.js";
+import { loadEncryptionKey } from "./common/secret-crypto.js";
 
 import { FunctionToolManager } from "./agent/func-tool-manager.js";
 import { SkillManager } from "./skill/index.js";
@@ -78,6 +79,22 @@ export interface BootstrapOptions {
     enabled?: boolean;
     port?: number;
     host?: string;
+    /**
+     * Enable the `/api/debug/chat` endpoint, which runs the full agent
+     * pipeline (tools, shell, file access) on each request. Disabled by
+     * default because it is an RCE attack surface. Only enable in trusted
+     * environments.
+     */
+    debugChatEnabled?: boolean;
+    /**
+     * Bearer token required for all Dashboard `/api/` requests. When unset,
+     * auth is DISABLED (dev mode) and a warning is logged. Set a strong
+     * secret in production so that reaching the port does not grant full
+     * control of the system.
+     */
+    authToken?: string;
+    /** Allowed CORS origins for the Dashboard API. Leave unset for same-origin only. */
+    allowedOrigins?: string[];
   };
 }
 
@@ -132,7 +149,10 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
   const sqliteConversationStore = new SqliteConversationStore(dbManager.getDb("chat"));
   await sqliteConversationStore.initialize();
   const conversationManager = new ConversationManager(sqliteConversationStore);
-  const sqliteProviderStore = new SqliteProviderStore(dbManager.getDb("config"));
+  const sqliteProviderStore = new SqliteProviderStore(
+    dbManager.getDb("config"),
+    loadEncryptionKey({ keyFilePath: join(dataDir, "secret.key") }),
+  );
   const providerManager = new ProviderManager();
   providerManager.setSqliteStore(sqliteProviderStore);
 
@@ -408,8 +428,13 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
         memoryConsolidator,
         shutdown: async () => {},
       } as any,
-      options.dashboard.port,
-      options.dashboard.host
+      {
+        port: options.dashboard.port,
+        host: options.dashboard.host,
+        debugChatEnabled: options.dashboard.debugChatEnabled === true,
+        authToken: options.dashboard.authToken,
+        allowedOrigins: options.dashboard.allowedOrigins,
+      }
     );
     await dashboardServer.start();
   }

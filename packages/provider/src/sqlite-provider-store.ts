@@ -7,6 +7,10 @@
 
 import type Database from "better-sqlite3";
 import type { Migration } from "@yachiyo/common/database.js";
+import { encryptSecret, decryptSecret } from "@yachiyo/common/secret-crypto.js";
+
+/** Field names inside `provider_configs.config` JSON that hold secrets. */
+const SECRET_FIELDS = ["key", "apiKey"] as const;
 
 // ── Migrations ──
 
@@ -94,9 +98,47 @@ export interface StoredProviderSource {
 
 export class SqliteProviderStore {
   private db: Database.Database;
+  private encKey: Buffer | undefined;
 
-  constructor(db: Database.Database) {
+  constructor(db: Database.Database, encryptionKey?: Buffer) {
     this.db = db;
+    this.encKey = encryptionKey;
+  }
+
+  // ── Secret encryption helpers ──
+
+  private encryptConfigSecrets(config: Record<string, unknown>): Record<string, unknown> {
+    if (!this.encKey) return config;
+    const out: Record<string, unknown> = { ...config };
+    for (const field of SECRET_FIELDS) {
+      const v = out[field];
+      if (typeof v === "string" && v.length > 0) {
+        out[field] = encryptSecret(v, this.encKey);
+      }
+    }
+    return out;
+  }
+
+  private decryptConfigSecrets(config: Record<string, unknown>): Record<string, unknown> {
+    if (!this.encKey) return config;
+    const out: Record<string, unknown> = { ...config };
+    for (const field of SECRET_FIELDS) {
+      const v = out[field];
+      if (typeof v === "string" && v.length > 0) {
+        out[field] = decryptSecret(v, this.encKey);
+      }
+    }
+    return out;
+  }
+
+  private encryptKey(key: string): string {
+    if (!this.encKey || !key) return key;
+    return encryptSecret(key, this.encKey);
+  }
+
+  private decryptKey(key: string): string {
+    if (!this.encKey || !key) return key;
+    return decryptSecret(key, this.encKey);
   }
 
   // === Provider Config ===
@@ -109,7 +151,7 @@ export class SqliteProviderStore {
     `).run(
       config.id,
       config.type,
-      JSON.stringify(config.config),
+      JSON.stringify(this.encryptConfigSecrets(config.config)),
       config.isDefault ? 1 : 0,
       config.isFallback ? 1 : 0,
       config.sortOrder,
@@ -231,7 +273,7 @@ export class SqliteProviderStore {
       source.type,
       source.provider_type,
       source.provider,
-      source.key,
+      this.encryptKey(source.key),
       source.api_base,
       source.enable ? 1 : 0,
       JSON.stringify(source.extra_config),
@@ -263,7 +305,7 @@ export class SqliteProviderStore {
       type: row.type,
       provider_type: row.provider_type,
       provider: row.provider,
-      key: row.key,
+      key: this.decryptKey(row.key),
       api_base: row.api_base,
       enable: row.enable === 1,
       extra_config: JSON.parse(row.extra_config),
@@ -278,7 +320,7 @@ export class SqliteProviderStore {
     return {
       id: row.id,
       type: row.type,
-      config: JSON.parse(row.config),
+      config: this.decryptConfigSecrets(JSON.parse(row.config)),
       isDefault: row.is_default === 1,
       isFallback: row.is_fallback === 1,
       sortOrder: row.sort_order,

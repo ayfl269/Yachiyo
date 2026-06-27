@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse, type Server } 
 import { join, extname, resolve, relative, isAbsolute } from "path";
 import { readFile, stat, writeFile, mkdir, unlink, readdir } from "fs/promises";
 import { cpus, tmpdir, totalmem } from "os";
+import { timingSafeEqual } from "crypto";
 
 import type { AsyncQueue } from "@yachiyo/common/async-queue.js";
 import type { MessageEvent } from "@yachiyo/message/event.js";
@@ -51,20 +52,102 @@ export function isPathSafe(basePath: string, targetPath: string): boolean {
   return !rel.startsWith("..") && !isAbsolute(rel);
 }
 
+/**
+ * Sentinel value returned in place of a real secret in API responses.
+ * The frontend treats this as "key unchanged": when the user saves a form
+ * without editing the key field, this value is sent back and the backend
+ * (resolveSecretSentinel) substitutes the previously-stored key.
+ */
+const MASKED_SECRET = "********";
+
+/** Return a masked indicator if the value is a non-empty secret, else the empty string. */
+function maskSecret(value: unknown): string {
+  return value && typeof value === "string" && value.length > 0 ? MASKED_SECRET : "";
+}
+
+/**
+ * Replace any secret fields (`key`, `apiKey`) on a provider config object
+ * with the masked sentinel. Returns a shallow copy so the caller's original
+ * object (which may hold the real key for internal use) is untouched.
+ */
+function maskProviderSecrets<T extends Record<string, any>>(config: T): T {
+  const out: Record<string, any> = { ...config };
+  if ("key" in out) out.key = maskSecret(out.key);
+  if ("apiKey" in out) out.apiKey = maskSecret(out.apiKey);
+  return out as T;
+}
+
+export interface DashboardServerOptions {
+  port?: number;
+  host?: string;
+  debugChatEnabled?: boolean;
+  /**
+   * Bearer token required for all `/api/` requests. When empty/undefined,
+   * authentication is DISABLED (dev mode) and a warning is logged. Set this
+   * to a strong secret in production so that anyone who can reach the port
+   * cannot fully control the system (providers, conversations, shell tools…).
+   */
+  authToken?: string;
+  /**
+   * Allowed CORS origins. When set, `Access-Control-Allow-Origin` echoes a
+   * matching request `Origin` instead of `*`, preventing cross-origin abuse.
+   * The SPA is served same-origin and does not need CORS; this is mainly for
+   * the Vite dev server. Leave undefined to disallow all cross-origin access.
+   */
+  allowedOrigins?: string[];
+}
+
 export class DashboardServer {
   private server: Server | null = null;
   private ctx: BootstrapContext;
   private port: number;
   private host: string;
+  private debugChatEnabled: boolean;
+  private authToken: string | undefined;
+  private allowedOrigins: Set<string> | undefined;
   private startTime: number = 0;
   private prevCpuInfo: { idle: number; total: number } | null = null;
   private todayTokens: number = 0;
   private lastTokenDate: string = new Date().toDateString();
 
-  constructor(ctx: BootstrapContext, port: number = 8000, host: string = "127.0.0.1") {
+  constructor(ctx: BootstrapContext, options: DashboardServerOptions = {}) {
     this.ctx = ctx;
-    this.port = port;
-    this.host = host;
+    this.port = options.port ?? 8000;
+    this.host = options.host ?? "127.0.0.1";
+    this.debugChatEnabled = options.debugChatEnabled === true;
+    this.authToken = options.authToken;
+    this.allowedOrigins = options.allowedOrigins ? new Set(options.allowedOrigins) : undefined;
+  }
+
+  /**
+   * Constant-time Bearer token check. Returns true when auth is disabled
+   * (no authToken configured) so dev mode keeps working.
+   */
+  private isRequestAuthenticated(req: IncomingMessage): boolean {
+    if (!this.authToken) return true; // auth disabled (dev mode)
+    const header = req.headers["authorization"];
+    if (typeof header !== "string") return false;
+    const expected = `Bearer ${this.authToken}`;
+    const a = Buffer.from(header);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length) return false;
+    return timingSafeEqual(a, b);
+  }
+
+  /** Apply CORS headers based on the configured allowlist. No allowlist => no ACAO (same-origin only). */
+  private applyCorsHeaders(req: IncomingMessage, res: ServerResponse): void {
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    if (this.allowedOrigins && this.allowedOrigins.size > 0) {
+      const origin = req.headers["origin"];
+      if (typeof origin === "string" && this.allowedOrigins.has(origin)) {
+        res.setHeader("Access-Control-Allow-Origin", origin);
+        res.setHeader("Vary", "Origin");
+      }
+    }
+    // When no allowlist is configured, we intentionally do NOT set
+    // Access-Control-Allow-Origin — the SPA is same-origin and cross-origin
+    // callers get no CORS permission (the previous "*" allowed any site).
   }
 
   async start(): Promise<void> {
@@ -74,6 +157,12 @@ export class DashboardServer {
     await new Promise<void>((resolve, reject) => {
       this.server!.listen(this.port, this.host, () => {
         console.log(`[DashboardServer] Admin Dashboard is running at http://${this.host}:${this.port}`);
+        if (!this.authToken) {
+          console.warn(`[DashboardServer] WARNING: API authentication is DISABLED (no authToken configured). Anyone who can reach this port can fully control the system. Set dashboard.authToken in production.`);
+        }
+        if (this.debugChatEnabled) {
+          console.warn(`[DashboardServer] WARNING: debug chat endpoint (/api/debug/chat) is ENABLED. It runs the full agent pipeline (tools, shell, file access) on any authorized request — enable only in trusted environments.`);
+        }
         resolve();
       });
       this.server!.on("error", reject);
@@ -169,10 +258,8 @@ export class DashboardServer {
   }
 
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    // Enable CORS
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    // CORS (allowlist-based; no longer reflects "*")
+    this.applyCorsHeaders(req, res);
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);
@@ -182,6 +269,14 @@ export class DashboardServer {
 
     const url = new URL(req.url ?? "/", `http://${req.headers.host || "localhost"}`);
     const pathname = url.pathname;
+
+    // Authenticate all API routes. Static assets (the SPA shell) are served
+    // without auth so the login screen can load.
+    if (pathname.startsWith("/api/") && !this.isRequestAuthenticated(req)) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Unauthorized", message: "Missing or invalid Authorization header." }));
+      return;
+    }
 
     // Route handling
     try {
@@ -312,7 +407,8 @@ export class DashboardServer {
         providersList.push({
           id,
           type: config.type,
-          config,
+          // Mask apiKey/key so secrets are not exposed in list responses.
+          config: maskProviderSecrets(config),
           disabled: disabledIds.includes(id),
         });
       }
@@ -1218,23 +1314,18 @@ export class DashboardServer {
     // 20. GET /api/config/provider_sources/models - 获取提供商可用模型列表 (Dashboard 用)
     if (pathname === "/api/config/provider_sources/models" && req.method === "GET") {
       const sourceId = url.searchParams.get("source_id");
-      // 也支持直接传参模式（用于编辑对话框等场景）
-      const paramApiKey = url.searchParams.get("api_key");
-      const paramApiBase = url.searchParams.get("api_base");
-      const paramProviderType = url.searchParams.get("provider_type");
 
       try {
         let apiKey = "";
         let apiBase = "";
         let providerType = "openai";
 
-        if (paramApiKey) {
-          // 直接传参模式
-          apiKey = paramApiKey || "";
-          apiBase = paramApiBase || "";
-          providerType = paramProviderType || "openai";
-        } else if (sourceId) {
+        if (sourceId) {
           // 从已保存的配置中读取（优先查 providerConfigs，再查 provider_sources 表）
+          // NOTE: API keys must never be accepted via URL query params — they
+          // would leak into access logs, browser history, and Referer headers.
+          // Use POST /api/providers/models with a JSON body for the "type a new
+          // key and fetch models" scenario instead.
           const sqliteStore = (this.ctx.providerManager as any).sqliteStore;
           let providerConfig = this.ctx.providerManager.getProviderConfigById(sourceId, true);
 
@@ -1263,7 +1354,7 @@ export class DashboardServer {
           providerType = (providerConfig.type || providerConfig.provider || "openai") as string;
         } else {
           res.writeHead(400);
-          res.end(JSON.stringify({ status: "error", message: "Missing source_id or api_key parameter" }));
+          res.end(JSON.stringify({ status: "error", message: "Missing source_id parameter. To fetch models for an unsaved key, POST to /api/providers/models with a JSON body." }));
           return;
         }
 
@@ -1323,7 +1414,9 @@ export class DashboardServer {
               type: s.type,
               provider_type: s.provider_type,
               provider: s.provider,
-              key: s.key,
+              // Mask the secret in list responses; the save endpoint resolves
+              // the MASKED_SECRET sentinel back to the stored key on write.
+              key: maskSecret(s.key),
               api_base: s.api_base,
               enable: s.enable,
               ...s.extra_config,
@@ -1411,13 +1504,27 @@ export class DashboardServer {
           if (!basicKeys.has(k)) extraConfig[k] = v;
         }
 
+        // Resolve the masked sentinel: if the client sent back the masked
+        // value (i.e. the user did not edit the key field), keep the
+        // previously-stored key instead of overwriting it with the sentinel.
+        let resolvedKey = config.key || "";
+        if (resolvedKey === MASKED_SECRET) {
+          const lookupId = original_id && original_id !== config.id ? original_id : config.id;
+          try {
+            const existing = sqliteStore.getProviderSource(lookupId);
+            resolvedKey = (existing?.key as string) || "";
+          } catch {
+            resolvedKey = "";
+          }
+        }
+
         const now = new Date().toISOString();
         sqliteStore.saveProviderSource({
           id: config.id,
           type: config.type || "",
           provider_type: config.provider_type || "chat_completion",
           provider: config.provider || "",
-          key: config.key || "",
+          key: resolvedKey,
           api_base: config.api_base || "",
           enable: config.enable !== false,
           extra_config: extraConfig,
@@ -2308,7 +2415,18 @@ export class DashboardServer {
     }
 
     // ---- Debug Webhook: POST /api/debug/chat ----
+    // Disabled by default: this endpoint runs the FULL agent pipeline (all
+    // tools, file access, shell execution, web scraping) and is therefore an
+    // RCE attack surface. It must be explicitly enabled via the
+    // `debugChatEnabled` constructor flag (threaded from
+    // BootstrapOptions.dashboard.debugChatEnabled). When disabled we return
+    // 404 so the endpoint is not even discoverable.
     if (pathname === "/api/debug/chat" && req.method === "POST") {
+      if (!this.debugChatEnabled) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Debug chat endpoint is disabled." }));
+        return;
+      }
       const body = await this.readBody(req);
       const { message, session_id } = JSON.parse(body);
       if (!message) {
@@ -2449,11 +2567,22 @@ export class DashboardServer {
     const projectRoot = join(process.cwd());
     const publicDir = join(projectRoot, "frontend", "dist");
 
-    // Clean pathname
-    let safePath = pathname.replace(/^(\.\.[\/\\])+/, "");
+    // Verify the resolved path stays inside publicDir via a proper
+    // directory-containment check (isPathSafe). The previous approach only
+    // stripped *leading* `../` sequences with a regex and was trivially
+    // bypassed by embedded traversal (e.g. `/a/../..`), encoded variants
+    // (`..%2f`), or `....//` — allowing reads of arbitrary files.
+    let safePath = pathname;
     if (safePath === "/") safePath = "/index.html";
+    // Strip leading slashes so resolve() treats it as relative to publicDir.
+    const relPath = safePath.replace(/^\/+/, "");
+    if (!isPathSafe(publicDir, relPath)) {
+      res.writeHead(403, { "Content-Type": "text/plain" });
+      res.end("Forbidden");
+      return;
+    }
 
-    let filePath = join(publicDir, safePath);
+    let filePath = join(publicDir, relPath);
 
     try {
       const fileStat = await stat(filePath);
