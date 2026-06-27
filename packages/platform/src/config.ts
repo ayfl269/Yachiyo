@@ -63,6 +63,12 @@ export interface WebChatAdapterConfig extends AdapterConfigBase {
   type: "webchat";
   id: string;
   name?: string;
+  port?: number;
+  host?: string;
+  /** Bearer token required for all WebChat requests. When unset, auth is disabled (dev mode). */
+  authToken?: string;
+  /** Allowed CORS origins. Leave unset for same-origin only. */
+  allowedOrigins?: string[];
 }
 
 export function validateAdapterConfig(config: unknown): AdapterConfigBase {

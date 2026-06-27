@@ -5,6 +5,7 @@
 import { createFunctionTool, type FunctionTool } from "./tool.js";
 import type { ContextWrapper, CallToolResult, ImageContent } from "./types.js";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { safeFetch, assertSafeUrl } from "@yachiyo/common/ssrf-guard.js";
 
 // ── Shared context type ──
 
@@ -122,7 +123,9 @@ export function createWebFetchTool(): FunctionTool<WebToolContext> {
           fetchOptions.body = body;
         }
 
-        const response = await fetch(url, fetchOptions);
+        // safeFetch validates URL scheme + DNS-resolved IPs against private
+        // ranges and follows redirects manually, re-validating each hop.
+        const response = await safeFetch(url, fetchOptions);
         clearTimeout(timeoutId);
 
         let text = await response.text();
@@ -145,6 +148,9 @@ export function createWebFetchTool(): FunctionTool<WebToolContext> {
 
         if (screenshot) {
           try {
+            // Re-validate the URL before handing it to Playwright, which
+            // bypasses safeFetch. Defense-in-depth against DNS rebinding.
+            await assertSafeUrl(url);
             const browser = await chromium.launch({ headless: true, args: ["--disable-blink-features=AutomationControlled", "--no-sandbox"] });
             const browserContext = await browser.newContext({
               userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -712,14 +718,17 @@ export function createHttpRequestTool(): FunctionTool<WebToolContext> {
           method,
           headers: requestHeaders,
           signal: controller.signal,
-          redirect: followRedirects ? "follow" : "manual",
         };
 
         if (body && ["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
           fetchOptions.body = body;
         }
 
-        const response = await fetch(url, fetchOptions);
+        // safeFetch validates URL scheme + DNS-resolved IPs against private
+        // ranges and follows redirects manually, re-validating each hop.
+        // When the caller disabled redirect following, pass maxRedirects=0
+        // so the initial URL is still validated but no hops occur.
+        const response = await safeFetch(url, fetchOptions, followRedirects ? 5 : 0);
         clearTimeout(timeoutId);
 
         // Collect response headers

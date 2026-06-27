@@ -8,7 +8,7 @@ import { createFunctionTool, type FunctionTool } from "./tool.js";
 import type { ContextWrapper, CallToolResult } from "./types.js";
 import { readFile, writeFile, mkdir, readdir, stat, unlink, rename } from "fs/promises";
 import { createWriteStream, existsSync } from "fs";
-import { join, resolve, normalize, dirname } from "path";
+import { join, resolve, normalize, dirname, sep } from "path";
 import { execFile, type ChildProcess } from "child_process";
 import { tmpdir } from "os";
 
@@ -35,6 +35,11 @@ function getToolContext(_ctx: unknown): ComputerToolContext {
 
 /**
  * Normalize a workspace path for local runtime.
+ *
+ * Rejects paths that resolve outside `workspaceRoot` to prevent path
+ * traversal attacks (e.g. `/etc/passwd`, `../../etc/shadow`). Absolute
+ * paths and relative paths are both resolved and then checked against the
+ * workspace boundary using directory containment (not substring matching).
  */
 function normalizeRwPath(
   rawPath: string,
@@ -47,6 +52,12 @@ function normalizeRwPath(
     p = resolve(root, p);
   } else {
     p = resolve(p);
+  }
+
+  // Enforce workspace boundary: resolved path must be the root itself or
+  // live inside it. This blocks absolute paths and `../` escape attempts.
+  if (p !== root && !p.startsWith(root + sep)) {
+    throw new Error(`Path '${p}' is outside the workspace root '${root}'`);
   }
 
   return p;
