@@ -458,7 +458,7 @@ export default function SkillManager() {
       <div className="page-header">
         <div>
           <h1>技能管理</h1>
-          <p>管理 Agent 可用的技能（Skills）。支持手动注册、ZIP 批量导入、文件浏览与编辑。</p>
+          <p>管理 Agent 可调用的技能，通过预设流程扩展其行动能力</p>
         </div>
         <div className="header-actions">
           <button className="btn" onClick={fetchSkills} disabled={loading} title="刷新列表">

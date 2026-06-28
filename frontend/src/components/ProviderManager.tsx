@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState, type ChangeEvent } from 'react'
+import { createPortal } from 'react-dom'
 import {
   Plus, Save, Trash2, RefreshCw, Search, Download,
   Pencil, Power, Image as ImageIcon,
-  AudioWaveform, Wrench, Brain, MousePointerClick, Globe,
+  AudioWaveform, Wrench, Brain, Globe,
   Play, Sparkles
 } from 'lucide-react'
 import { useToast, ToastPortal, Modal } from './shared'
@@ -95,8 +96,11 @@ function getProviderType(provider: any): string | undefined {
     anthropic_chat_completion: 'chat_completion',
     googlegenai_chat_completion: 'chat_completion',
     dify: 'chat_completion', coze: 'chat_completion',
-    openai_whisper_api: 'speech_to_text', openai_tts_api: 'text_to_speech',
+    openai_whisper_api: 'speech_to_text', openai_stt: 'speech_to_text',
+    openai_tts_api: 'text_to_speech', openai_tts: 'text_to_speech',
     edge_tts: 'text_to_speech', dashscope_tts: 'text_to_speech',
+    openai_embedding: 'embedding', gemini_embedding: 'embedding',
+    cohere: 'rerank', jina: 'rerank', voyage: 'rerank', generic_rerank: 'rerank',
   }
   return mapping[provider.type]
 }
@@ -325,6 +329,20 @@ function getTemplatesByType(schema: Record<string, any>, type: string): Record<s
 }
 
 // ===== Component =====
+async function parseResponseJson(res: Response): Promise<any> {
+  if (!res.ok) {
+    let errMessage = `HTTP ${res.status}`
+    try {
+      const err = await res.json()
+      errMessage = err.message || err.error || errMessage
+    } catch {
+      // Response wasn't JSON — use the status code
+    }
+    throw new Error(errMessage)
+  }
+  return res.json()
+}
+
 export default function ProviderManager() {
   // ===== State =====
   const [loading, setLoading] = useState(true)
@@ -355,6 +373,8 @@ export default function ProviderManager() {
   const [providerEditOriginalId, setProviderEditOriginalId] = useState('')
   const [providerEditMode, setProviderEditMode] = useState<'add' | 'edit'>('edit')
   const [showAddSourceMenu, setShowAddSourceMenu] = useState(false)
+  const [showSourceDrawer, setShowSourceDrawer] = useState(false)
+  const [isNewProviderSource, setIsNewProviderSource] = useState(false)
 
   // Non-chat provider full config dialog
   const [showNonChatConfigDialog, setShowNonChatConfigDialog] = useState(false)
@@ -497,7 +517,7 @@ export default function ProviderManager() {
   async function loadConfig() {
     try {
       const res = await fetch('/api/config/provider/template')
-      const json = await res.json()
+      const json = await parseResponseJson(res)
       if (json.status === 'ok') {
         const schema = json.data.config_schema || {}
         setConfigSchema(schema)
@@ -515,7 +535,7 @@ export default function ProviderManager() {
   function selectProviderSource(source: ProviderSource | null) {
     setSelectedProviderSource(source)
     setSelectedProviderSourceOriginalId(source?.id || null)
-    setEditableProviderSource(source ? JSON.parse(JSON.stringify(source)) : null)
+    setEditableProviderSource(source ? structuredClone(source) : null)
     setAvailableModels([])
     setModelMetadata({})
     setIsSourceModified(false)
@@ -544,7 +564,9 @@ export default function ProviderManager() {
     setProviderSources(prev => [...prev, newSource])
     selectProviderSource(newSource)
     setIsSourceModified(true)
+    setIsNewProviderSource(true)
     setShowAddSourceMenu(false)
+    setShowSourceDrawer(true)
   }
 
   async function deleteProviderSource(source: ProviderSource) {
@@ -555,18 +577,58 @@ export default function ProviderManager() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: source.id })
       })
-      const json = await res.json()
+      const json = await parseResponseJson(res)
       if (json.status === 'error') { showMessage(json.message, 'error'); return }
 
       setProviders(prev => prev.filter(p => p.provider_source_id !== source.id))
       setProviderSources(prev => prev.filter(s => s.id !== source.id))
-      if (selectedProviderSource?.id === source.id) selectProviderSource(null)
+      if (selectedProviderSource?.id === source.id) {
+        selectProviderSource(null)
+        setShowSourceDrawer(false)
+      }
       showMessage('提供商源已删除')
     } catch (error: any) {
       showMessage(error.message || '删除失败', 'error')
-    } finally {
-      void loadConfig()
     }
+  }
+
+  async function toggleProviderSourceEnable(source: ProviderSource, value: boolean) {
+    const nextSource = { ...source, enable: value }
+    setProviderSources(prev => prev.map(s => s.id === source.id ? nextSource : s))
+    setEditableProviderSource(prev => (prev && prev.id === source.id) ? { ...prev, enable: value } : prev)
+    setSelectedProviderSource(prev => (prev && prev.id === source.id) ? { ...prev, enable: value } : prev)
+    try {
+      const res = await fetch('/api/config/provider_sources/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config: nextSource, original_id: source.id })
+      })
+      const json = await parseResponseJson(res)
+      if (json.status !== 'ok') throw new Error(json.message)
+      showMessage(json.message || '状态已更新')
+    } catch (error: any) {
+      setProviderSources(prev => prev.map(s => s.id === source.id ? source : s))
+      setEditableProviderSource(prev => (prev && prev.id === source.id) ? { ...prev, enable: source.enable } : prev)
+      setSelectedProviderSource(prev => (prev && prev.id === source.id) ? { ...prev, enable: source.enable } : prev)
+      showMessage(error.message || '更新失败', 'error')
+    }
+  }
+
+  function openSourceDrawer(source: ProviderSource) {
+    selectProviderSource(source)
+    setIsNewProviderSource(false)
+    setShowAddSourceMenu(false)
+    setShowSourceDrawer(true)
+  }
+
+  function closeSourceDrawer() {
+    // Discard unsaved new provider source on close
+    if (isNewProviderSource && editableProviderSource) {
+      setProviderSources(prev => prev.filter(s => s.id !== editableProviderSource.id))
+    }
+    setShowSourceDrawer(false)
+    selectProviderSource(null)
+    setIsNewProviderSource(false)
   }
 
   async function saveProviderSource(): Promise<boolean> {
@@ -579,7 +641,7 @@ export default function ProviderManager() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ config: editableProviderSource, original_id: originalId })
       })
-      const json = await res.json()
+      const json = await parseResponseJson(res)
       if (json.status !== 'ok') throw new Error(json.message)
 
       if (editableProviderSource.id !== originalId) {
@@ -591,7 +653,7 @@ export default function ProviderManager() {
         setSelectedProviderSourceOriginalId(editableProviderSource.id)
       }
 
-      const updatedSource = JSON.parse(JSON.stringify(editableProviderSource)) as ProviderSource
+      const updatedSource = structuredClone(editableProviderSource)
       setProviderSources(prev => {
         const idx = prev.findIndex(ps => ps.id === originalId)
         if (idx !== -1) {
@@ -602,8 +664,9 @@ export default function ProviderManager() {
         return prev
       })
       setSelectedProviderSource(updatedSource)
-      setEditableProviderSource(JSON.parse(JSON.stringify(updatedSource)))
+      setEditableProviderSource(structuredClone(updatedSource))
       setIsSourceModified(false)
+      setIsNewProviderSource(false)
       showMessage(json.message || '保存成功')
       return true
     } catch (error: any) {
@@ -611,7 +674,6 @@ export default function ProviderManager() {
       return false
     } finally {
       setSavingSource(false)
-      void loadConfig()
     }
   }
 
@@ -628,7 +690,7 @@ export default function ProviderManager() {
     try {
       const sourceId = editableProviderSource?.id || selectedProviderSource.id
       const res = await fetch(`/api/config/provider_sources/models?source_id=${encodeURIComponent(sourceId)}`)
-      const json = await res.json()
+      const json = await parseResponseJson(res)
       if (json.status === 'ok') {
         const meta = json.data.model_metadata || {}
         setModelMetadata(meta)
@@ -693,14 +755,12 @@ export default function ProviderManager() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: provider.id })
       })
-      const json = await res.json()
+      const json = await parseResponseJson(res)
       if (json.status === 'error') throw new Error(json.message)
       setProviders(prev => prev.filter(p => p.id !== provider.id))
       showMessage('模型提供商已删除')
     } catch (error: any) {
       showMessage(error.message || '删除失败', 'error')
-    } finally {
-      void loadConfig()
     }
   }
 
@@ -712,14 +772,12 @@ export default function ProviderManager() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: provider.id, config: nextConfig })
       })
-      const json = await res.json()
+      const json = await parseResponseJson(res)
       if (json.status === 'error') throw new Error(json.message)
       setProviders(prev => prev.map(p => p.id === provider.id ? { ...p, enable: value } : p))
       showMessage(json.message || '状态已更新')
     } catch (error: any) {
       showMessage(error.message || '更新失败', 'error')
-    } finally {
-      void loadConfig()
     }
   }
 
@@ -729,7 +787,7 @@ export default function ProviderManager() {
     try {
       const startTime = performance.now()
       const res = await fetch(`/api/config/provider/check_one?id=${encodeURIComponent(provider.id)}`)
-      const json = await res.json()
+      const json = await parseResponseJson(res)
       if (json.status === 'ok' && json.data?.error === null) {
         const latency = Math.max(0, Math.round(performance.now() - startTime))
         showMessage(`测试成功: ${provider.id} (${latency}ms)`)
@@ -745,7 +803,7 @@ export default function ProviderManager() {
 
   // Provider edit dialog
   function openProviderEdit(provider: Provider) {
-    const data = JSON.parse(JSON.stringify(provider)) as Provider
+    const data = structuredClone(provider)
     if (data.temperature === undefined) {
       data.temperature = 0.7
     }
@@ -786,7 +844,7 @@ export default function ProviderManager() {
               config: providerEditData
             })
           })
-      const json = await res.json()
+      const json = await parseResponseJson(res)
       if (json.status === 'error') throw new Error(json.message)
       showMessage(json.message || (isAdding ? '添加成功' : '更新成功'))
       setShowProviderEditDialog(false)
@@ -794,7 +852,6 @@ export default function ProviderManager() {
       showMessage(error.message || '保存失败', 'error')
     } finally {
       setSavingProviders(prev => prev.filter(id => id !== targetId))
-      void loadConfig()
     }
   }
 
@@ -817,7 +874,7 @@ export default function ProviderManager() {
   async function selectProviderTemplate(name: string) {
     const template = providerTemplates[name]
     if (!template) return
-    setNonChatConfigData(JSON.parse(JSON.stringify(template)))
+    setNonChatConfigData(structuredClone(template))
     setNonChatConfigMode('add')
     setShowAddProviderDialog(false)
     setShowNonChatConfigDialog(true)
@@ -830,7 +887,7 @@ export default function ProviderManager() {
 
   // Non-chat provider full config edit
   function openNonChatProviderEdit(provider: Provider) {
-    setNonChatConfigData(JSON.parse(JSON.stringify(provider)))
+    setNonChatConfigData(structuredClone(provider))
     setNonChatConfigMode('edit')
     setShowNonChatConfigDialog(true)
   }
@@ -854,15 +911,15 @@ export default function ProviderManager() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(nonChatConfigData)
           })
-      const json = await res.json()
+      const json = await parseResponseJson(res)
       if (json.status === 'error') throw new Error(json.message)
       showMessage(json.message || (isEditing ? '更新成功' : '添加成功'))
       setShowNonChatConfigDialog(false)
+      loadConfig()
     } catch (error: any) {
       showMessage(error.message || '保存失败', 'error')
     } finally {
       setNonChatConfigSaving(false)
-      void loadConfig()
     }
   }
 
@@ -926,6 +983,7 @@ export default function ProviderManager() {
     setAvailableModels([])
     setModelMetadata({})
     setIsSourceModified(false)
+    setShowSourceDrawer(false)
   }, [selectedProviderType])
 
   // ===== Render helpers =====
@@ -947,9 +1005,34 @@ export default function ProviderManager() {
       <div className="page-header">
         <div>
           <h1>模型提供商</h1>
-          <p>配置和管理语言模型、向量模型、重排模型、TTS/STT 语音等服务的第三方 API 通道。</p>
+          <p>集中管理对话模型、向量嵌入、重排序及语音合成/识别等第三方 API 通道</p>
         </div>
-        {selectedProviderType !== 'chat_completion' && (
+        {selectedProviderType === 'chat_completion' ? (
+          <div className="add-source-wrapper">
+            <button className="btn primary" onClick={() => setShowAddSourceMenu(!showAddSourceMenu)}>
+              <Plus size={16} /> 新增提供商源
+            </button>
+            {showAddSourceMenu && (
+              <div className="add-source-menu">
+                {availableSourceTypes.map(sourceType => (
+                  <button
+                    key={sourceType.value}
+                    className="menu-item"
+                    onClick={() => addProviderSource(sourceType.value)}
+                  >
+                    {sourceType.icon ? (
+                      <img src={sourceType.icon} className="menu-item-icon" alt="" />
+                    ) : (
+                      <span className="menu-item-fallback">{sourceType.label[0]}</span>
+                    )}
+                    <span>{sourceType.label}</span>
+                  </button>
+                ))}
+                {availableSourceTypes.length === 0 && <div className="menu-empty">暂无可用模板</div>}
+              </div>
+            )}
+          </div>
+        ) : (
           <button className="btn primary" onClick={openAddProviderDialog}>
             <Plus size={16} /> 添加提供商
           </button>
@@ -962,7 +1045,7 @@ export default function ProviderManager() {
           <button
             key={type.value}
             className={`tab-btn${selectedProviderType === type.value ? ' active' : ''}`}
-            onClick={() => setSelectedProviderType(type.value)}
+            onClick={() => { closeSourceDrawer(); setSelectedProviderType(type.value) }}
           >
             {type.label}
           </button>
@@ -976,158 +1059,115 @@ export default function ProviderManager() {
           <p>加载中...</p>
         </div>
       ) : selectedProviderType === 'chat_completion' ? (
-        /* Chat Completion Workbench */
-        <div className="provider-workbench">
-          {/* Sidebar */}
-          <div className="workbench-sidebar">
-            <div className="sidebar-head">
-              <h3 className="sidebar-title">提供商源</h3>
-              <div className="sidebar-controls">
-                <div className="add-source-wrapper">
-                  <button className="btn sm primary" onClick={() => setShowAddSourceMenu(!showAddSourceMenu)}>
-                    <Plus size={14} /> 新增
-                  </button>
-                  {showAddSourceMenu && (
-                    <div className="add-source-menu">
-                      {availableSourceTypes.map(sourceType => (
-                        <button
-                          key={sourceType.value}
-                          className="menu-item"
-                          onClick={() => addProviderSource(sourceType.value)}
-                        >
-                          {sourceType.icon ? (
-                            <img src={sourceType.icon} className="menu-item-icon" alt="" />
-                          ) : (
-                            <span className="menu-item-fallback">{sourceType.label[0]}</span>
-                          )}
-                          <span>{sourceType.label}</span>
-                        </button>
-                      ))}
-                      {availableSourceTypes.length === 0 && <div className="menu-empty">暂无可用模板</div>}
-                    </div>
-                  )}
-                </div>
-              </div>
+        /* Chat Completion: Card Grid + Drawer */
+        <>
+          {displayedProviderSources.length === 0 ? (
+            <div className="empty-state-full">
+              <Globe size={48} className="empty-icon" />
+              <p>暂无提供商源</p>
             </div>
-
-            {displayedProviderSources.length > 0 ? (
-              <div className="source-list">
-                {displayedProviderSources.map(source => (
-                  <div
-                    key={source.id}
-                    className={`source-item${selectedProviderSource?.id === source.id ? ' active' : ''}`}
-                    onClick={() => selectProviderSource(source)}
-                  >
-                    {getProviderIcon(source.provider) ? (
-                      <img src={getProviderIcon(source.provider)} className="source-icon" alt="" />
-                    ) : (
-                      <div className="source-icon-fallback">{(source.id || '?')[0].toUpperCase()}</div>
-                    )}
-                    <div className="source-item-content">
-                      <div className="source-item-title">{source.id}</div>
-                      <div className="source-item-subtitle">{source.api_base || source.provider}</div>
+          ) : (
+            <>
+              <div className="platform-grid">
+                {displayedProviderSources.map(source => {
+                  const icon = getProviderIcon(source.provider)
+                  return (
+                    <div key={source.id} className={`platform-card source-card${!source.enable ? ' card-stopped' : ''}`}>
+                      <div className="card-header">
+                        <span className="card-title" title={source.id}>{source.id}</span>
+                        <label className="toggle-switch" title={source.enable ? '停用' : '启用'}>
+                          <input
+                            type="checkbox"
+                            checked={source.enable}
+                            onChange={() => void toggleProviderSourceEnable(source, !source.enable)}
+                          />
+                          <span className="toggle-slider"></span>
+                        </label>
+                      </div>
+                      {icon && <img src={icon} className="bg-logo" alt="" />}
+                      <div className="card-footer">
+                        <button className="btn-card-delete" onClick={() => void deleteProviderSource(source)}>删除</button>
+                        <button className="btn-card-edit" onClick={() => openSourceDrawer(source)}>编辑</button>
+                      </div>
                     </div>
-                    <button className="source-delete-btn" onClick={(e) => { e.stopPropagation(); void deleteProviderSource(source) }} title="删除">
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
-            ) : (
-              <div className="sidebar-empty">
-                <Globe size={36} className="empty-icon" />
-                <p>暂无提供商源</p>
-              </div>
-            )}
-          </div>
+            </>
+          )}
 
-          {/* Divider */}
-          <div className="workbench-divider"></div>
-
-          {/* Main Panel */}
-          <div className="workbench-main">
-            {selectedProviderSource ? (
-              <div className="config-shell">
-                {/* Config Header */}
-                <div className="config-header">
-                  <div className="config-headline">
-                    <div className="config-title">{editableProviderSource?.id || selectedProviderSource.id}</div>
-                    <div className="config-subtitle">{editableProviderSource?.api_base || 'N/A'}</div>
+          {/* Source Edit Drawer */}
+          {showSourceDrawer && editableProviderSource && createPortal(
+            <>
+              <div className="drawer-overlay" onClick={closeSourceDrawer} />
+              <div className="drawer" role="dialog" aria-modal="true">
+                <div className="drawer-header">
+                  <div className="drawer-header-text">
+                    <div className="drawer-title">{editableProviderSource.id}</div>
+                    <div className="drawer-subtitle">{editableProviderSource.api_base || '未配置 API 地址'}</div>
                   </div>
-                  <button
-                    className="btn primary"
-                    disabled={!isSourceModified || savingSource}
-                    onClick={() => void saveProviderSource()}
-                  >
-                    {savingSource ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
-                    {savingSource ? '保存中...' : '保存'}
+                  <button className="close-btn" onClick={closeSourceDrawer} aria-label="关闭" title="关闭">
+                    ×
                   </button>
                 </div>
-
-                <div className="config-divider"></div>
-
-                {/* Config Body */}
-                <div className="config-body">
+                <div className="drawer-body">
                   {/* Basic Settings */}
-                  <section className="config-section">
+                  <section className="drawer-section">
                     <div className="section-title">基础配置</div>
                     <div className="form-grid">
                       <div className="form-group">
                         <label>标识 ID</label>
-                        <input type="text" value={editableProviderSource?.id ?? ''} onChange={e => setSourceField('id', e.target.value)} className="form-control font-mono" placeholder="唯一标识" />
+                        <input type="text" value={editableProviderSource.id ?? ''} onChange={e => setSourceField('id', e.target.value)} className="form-control font-mono" placeholder="唯一标识" />
                       </div>
                       <div className="form-group">
                         <label>API Key</label>
-                        <input type="password" value={editableProviderSource?.key ?? ''} onChange={e => setSourceField('key', e.target.value)} className="form-control font-mono" placeholder="鉴权密钥" />
+                        <input type="password" value={editableProviderSource.key ?? ''} onChange={e => setSourceField('key', e.target.value)} className="form-control font-mono" placeholder="鉴权密钥" />
                       </div>
                       <div className="form-group span-2">
                         <label>API Base URL</label>
-                        <input type="text" value={editableProviderSource?.api_base ?? ''} onChange={e => setSourceField('api_base', e.target.value)} className="form-control font-mono" placeholder="API 端点地址" />
+                        <input type="text" value={editableProviderSource.api_base ?? ''} onChange={e => setSourceField('api_base', e.target.value)} className="form-control font-mono" placeholder="API 端点地址" />
                       </div>
                     </div>
                   </section>
 
                   {/* Advanced Settings */}
                   {advancedSourceConfig && (
-                    <>
-                      <div className="config-divider"></div>
-                      <section className="config-section">
-                        <div className="section-title">高级配置</div>
-                        <div className="form-grid">
-                          {Object.entries(advancedSourceConfig).map(([key, value]) => (
-                            <div className="form-group" key={key}>
-                              <label>{key}</label>
-                              {(typeof value === 'string' || typeof value === 'number') ? (
-                                <input
-                                  type={typeof value === 'number' ? 'number' : 'text'}
-                                  value={editableProviderSource?.[key] ?? ''}
-                                  onChange={e => setSourceField(key, typeof value === 'number' ? Number(e.target.value) : e.target.value)}
-                                  className="form-control font-mono"
-                                />
-                              ) : typeof value === 'boolean' ? (
-                                <label className="toggle-label">
-                                  <input type="checkbox" checked={Boolean(editableProviderSource?.[key])} onChange={e => setSourceField(key, e.target.checked)} />
-                                  <span>{value ? '启用' : '停用'}</span>
-                                </label>
-                              ) : (
-                                <textarea
-                                  value={JSON.stringify(value, null, 2)}
-                                  onChange={e => tryParseJson(e, key)}
-                                  className="form-control font-mono textarea-sm"
-                                  rows={2}
-                                />
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      </section>
-                    </>
+                    <section className="drawer-section">
+                      <div className="section-title">高级配置</div>
+                      <div className="form-grid">
+                        {Object.entries(advancedSourceConfig).map(([key, value]) => (
+                          <div className="form-group" key={key}>
+                            <label>{key}</label>
+                            {(typeof value === 'string' || typeof value === 'number') ? (
+                              <input
+                                type={typeof value === 'number' ? 'number' : 'text'}
+                                value={editableProviderSource[key] ?? ''}
+                                onChange={e => setSourceField(key, typeof value === 'number' ? Number(e.target.value) : e.target.value)}
+                                className="form-control font-mono"
+                              />
+                            ) : typeof value === 'boolean' ? (
+                              <label className="toggle-label">
+                                <input type="checkbox" checked={Boolean(editableProviderSource[key])} onChange={e => setSourceField(key, e.target.checked)} />
+                                <span>{value ? '启用' : '停用'}</span>
+                              </label>
+                            ) : (
+                              <textarea
+                                value={JSON.stringify(value, null, 2)}
+                                onChange={e => tryParseJson(e, key)}
+                                className="form-control font-mono textarea-sm"
+                                rows={2}
+                              />
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </section>
                   )}
 
                   <div className="config-divider"></div>
 
                   {/* Models Panel */}
-                  <section className="config-section">
+                  <section className="drawer-section">
                     <div className="models-toolbar">
                       <div>
                         <div className="section-title">模型管理</div>
@@ -1191,7 +1231,7 @@ export default function ProviderManager() {
                                 <button className="icon-btn" onClick={() => openProviderEdit(entry.provider!)} title="编辑">
                                   <Pencil size={14} />
                                 </button>
-                                <button className="icon-btn danger" onClick={() => void deleteProvider(entry.provider!)} title="删除">
+                                <button className="icon-btn danger" onClick={() => void deleteProvider(entry.provider!)} title="删除" aria-label="删除">
                                   <Trash2 size={14} />
                                 </button>
                               </div>
@@ -1242,16 +1282,22 @@ export default function ProviderManager() {
                     </div>
                   </section>
                 </div>
+                <div className="drawer-footer">
+                  <button className="btn" onClick={closeSourceDrawer}>取消</button>
+                  <button
+                    className="btn primary"
+                    disabled={!isSourceModified || savingSource}
+                    onClick={() => void saveProviderSource()}
+                  >
+                    {savingSource ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
+                    {savingSource ? '保存中...' : '保存'}
+                  </button>
+                </div>
               </div>
-            ) : (
-              /* Empty State */
-              <div className="workbench-empty">
-                <MousePointerClick size={48} className="empty-icon" />
-                <p>请从左侧选择一个提供商源</p>
-              </div>
-            )}
-          </div>
-        </div>
+            </>,
+            document.body
+          )}
+        </>
       ) : (
         /* Non-Chat Types: Card Grid Layout */
         filteredProviders.length === 0 ? (

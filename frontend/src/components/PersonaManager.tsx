@@ -86,6 +86,11 @@ function normalizeItems(data: unknown): ToolItem[] {
   )
 }
 
+let _personaItemIdCounter = 0
+function genItemId(): string {
+  return `pm-item-${++_personaItemIdCounter}`
+}
+
 export default function PersonaManager() {
   // ===== State =====
   const [personas, setPersonas] = useState<Persona[]>([])
@@ -115,6 +120,9 @@ export default function PersonaManager() {
 
   const [showCustomId, setShowCustomId] = useState(false)
   const [moodInput, setMoodInput] = useState('')
+
+  const [dialogPairIds, setDialogPairIds] = useState<string[]>([])
+  const [moodDialogIds, setMoodDialogIds] = useState<string[]>([])
 
   const { toast, showMessage } = useToast()
 
@@ -218,6 +226,8 @@ export default function PersonaManager() {
     setToolsMode('all')
     setSkillsMode('all')
     setActiveFormTab('basic')
+    setDialogPairIds([])
+    setMoodDialogIds([])
     setShowModal(true)
     fetchTools()
     fetchSkills()
@@ -225,7 +235,9 @@ export default function PersonaManager() {
 
   const handleEdit = (persona: Persona) => {
     setIsNew(false)
-    setEditingPersona(JSON.parse(JSON.stringify(persona)) as Persona)
+    setEditingPersona(structuredClone(persona))
+    setDialogPairIds(Array.from({ length: Math.ceil(persona.beginDialogs.length / 2) }, () => genItemId()))
+    setMoodDialogIds(persona.moodImitationDialogs.map(() => genItemId()))
     setToolsMode(persona.tools === null ? 'all' : 'selected')
     setSkillsMode(persona.skills === null ? 'all' : 'selected')
     setActiveFormTab('basic')
@@ -320,15 +332,18 @@ export default function PersonaManager() {
 
   const addBeginDialogPair = () => {
     setEditingPersona(prev => (prev ? { ...prev, beginDialogs: [...prev.beginDialogs, '', ''] } : prev))
+    setDialogPairIds(prev => [...prev, genItemId()])
   }
 
   const removeBeginDialogPair = (index: number) => {
+    const pairOrdinal = Math.floor(index / 2)
     setEditingPersona(prev => {
       if (!prev) return prev
-      const pairIndex = Math.floor(index / 2) * 2
+      const pairIndex = pairOrdinal * 2
       const next = prev.beginDialogs.filter((_, i) => i !== pairIndex && i !== pairIndex + 1)
       return { ...prev, beginDialogs: next }
     })
+    setDialogPairIds(prev => prev.filter((_, i) => i !== pairOrdinal))
   }
 
   const updateBeginDialog = (index: number, value: string) => {
@@ -345,6 +360,7 @@ export default function PersonaManager() {
     setEditingPersona(prev =>
       prev ? { ...prev, moodImitationDialogs: [...prev.moodImitationDialogs, value] } : prev
     )
+    setMoodDialogIds(prev => [...prev, genItemId()])
     setMoodInput('')
   }
 
@@ -354,6 +370,7 @@ export default function PersonaManager() {
         ? { ...prev, moodImitationDialogs: prev.moodImitationDialogs.filter((_, i) => i !== index) }
         : prev
     )
+    setMoodDialogIds(prev => prev.filter((_, i) => i !== index))
   }
 
   const isToolSelected = (toolName: string): boolean => {
@@ -419,7 +436,7 @@ export default function PersonaManager() {
       <div className="page-header">
         <div>
           <h1>角色设定</h1>
-          <p>管理助理的个性化 Prompt、开场对话、工具与技能权限，赋予助理独特的语气和专业领域知识。</p>
+          <p>配置助理的人设 Prompt、开场白与工具权限，赋予其独特的语气与专业领域知识</p>
         </div>
         <button className="btn primary" onClick={handleCreate}>
           <Plus size={16} /> 添加设定
@@ -643,7 +660,7 @@ export default function PersonaManager() {
                   {beginDialogPairs.length > 0 ? (
                     <div className="dialog-pairs">
                       {beginDialogPairs.map((pair, idx) => (
-                        <div key={idx} className="dialog-pair">
+                        <div key={dialogPairIds[idx] ?? `pair-${idx}`} className="dialog-pair">
                           <div className="dialog-pair-header">
                             <span className="dialog-pair-index">对话对 #{idx + 1}</span>
                             <button className="btn sm danger-text" onClick={() => removeBeginDialogPair(pair.userIndex)}>
@@ -698,7 +715,7 @@ export default function PersonaManager() {
                   {editingPersona.moodImitationDialogs.length > 0 ? (
                     <div className="dialog-items">
                       {editingPersona.moodImitationDialogs.map((item, idx) => (
-                        <div key={idx} className="dialog-item-row">
+                        <div key={moodDialogIds[idx] ?? `mood-${idx}`} className="dialog-item-row">
                           <span className="dialog-item-text">{item}</span>
                           <button className="icon-btn danger" onClick={() => removeMoodDialog(idx)}>
                             <X size={14} />
@@ -791,7 +808,20 @@ export default function PersonaManager() {
                           {editingPersona.tools.map(name => (
                             <span key={name} className="tag tool-tag">
                               {name}
-                              <X size={10} className="tag-remove" onClick={() => toggleTool(name)} />
+                              <X
+                                size={10}
+                                className="tag-remove"
+                                role="button"
+                                tabIndex={0}
+                                aria-label={`移除 ${name}`}
+                                onClick={() => toggleTool(name)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter' || e.key === ' ') {
+                                    e.preventDefault()
+                                    toggleTool(name)
+                                  }
+                                }}
+                              />
                             </span>
                           ))}
                         </div>
@@ -857,7 +887,20 @@ export default function PersonaManager() {
                           {editingPersona.skills.map(name => (
                             <span key={name} className="tag skill-tag">
                               {name}
-                              <X size={10} className="tag-remove" onClick={() => toggleSkill(name)} />
+                              <X
+                                size={10}
+                                className="tag-remove"
+                                role="button"
+                                tabIndex={0}
+                                aria-label={`移除 ${name}`}
+                                onClick={() => toggleSkill(name)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter' || e.key === ' ') {
+                                    e.preventDefault()
+                                    toggleSkill(name)
+                                  }
+                                }}
+                              />
                             </span>
                           ))}
                         </div>

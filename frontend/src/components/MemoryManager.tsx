@@ -367,7 +367,7 @@ export default function MemoryManager() {
       <div className="page-header">
         <div>
           <h1>记忆管理</h1>
-          <p>分层记忆架构：短期/长期/角色/用户资料，支持自动整理与老化机制。</p>
+          <p>管理短期、长期、角色与用户资料等多层记忆，支持自动整理与老化淘汰</p>
         </div>
         <div className="header-actions">
           <button className="btn" onClick={() => { fetchMemories(); fetchStats() }} disabled={loading} title="刷新">

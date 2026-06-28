@@ -130,7 +130,7 @@ function aggregateOverflowSeries(series: ProviderTrendItem[]): ProviderTrendItem
   ]
 }
 
-export default function Dashboard() {
+export default function Dashboard({ isLightMode }: { isLightMode: boolean }) {
   const [loading, setLoading] = useState(true)
   const [errorMessage, setErrorMessage] = useState('')
   const [baseStats, setBaseStats] = useState<BaseStatsResponse | null>(null)
@@ -139,17 +139,27 @@ export default function Dashboard() {
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null)
   const refreshTimerRef = useRef<number | null>(null)
 
-  const isDark = useMemo(() => !document.body.classList.contains('light-theme'), [lastUpdatedAt])
+  // Keep a ref to the latest `selectedRange` so the 30s interval callback
+  // (which is captured once on mount) always reads the current value instead
+  // of the stale closure from the initial render.
+  const selectedRangeRef = useRef(selectedRange)
+  selectedRangeRef.current = selectedRange
+
+  // Theme is now received as a prop from App, so the chart re-renders
+  // immediately when the user toggles light/dark mode.
+  const isDark = !isLightMode
 
   async function fetchBaseStats(): Promise<void> {
-    const res = await fetch(`/api/stat/get?offset_sec=${selectedRange * 24 * 60 * 60}`)
+    const range = selectedRangeRef.current
+    const res = await fetch(`/api/stat/get?offset_sec=${range * 24 * 60 * 60}`)
     if (!res.ok) throw new Error('Failed to fetch base stats')
     const json = await res.json()
     setBaseStats(json.data)
   }
 
   async function fetchProviderStats(): Promise<void> {
-    const res = await fetch(`/api/stat/provider-tokens?days=${selectedRange}`)
+    const range = selectedRangeRef.current
+    const res = await fetch(`/api/stat/provider-tokens?days=${range}`)
     if (!res.ok) throw new Error('Failed to fetch provider stats')
     const json = await res.json()
     setProviderStats(json.data)
@@ -168,17 +178,21 @@ export default function Dashboard() {
     }
   }
 
+  // Keep a ref to `refreshStats` so the interval always calls the latest
+  // version without needing to re-create the interval on every render.
+  const refreshStatsRef = useRef(refreshStats)
+  refreshStatsRef.current = refreshStats
+
   // Initial mount + auto-refresh every 30s
   useEffect(() => {
-    void refreshStats()
-    refreshTimerRef.current = window.setInterval(() => { void refreshStats() }, 30_000)
+    void refreshStatsRef.current()
+    refreshTimerRef.current = window.setInterval(() => { void refreshStatsRef.current() }, 30_000)
     return () => {
       if (refreshTimerRef.current) window.clearInterval(refreshTimerRef.current)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Range switch
+  // Range switch — re-fetch immediately when the user changes the range
   useEffect(() => {
     if (baseStats === null) return // skip on initial mount
     Promise.all([fetchBaseStats(), fetchProviderStats()])
@@ -288,7 +302,7 @@ export default function Dashboard() {
         <div className="stats-header">
           <div>
             <h1 className="stats-title">仪表盘</h1>
-            <p className="stats-subtitle">平台、消息与模型调用的统一视图</p>
+            <p className="stats-subtitle">实时监控平台运行状态、消息流量与模型调用趋势</p>
           </div>
           <div className="header-meta">
             <div className="range-selector">

@@ -21,6 +21,9 @@
     "noFallthroughCasesInSwitch": true,
     "erasableSyntaxOnly": true,
 
+    /* Type checking */
+    "strict": true,
+
     "types": ["vite/client"]
   },
   "include": ["src"]

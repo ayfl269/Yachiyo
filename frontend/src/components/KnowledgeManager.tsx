@@ -480,7 +480,7 @@ export default function KnowledgeManager() {
           <div className="page-header">
             <div>
               <h1>知识库管理</h1>
-              <p>基于检索增强生成 (RAG) 技术，支持创建独立的知识库、分块切片并持久化向量，让 Agent 能够搜索私有文件内容。</p>
+              <p>基于 RAG 技术创建知识库并持久化向量索引，让 Agent 能够检索私有文件内容</p>
             </div>
             <button className="btn primary" onClick={handleCreateKb}>
               <Plus size={16} /> 新建知识库
@@ -499,7 +499,14 @@ export default function KnowledgeManager() {
           {!(loading && kbs.length === 0) && (
             <div className="kbs-grid">
               {kbs.map(kb => (
-                <div key={kb.id} className="kb-card" onClick={() => selectKb(kb)}>
+                <div
+                  key={kb.id}
+                  className="kb-card"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => selectKb(kb)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectKb(kb) } }}
+                >
                   <div className="card-header">
                     <div className="title-section">
                       <span className="emoji-avatar">{kb.emoji}</span>

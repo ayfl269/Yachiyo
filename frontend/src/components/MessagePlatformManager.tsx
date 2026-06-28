@@ -105,6 +105,7 @@ export default function MessagePlatformManager() {
   const [wxPostCreateAccountId, setWxPostCreateAccountId] = useState('')
   const [wxPostCreateError, setWxPostCreateError] = useState('')
   const wxPostCreatePollTimer = useRef<ReturnType<typeof setInterval> | null>(null)
+  const wxPostCreateDelayTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const [wxScanningAdapterId, setWxScanningAdapterId] = useState('')
 
@@ -136,6 +137,10 @@ export default function MessagePlatformManager() {
     if (wxPostCreatePollTimer.current) {
       clearInterval(wxPostCreatePollTimer.current)
       wxPostCreatePollTimer.current = null
+    }
+    if (wxPostCreateDelayTimer.current) {
+      clearTimeout(wxPostCreateDelayTimer.current)
+      wxPostCreateDelayTimer.current = null
     }
   }, [])
 
@@ -208,7 +213,9 @@ export default function MessagePlatformManager() {
       }
     }
 
-    await new Promise(resolve => setTimeout(resolve, 1500))
+    await new Promise<void>(resolve => {
+      wxPostCreateDelayTimer.current = setTimeout(() => resolve(), 1500)
+    })
     await poll()
     wxPostCreatePollTimer.current = setInterval(() => {
       if (pollCount >= MAX_POLLS) {
@@ -397,7 +404,9 @@ export default function MessagePlatformManager() {
   }
 
   const deleteAdapter = async (id: string) => {
-    if (!confirm(`确定要移除平台适配器 "${id}" 吗？`)) return
+    // TODO: replace native confirm() with the shared <Modal> confirmation flow for consistency.
+    const confirmMessage = `确定要移除平台适配器 "${id}" 吗？`
+    if (!confirm(confirmMessage)) return
     try {
       const res = await fetch(`/api/adapters/${encodeURIComponent(id)}`, {
         method: 'DELETE'
@@ -441,10 +450,10 @@ export default function MessagePlatformManager() {
         <div className="panel-header">
           <div className="header-info">
             <h2>消息平台</h2>
-            <p className="subtitle">管理和配置各种外部接入平台，通过适配器管道与智能 Agent 交互</p>
+            <p className="subtitle">管理 OneBot、QQ、微信等接入平台，通过适配器管道与 Agent 双向通信</p>
           </div>
           <div className="header-actions">
-            <button className="btn btn-secondary btn-icon" onClick={fetchAdapters} disabled={isLoading}>
+            <button className="btn btn-secondary btn-icon" onClick={fetchAdapters} disabled={isLoading} aria-label="刷新平台列表">
               <RefreshCw className={`btn-icon-svg${isLoading ? ' animate-spin' : ''}`} />
             </button>
             <button className="btn btn-primary" onClick={openAddModal}>
@@ -465,7 +474,7 @@ export default function MessagePlatformManager() {
           <div className="empty-state">
             <MessageSquare className="empty-icon" />
             <h3>暂未接入任何消息平台</h3>
-            <p>点击上方"接入平台"按钮来配置 OneBot 11、QQ 官方 Bot 或其他接入通道。</p>
+            <p>点击上方"接入平台"按钮来配置接入通道。</p>
           </div>
         ) : (
           <div className="platform-grid">
@@ -492,7 +501,7 @@ export default function MessagePlatformManager() {
                   )}
                 </div>
 
-                <img src={getPlatformLogoUrl(adapter)} alt={adapter.id} className="bg-logo" />
+                <img src={getPlatformLogoUrl(adapter)} alt={`${adapter.id} 平台图标`} className="bg-logo" />
 
                 <div className="card-footer">
                   <button className="btn-card-delete" onClick={() => deleteAdapter(adapter.id)}>删除</button>
@@ -705,11 +714,11 @@ export default function MessagePlatformManager() {
               <div className="wx-oc-token-info">
                 <div className="token-field">
                   <label>Account ID</label>
-                  <div className="token-value">{editingWxAccountId || '未登录'}</div>
+                  <div className="token-value">{editingWxAccountId ? '••••••' : '未登录'}</div>
                 </div>
                 <div className="token-field">
                   <label>Bot Token</label>
-                  <div className="token-value token-masked">{editingWxToken || '未获取'}</div>
+                  <div className="token-value token-masked">{editingWxToken ? '••••••' : '未获取'}</div>
                 </div>
                 <div className="token-field">
                   <label>状态</label>

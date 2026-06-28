@@ -10,6 +10,11 @@ import App from './App'
 // login screen (see App.tsx). This avoids editing fetch calls in every
 // component. The token is only sent to same-origin /api/ paths, never to
 // cross-origin URLs or static assets.
+//
+// CSRF note: This design is inherently immune to CSRF. CSRF attacks exploit
+// the browser's automatic cookie-sending behaviour — since we use localStorage
+// + an explicit Authorization header (not cookies), cross-origin requests
+// from malicious pages cannot authenticate. No CSRF token is needed.
 const DASHBOARD_TOKEN_KEY = 'dashboardAuthToken'
 const originalFetch = window.fetch.bind(window)
 window.fetch = (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {

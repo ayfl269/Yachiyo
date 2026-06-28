@@ -12,15 +12,16 @@ export default defineConfig({
         target: 'http://127.0.0.1:8000',
         changeOrigin: true,
         configure: (proxy) => {
-          // Suppress noisy ECONNREFUSED errors when the backend isn't running yet.
-          // The frontend already handles API failures gracefully (error states / retries),
-          // so these proxy log lines are pure noise during startup.
+          // Handle all proxy errors (ECONNREFUSED, ETIMEDOUT, ENOTFOUND, etc.)
+          // so the dev server returns a clean JSON 502 instead of crashing the
+          // request with an unhandled error. The frontend already handles API
+          // failures gracefully (error states / retries).
           proxy.on('error', (err, _req, res) => {
-            if ('code' in err && err.code === 'ECONNREFUSED') {
-              if (res && 'headersSent' in res && !res.headersSent && typeof res.writeHead === 'function') {
-                res.writeHead(502, { 'Content-Type': 'application/json' })
-                res.end(JSON.stringify({ error: 'Backend server not available' }))
-              }
+            const code = 'code' in err ? String(err.code) : 'ERROR'
+            console.warn(`[vite-proxy] ${code}: ${err.message}`)
+            if (res && 'headersSent' in res && !res.headersSent && typeof res.writeHead === 'function') {
+              res.writeHead(502, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: 'Backend server not available', code }))
             }
           })
         },

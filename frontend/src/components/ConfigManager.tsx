@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Save, Settings, ShieldAlert, Cpu, Share2, Info, Brain } from 'lucide-react'
+import { useToast, ToastPortal } from './shared'
 
 interface AgentConfig {
   id: string
@@ -87,12 +88,17 @@ export default function ConfigManager() {
   const [saving, setSaving] = useState(false)
   const [activeSection, setActiveSection] = useState<ActiveSection>('basic')
   const [saveSuccess, setSaveSuccess] = useState(false)
+  const saveSuccessTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [fetchError, setFetchError] = useState('')
 
   // Form helper for safety keywords string
   const [safetyKeywordsStr, setSafetyKeywordsStr] = useState('')
 
+  const { toast, showMessage } = useToast()
+
   const fetchConfig = async () => {
     setLoading(true)
+    setFetchError('')
     try {
       const [cfgRes, provRes, personaRes] = await Promise.all([
         fetch('/api/config'),
@@ -117,6 +123,7 @@ export default function ConfigManager() {
       }
     } catch (error) {
       console.error('Error fetching config:', error)
+      setFetchError('加载配置失败，请检查后端服务是否运行')
     } finally {
       setLoading(false)
     }
@@ -144,10 +151,17 @@ export default function ConfigManager() {
       if (res.ok) {
         setConfig(configToSave)
         setSaveSuccess(true)
-        setTimeout(() => { setSaveSuccess(false) }, 3000)
+        if (saveSuccessTimerRef.current) clearTimeout(saveSuccessTimerRef.current)
+        saveSuccessTimerRef.current = setTimeout(() => { setSaveSuccess(false) }, 3000)
       } else {
-        const err = await res.json()
-        alert('保存失败: ' + (err.error || '未知错误'))
+        let errMessage = `HTTP ${res.status}`
+        try {
+          const err = await res.json()
+          errMessage = err.message || err.error || errMessage
+        } catch {
+          // Response wasn't JSON — use the status code
+        }
+        showMessage(`保存失败: ${errMessage}`, 'error')
       }
     } catch (error) {
       console.error('Error saving config:', error)
@@ -158,6 +172,12 @@ export default function ConfigManager() {
 
   useEffect(() => {
     fetchConfig()
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (saveSuccessTimerRef.current) clearTimeout(saveSuccessTimerRef.current)
+    }
   }, [])
 
   // Helper to update a single field of config
@@ -172,7 +192,7 @@ export default function ConfigManager() {
           <div className="header-main">
             <div>
               <h1>系统配置</h1>
-              <p>管理 Agent 的唤醒前缀、安全检测、频率限制等运行策略参数</p>
+              <p>管理唤醒前缀、安全检测、频率限制等 Agent 运行策略参数</p>
             </div>
             <button className="btn primary" disabled={saving} onClick={handleSave}>
               <Save className={`icon-inline${saving ? ' spinning' : ''}`} />
@@ -195,7 +215,7 @@ export default function ConfigManager() {
           <div className="header-main">
             <div>
               <h1>系统配置</h1>
-              <p>管理 Agent 的唤醒前缀、安全检测、频率限制等运行策略参数</p>
+              <p>管理唤醒前缀、安全检测、频率限制等 Agent 运行策略参数</p>
             </div>
             <button className="btn primary" disabled={saving} onClick={handleSave}>
               <Save className={`icon-inline${saving ? ' spinning' : ''}`} />
@@ -203,6 +223,12 @@ export default function ConfigManager() {
             </button>
           </div>
         </div>
+        {fetchError && (
+          <div className="loading-state">
+            <p style={{ color: 'var(--text-danger, #ef4444)', marginBottom: '1rem' }}>{fetchError}</p>
+            <button className="btn primary" onClick={fetchConfig}>重试</button>
+          </div>
+        )}
       </div>
     )
   }
@@ -213,7 +239,7 @@ export default function ConfigManager() {
         <div className="header-main">
           <div>
             <h1>系统配置</h1>
-            <p>管理 Agent 的唤醒前缀、安全检测、频率限制等运行策略参数</p>
+            <p>管理唤醒前缀、安全检测、频率限制等 Agent 运行策略参数</p>
           </div>
           <button className="btn primary" disabled={saving} onClick={handleSave}>
             <Save className={`icon-inline${saving ? ' spinning' : ''}`} />
@@ -945,6 +971,7 @@ export default function ConfigManager() {
           )}
         </div>
       </div>
+      <ToastPortal toast={toast} />
     </div>
   )
 }

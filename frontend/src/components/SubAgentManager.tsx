@@ -138,7 +138,7 @@ export default function SubAgentManager() {
         <div className="header-main">
           <div>
             <h1>子 Agent 管理</h1>
-            <p>管理动态创建的子代理。注册后，它们将在主 Agent 的决策工具箱中可用，用于分派特定复杂的子任务。</p>
+            <p>创建和管理子代理，将其作为可复用的专属助理分配给特定任务</p>
           </div>
           <button className="btn primary" onClick={handleCreate}>
             <Plus size={16} className="icon-inline" /> 添加子 Agent

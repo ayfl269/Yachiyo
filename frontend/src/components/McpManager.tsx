@@ -23,11 +23,16 @@ interface EditForm {
   transportType: 'stdio' | 'http'
   command: string
   argsStr: string
-  env: Array<{ key: string; value: string }>
+  env: Array<{ key: string; value: string; id: string }>
   url: string
   transport: 'sse' | 'streamable_http'
-  headers: Array<{ key: string; value: string }>
+  headers: Array<{ key: string; value: string; id: string }>
   jsonConfig: string
+}
+
+let _mcpRowIdCounter = 0
+function genRowId(): string {
+  return `mcp-row-${++_mcpRowIdCounter}`
 }
 
 interface TestResult {
@@ -57,16 +62,16 @@ function getTransportType(config: Record<string, any>): 'stdio' | 'http' {
 
 function configToForm(name: string, config: Record<string, any>): EditForm {
   const transportType = getTransportType(config)
-  const envArray: Array<{ key: string; value: string }> = []
+  const envArray: Array<{ key: string; value: string; id: string }> = []
   if (config.env && typeof config.env === 'object') {
     for (const [key, value] of Object.entries(config.env)) {
-      envArray.push({ key, value: String(value) })
+      envArray.push({ key, value: String(value), id: genRowId() })
     }
   }
-  const headersArray: Array<{ key: string; value: string }> = []
+  const headersArray: Array<{ key: string; value: string; id: string }> = []
   if (config.headers && typeof config.headers === 'object') {
     for (const [key, value] of Object.entries(config.headers)) {
-      headersArray.push({ key, value: String(value) })
+      headersArray.push({ key, value: String(value), id: genRowId() })
     }
   }
   const argsString = Array.isArray(config.args) ? config.args.join(' ') : ''
@@ -166,10 +171,10 @@ export default function McpManager() {
         const parsed = JSON.parse(prev.jsonConfig)
         const isHttp = 'url' in parsed
         if (isHttp) {
-          const headers: Array<{ key: string; value: string }> = []
+          const headers: Array<{ key: string; value: string; id: string }> = []
           if (parsed.headers && typeof parsed.headers === 'object') {
             for (const [key, value] of Object.entries(parsed.headers)) {
-              headers.push({ key, value: String(value) })
+              headers.push({ key, value: String(value), id: genRowId() })
             }
           }
           return {
@@ -180,10 +185,10 @@ export default function McpManager() {
             headers
           }
         } else {
-          const env: Array<{ key: string; value: string }> = []
+          const env: Array<{ key: string; value: string; id: string }> = []
           if (parsed.env && typeof parsed.env === 'object') {
             for (const [key, value] of Object.entries(parsed.env)) {
-              env.push({ key, value: String(value) })
+              env.push({ key, value: String(value), id: genRowId() })
             }
           }
           return {
@@ -310,8 +315,12 @@ export default function McpManager() {
         closeDialog()
         await fetchServers()
       } else {
-        const text = await res.text()
-        showMessage(`保存失败: ${text}`, 'error')
+        try {
+          const text = await res.text()
+          showMessage(`保存失败: ${text.slice(0, 200)}`, 'error')
+        } catch {
+          showMessage('保存失败', 'error')
+        }
       }
     } catch (error) {
       showMessage('保存失败', 'error')
@@ -373,7 +382,7 @@ export default function McpManager() {
 
   // ===== List editors =====
   function addEnvRow() {
-    setEditForm(prev => ({ ...prev, env: [...prev.env, { key: '', value: '' }] }))
+    setEditForm(prev => ({ ...prev, env: [...prev.env, { key: '', value: '', id: genRowId() }] }))
   }
 
   function removeEnvRow(index: number) {
@@ -381,7 +390,7 @@ export default function McpManager() {
   }
 
   function addHeaderRow() {
-    setEditForm(prev => ({ ...prev, headers: [...prev.headers, { key: '', value: '' }] }))
+    setEditForm(prev => ({ ...prev, headers: [...prev.headers, { key: '', value: '', id: genRowId() }] }))
   }
 
   function removeHeaderRow(index: number) {
@@ -405,7 +414,7 @@ export default function McpManager() {
       <div className="page-header">
         <div>
           <h1>MCP 服务器管理</h1>
-          <p>管理 Model Context Protocol 服务，允许 Agent 调用外部工具及扩展能力</p>
+          <p>管理 Model Context Protocol 服务，让 Agent 安全调用外部工具与资源</p>
         </div>
         <button className="btn primary" onClick={openAddDialog}>
           <Plus size={16} /> 添加 MCP 服务
@@ -437,10 +446,10 @@ export default function McpManager() {
                   </div>
                 </div>
                 <div className="actions">
-                  <button className="icon-btn" title="编辑" onClick={() => openEditDialog(server)}>
+                  <button className="icon-btn" title="编辑" aria-label="编辑" onClick={() => openEditDialog(server)}>
                     <Pencil size={14} />
                   </button>
-                  <button className="icon-btn danger" title="删除" onClick={() => openDeleteDialog(server.name)}>
+                  <button className="icon-btn danger" title="删除" aria-label="删除" onClick={() => openDeleteDialog(server.name)}>
                     <Trash2 size={14} />
                   </button>
                 </div>
@@ -502,7 +511,19 @@ export default function McpManager() {
 
               {/* Card Footer */}
               <div className="card-footer">
-                <div className="active-toggle" onClick={() => toggleActive(server)}>
+                <div
+                  className="active-toggle"
+                  role="button"
+                  tabIndex={0}
+                  aria-label={server.active ? '停用服务器' : '启用服务器'}
+                  onClick={() => toggleActive(server)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      void toggleActive(server)
+                    }
+                  }}
+                >
                   <div className={`toggle-switch${server.active ? ' on' : ''}`}>
                     <div className="toggle-knob"></div>
                   </div>
@@ -606,7 +627,7 @@ export default function McpManager() {
                       </div>
                       <div className="list-rows">
                         {editForm.env.map((row, idx) => (
-                          <div key={idx} className="list-row">
+                          <div key={row.id} className="list-row">
                             <input
                               type="text"
                               value={row.key}
@@ -690,7 +711,7 @@ export default function McpManager() {
                       </div>
                       <div className="list-rows">
                         {editForm.headers.map((row, idx) => (
-                          <div key={idx} className="list-row">
+                          <div key={row.id} className="list-row">
                             <input
                               type="text"
                               value={row.key}

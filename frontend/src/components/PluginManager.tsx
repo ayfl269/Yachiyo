@@ -8,6 +8,7 @@ import {
   Tag,
   Activity
 } from 'lucide-react'
+import { useToast, ToastPortal } from './shared'
 
 interface Plugin {
   name: string
@@ -29,6 +30,8 @@ export default function PluginManager() {
   const [plugins, setPlugins] = useState<Plugin[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
+
+  const { toast, showMessage } = useToast()
 
   const fetchPlugins = async () => {
     setIsLoading(true)
@@ -57,8 +60,14 @@ export default function PluginManager() {
         })
       })
       if (!res.ok) {
-        const result = await res.json()
-        throw new Error(result.error || '切换插件状态失败')
+        let msg = '切换插件状态失败'
+        try {
+          const result = await res.json()
+          msg = result.error || result.message || `HTTP ${res.status}`
+        } catch {
+          msg = `HTTP ${res.status}`
+        }
+        throw new Error(msg)
       }
       setPlugins((prev) =>
         prev.map((p) =>
@@ -66,7 +75,7 @@ export default function PluginManager() {
         )
       )
     } catch (err: any) {
-      alert(err.message)
+      showMessage(err.message, 'error')
     }
   }
 
@@ -79,7 +88,7 @@ export default function PluginManager() {
       <div className="panel-header">
         <div className="header-info">
           <h2>插件管理</h2>
-          <p className="subtitle">管理扩展功能插件，动态控制运行时生命周期与消息处理事件处理器</p>
+          <p className="subtitle">管理扩展功能插件，控制其运行生命周期与消息事件处理</p>
         </div>
         <div className="header-actions">
           <button
@@ -197,6 +206,7 @@ export default function PluginManager() {
           ))}
         </div>
       )}
+      <ToastPortal toast={toast} />
     </div>
   )
 }

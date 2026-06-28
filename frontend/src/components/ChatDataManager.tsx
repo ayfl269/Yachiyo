@@ -28,6 +28,7 @@ interface Conversation {
 }
 
 interface ChatMessage {
+  id: string
   role: string
   content: string
 }
@@ -51,7 +52,7 @@ export default function ChatDataManager() {
   const [pageSize] = useState(10)
   const [searchQuery, setSearchQuery] = useState('')
   const [isLoadingList, setIsLoadingList] = useState(false)
-  const [, setErrorMsg] = useState('')
+  const [errorMsg, setErrorMsg] = useState('')
 
   const [selectedConvId, setSelectedConvId] = useState<string | null>(null)
   const [selectedConv, setSelectedConv] = useState<Conversation | null>(null)
@@ -103,7 +104,12 @@ export default function ChatDataManager() {
       const data = await res.json()
       setSelectedConv(data)
       try {
-        setMessages(JSON.parse(data.history || '[]'))
+        const parsed = JSON.parse(data.history || '[]') as Array<
+          Omit<ChatMessage, 'id'>
+        >
+        setMessages(
+          parsed.map((msg, i) => ({ ...msg, id: `msg-${i}` })),
+        )
       } catch {
         setMessages([])
       }
@@ -197,7 +203,9 @@ export default function ChatDataManager() {
       const res = await fetch(`/api/conversations/${encodeURIComponent(selectedConvId)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ history: messages }),
+        body: JSON.stringify({
+          history: messages.map(m => ({ role: m.role, content: m.content })),
+        }),
       })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
@@ -232,6 +240,7 @@ export default function ChatDataManager() {
               <RefreshCw className={`refresh-icon${isLoadingList ? ' animate-spin' : ''}`} />
             </button>
           </div>
+          <p className="sidebar-subtitle">查看和管理历史会话记录</p>
           <div className="search-box">
             <Search className="search-icon" />
             <input
@@ -250,6 +259,19 @@ export default function ChatDataManager() {
               <div className="spinner"></div>
               <span>加载中...</span>
             </div>
+          ) : errorMsg && conversations.length === 0 ? (
+            <div className="error-state">
+              <AlertTriangle className="empty-icon" />
+              <p>{errorMsg}</p>
+              <button
+                onClick={() => {
+                  setErrorMsg('')
+                  fetchConversations(currentPage)
+                }}
+              >
+                重试
+              </button>
+            </div>
           ) : conversations.length === 0 ? (
             <div className="sidebar-empty">
               <Inbox className="empty-icon" />
@@ -261,7 +283,15 @@ export default function ChatDataManager() {
                 <div
                   key={conv.id}
                   className={`session-item${selectedConvId === conv.id ? ' active' : ''}`}
+                  role="button"
+                  tabIndex={0}
                   onClick={() => fetchConversationDetails(conv.id)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      fetchConversationDetails(conv.id)
+                    }
+                  }}
                 >
                   <div className="session-item-header">
                     <span className="session-origin" title={conv.unifiedMsgOrigin}>
@@ -387,7 +417,7 @@ export default function ChatDataManager() {
               ) : (
                 messages.map((msg, index) => (
                   <div
-                    key={index}
+                    key={msg.id}
                     className={`message-bubble ${msg.role === 'user' ? 'user-message' : 'assistant-message'}`}
                   >
                     <div className="message-content-wrapper">

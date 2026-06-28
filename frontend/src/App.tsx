@@ -16,6 +16,7 @@ import MessagePlatformManager from './components/MessagePlatformManager'
 import ChatDataManager from './components/ChatDataManager'
 import PluginManager from './components/PluginManager'
 import MemoryManager from './components/MemoryManager'
+import { ErrorBoundary } from './components/ErrorBoundary'
 
 type TabType =
   | 'dashboard' | 'configs' | 'providers' | 'mcp' | 'subagents'
@@ -41,9 +42,13 @@ const NAV_ITEMS: Array<{ key: TabType; label: string; icon: typeof LayoutDashboa
 ]
 
 function App() {
-  const [currentTab, setCurrentTab] = useState<TabType>(
-    () => (localStorage.getItem('currentTab') as TabType) || 'dashboard'
-  )
+  const [currentTab, setCurrentTab] = useState<TabType>(() => {
+    const stored = localStorage.getItem('currentTab')
+    // Validate against known tab keys — a stale/forged value must not be
+    // trusted as a `TabType` (type lie). Fall back to 'dashboard'.
+    const validKeys = NAV_ITEMS.map((n) => n.key)
+    return (stored && validKeys.includes(stored as TabType)) ? (stored as TabType) : 'dashboard'
+  })
   const [isLightMode, setIsLightMode] = useState(() => localStorage.getItem('theme') === 'light')
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(
     () => localStorage.getItem('sidebarCollapsed') === 'true'
@@ -162,7 +167,7 @@ function App() {
 
   const renderTab = () => {
     switch (currentTab) {
-      case 'dashboard': return <Dashboard />
+      case 'dashboard': return <Dashboard isLightMode={isLightMode} />
       case 'chatdata': return <ChatDataManager />
       case 'configs': return <ConfigManager />
       case 'providers': return <ProviderManager />
@@ -174,7 +179,7 @@ function App() {
       case 'memory': return <MemoryManager />
       case 'personas': return <PersonaManager />
       case 'plugins': return <PluginManager />
-      default: return <Dashboard />
+      default: return <Dashboard isLightMode={isLightMode} />
     }
   }
 
@@ -224,7 +229,9 @@ function App() {
 
         <main className="main-content">
           <div className="content-container">
-            {renderTab()}
+            <ErrorBoundary key={currentTab}>
+              {renderTab()}
+            </ErrorBoundary>
           </div>
         </main>
       </div>
