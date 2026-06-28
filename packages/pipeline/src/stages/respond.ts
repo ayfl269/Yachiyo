@@ -175,7 +175,11 @@ export class RespondStage extends PipelineStage {
     try {
       const conv = await this.ctx.conversationManager.getConversation(umo, convId);
       if (!conv) return;
-      const history: Array<{ role: string; content: string }> = JSON.parse(conv.history);
+      const parsed = JSON.parse(conv.history);
+      if (!Array.isArray(parsed)) {
+        console.warn(`[RespondStage] Conversation ${convId} history corrupted (not an array), reinitializing.`);
+      }
+      const history: Array<{ role: string; content: string }> = Array.isArray(parsed) ? parsed : [];
       history.push({ role: "assistant", content: assistantText });
 
       // Truncate history to prevent unbounded growth

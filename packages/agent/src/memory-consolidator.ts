@@ -327,6 +327,10 @@ ${bufferTexts.join("\n")}
         if (!jsonMatch) return { count: 0, failed: true };
 
         const parsed = JSON.parse(jsonMatch[0]);
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+          console.warn("[MemoryConsolidator] LLM returned invalid JSON structure (not an object), skipping.");
+          return { count: 0, failed: true };
+        }
 
         let extracted = 0;
 
