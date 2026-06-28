@@ -3,6 +3,20 @@ import { GeminiProvider } from "../src/provider/implementations/gemini-provider.
 import { OpenAIResponsesProvider } from "../src/provider/implementations/openai-responses-provider.js";
 import { Message } from "@yachiyo/common/llm-message.js";
 
+// ── Assert helpers ───────────────────────────────────────────────────
+let passCount = 0;
+let failCount = 0;
+
+function assert(condition: boolean, message: string): void {
+  if (condition) {
+    passCount++;
+    console.log(`  ✅ ${message}`);
+  } else {
+    failCount++;
+    console.error(`  ❌ ${message}`);
+  }
+}
+
 // Global mock fetch to intercept requests
 const originalFetch = globalThis.fetch;
 let lastRequestUrl: string | null = null;
@@ -56,20 +70,20 @@ async function runTests() {
     };
 
     const anthropicResp = await anthropic.textChat(anthropicParams);
-    
+
     // Validate Headers
     const headers = lastRequestInit?.headers as Record<string, string>;
-    console.log("  Anthropic Beta Header present:", headers["anthropic-beta"] === "prompt-caching-2024-07-31" ? "✅" : "❌");
-    
+    assert(headers["anthropic-beta"] === "prompt-caching-2024-07-31", "Anthropic Beta Header present");
+
     // Validate request body structure
     const body = JSON.parse(lastRequestInit?.body as string);
-    console.log("  Anthropic System Prompt cached:", Array.isArray(body.system) && body.system[0].cache_control?.type === "ephemeral" ? "✅" : "❌");
-    console.log("  Anthropic Last Message cached:", Array.isArray(body.messages[0].content) && body.messages[0].content[0].cache_control?.type === "ephemeral" ? "✅" : "❌");
-    
+    assert(Array.isArray(body.system) && body.system[0].cache_control?.type === "ephemeral", "Anthropic System Prompt cached");
+    assert(Array.isArray(body.messages[0].content) && body.messages[0].content[0].cache_control?.type === "ephemeral", "Anthropic Last Message cached");
+
     // Validate parsed token usage
-    console.log("  Anthropic promptTokens parsed:", anthropicResp.usage?.promptTokens === 100 ? "✅" : "❌");
-    console.log("  Anthropic cacheCreationInputTokens parsed:", anthropicResp.usage?.cacheCreationInputTokens === 80 ? "✅" : "❌");
-    console.log("  Anthropic cacheReadInputTokens parsed:", anthropicResp.usage?.cacheReadInputTokens === 20 ? "✅" : "❌");
+    assert(anthropicResp.usage?.promptTokens === 100, "Anthropic promptTokens parsed");
+    assert(anthropicResp.usage?.cacheCreationInputTokens === 80, "Anthropic cacheCreationInputTokens parsed");
+    assert(anthropicResp.usage?.cacheReadInputTokens === 20, "Anthropic cacheReadInputTokens parsed");
 
     // 2. Gemini Provider Caching Test (with Configurable TTL)
     console.log("\n--- Testing Gemini Caching with Configurable TTL ---");
@@ -88,12 +102,12 @@ async function runTests() {
       "600s"
     );
 
-    console.log("  Gemini createContextCache URL:", lastRequestUrl?.includes("/cachedContents") ? "✅" : "❌");
+    assert(lastRequestUrl?.includes("/cachedContents"), "Gemini createContextCache URL");
     const cacheBody = JSON.parse(lastRequestInit?.body as string);
-    console.log("  Gemini createContextCache body model:", cacheBody.model === "models/gemini-1.5-flash" ? "✅" : "❌");
-    console.log("  Gemini createContextCache body contents:", Array.isArray(cacheBody.contents) ? "✅" : "❌");
-    console.log("  Gemini createContextCache TTL matches config:", cacheBody.ttl === "600s" ? "✅" : "❌");
-    console.log("  Gemini createContextCache response cachedContent name parsed:", cacheName === "cachedContents/mock-cache-id" ? "✅" : "❌");
+    assert(cacheBody.model === "models/gemini-1.5-flash", "Gemini createContextCache body model");
+    assert(Array.isArray(cacheBody.contents), "Gemini createContextCache body contents");
+    assert(cacheBody.ttl === "600s", "Gemini createContextCache TTL matches config");
+    assert(cacheName === "cachedContents/mock-cache-id", "Gemini createContextCache response cachedContent name parsed");
 
     // 3. OpenAI Responses Provider Caching Test
     console.log("\n--- Testing OpenAI Responses Caching ---");
@@ -106,13 +120,20 @@ async function runTests() {
       contexts: [{ role: "user", content: "Hello" }] as Message[],
     });
 
-    console.log("  OpenAI Responses promptTokens parsed:", responsesResp.usage?.promptTokens === 100 ? "✅" : "❌");
-    console.log("  OpenAI Responses cacheReadInputTokens parsed:", responsesResp.usage?.cacheReadInputTokens === 45 ? "✅" : "❌");
+    assert(responsesResp.usage?.promptTokens === 100, "OpenAI Responses promptTokens parsed");
+    assert(responsesResp.usage?.cacheReadInputTokens === 45, "OpenAI Responses cacheReadInputTokens parsed");
 
-    console.log("\n🎉 All caching unit tests completed successfully!");
+    console.log(`\n结果: ${passCount} 通过, ${failCount} 失败`);
+    if (failCount > 0) {
+      process.exit(1);
+    }
+    console.log("🎉 All caching unit tests completed successfully!");
   } finally {
     (globalThis as any).fetch = originalFetch;
   }
 }
 
-runTests().catch(console.error);
+runTests().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

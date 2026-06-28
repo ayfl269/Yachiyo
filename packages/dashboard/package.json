@@ -29,7 +29,10 @@
     "@yachiyo/platform": "workspace:*",
     "@yachiyo/plugin": "workspace:*",
     "@yachiyo/provider": "workspace:*",
-    "@yachiyo/skill": "workspace:*"
+    "@yachiyo/skill": "workspace:*",
+    "adm-zip": "^0.5.17"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.8"
+  }
 }

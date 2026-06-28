@@ -65,6 +65,29 @@ import type {
 } from "../src/index.js";
 
 // ============================================================
+// 0. Assert helpers — track pass/fail/skip across all tests
+// ============================================================
+
+let passCount = 0;
+let failCount = 0;
+let skipCount = 0;
+
+function assert(condition: boolean, message: string): void {
+  if (condition) {
+    passCount++;
+    console.log(`  ✅ ${message}`);
+  } else {
+    failCount++;
+    console.error(`  ❌ ${message}`);
+  }
+}
+
+function skip(message: string): void {
+  skipCount++;
+  console.log(`  ⏭ ${message}`);
+}
+
+// ============================================================
 // 1. Mock Provider
 // ============================================================
 
@@ -829,55 +852,66 @@ async function testWebTools(): Promise<void> {
 
   // --- web_fetch_tool ---
   const fetchTool = createWebFetchTool();
-  console.log("  web_fetch_tool 名称:", fetchTool.name);
+  assert(fetchTool.name === "web_fetch_tool", `web_fetch_tool 名称: ${fetchTool.name}`);
 
   try {
     const fetchResult = await fetchTool.handler!(adminCtx, "https://httpbin.org/get", "GET", {}, undefined, 15, 5000) as CallToolResult;
     const fetchText = fetchResult.content[0] && "text" in fetchResult.content[0] ? fetchResult.content[0].text : "";
-    console.log("  web_fetch 包含 HTTP 200:", fetchText.includes("200"));
-    console.log("  web_fetch 包含 httpbin:", fetchText.includes("httpbin"));
+    // Network-dependent: throw on unexpected response so catch can skip (assert doesn't throw)
+    if (!fetchText.includes("200") || !fetchText.includes("httpbin")) {
+      throw new Error(`unexpected response: ${fetchText.slice(0, 80)}`);
+    }
+    assert(true, "web_fetch 包含 HTTP 200 与 httpbin");
   } catch (e) {
-    console.log("  web_fetch: 网络不可用，跳过 -", (e as Error).message?.slice(0, 50));
+    skip(`web_fetch: 网络不可用，跳过 - ${(e as Error).message?.slice(0, 50)}`);
   }
 
   // --- web_search_tool (Bing) ---
   const searchTool = createWebSearchTool(undefined, "bing");
-  console.log("  web_search_tool 名称:", searchTool.name);
+  assert(searchTool.name === "web_search_tool", `web_search_tool 名称: ${searchTool.name}`);
 
   try {
     const searchResult = await searchTool.handler!(adminCtx, "TypeScript programming language", 3) as CallToolResult;
     const searchText = searchResult.content[0] && "text" in searchResult.content[0] ? searchResult.content[0].text : "";
-    console.log("  web_search (Bing) 有结果:", !searchText.includes("No search results") && !searchText.includes("error:"));
-    console.log("  web_search (Bing) 结果预览:", searchText.slice(0, 80).replace(/\n/g, " "));
+    // Network-dependent: throw on no-results/error so catch can skip
+    if (searchText.includes("No search results") || searchText.includes("error:")) {
+      throw new Error("search returned no results or error");
+    }
+    assert(true, "web_search (Bing) 有结果");
+    console.log("    结果预览:", searchText.slice(0, 80).replace(/\n/g, " "));
   } catch (e) {
-    console.log("  web_search (Bing): 网络不可用，跳过 -", (e as Error).message?.slice(0, 50));
+    skip(`web_search (Bing): 网络不可用，跳过 - ${(e as Error).message?.slice(0, 50)}`);
   }
 
   // --- getSearchProvider ---
-  const bingProvider = getSearchProvider("bing");
-  const googleProvider = getSearchProvider("google");
-  const googlePwProvider = getSearchProvider("google_playwright");
-  const bingPwProvider = getSearchProvider("bing_playwright");
-  console.log("  getSearchProvider('bing'):", bingProvider ? "✅" : "❌");
-  console.log("  getSearchProvider('google'):", googleProvider ? "✅" : "❌");
-  console.log("  getSearchProvider('google_playwright'):", googlePwProvider ? "✅" : "❌");
-  console.log("  getSearchProvider('bing_playwright'):", bingPwProvider ? "✅" : "❌");
+  assert(getSearchProvider("bing") !== null, "getSearchProvider('bing')");
+  assert(getSearchProvider("google") !== null, "getSearchProvider('google')");
+  assert(getSearchProvider("google_playwright") !== null, "getSearchProvider('google_playwright')");
+  assert(getSearchProvider("bing_playwright") !== null, "getSearchProvider('bing_playwright')");
 
   // --- http_request_tool ---
   const httpTool = createHttpRequestTool();
-  console.log("  http_request_tool 名称:", httpTool.name);
+  assert(httpTool.name === "http_request_tool", `http_request_tool 名称: ${httpTool.name}`);
 
   try {
     const httpResult = await httpTool.handler!(adminCtx, "https://httpbin.org/post", "POST", { "X-Custom": "test" }, '{"key":"value"}', "application/json", 15, true) as CallToolResult;
     const httpText = httpResult.content[0] && "text" in httpResult.content[0] ? httpResult.content[0].text : "";
     const parsed = JSON.parse(httpText);
-    console.log("  http_request POST status:", parsed.status);
-    console.log("  http_request 包含 X-Custom header:", httpText.includes("X-Custom") || httpText.includes("x-custom"));
+    // Network-dependent: throw on non-200 status so catch can skip
+    if (parsed.status !== 200) {
+      throw new Error(`http_request returned status ${parsed.status}`);
+    }
+    assert(true, `http_request POST status: ${parsed.status}`);
+    assert(httpText.includes("X-Custom") || httpText.includes("x-custom"), "http_request 包含 X-Custom header");
   } catch (e) {
-    console.log("  http_request: 网络不可用，跳过 -", (e as Error).message?.slice(0, 50));
+    skip(`http_request: 网络不可用，跳过 - ${(e as Error).message?.slice(0, 50)}`);
   }
 
-  console.log("  ✅ Web Tools 测试通过");
+  if (skipCount > 0) {
+    console.log(`  ⚠ Web Tools 测试完成（${skipCount} 项因网络跳过）`);
+  } else {
+    console.log("  ✅ Web Tools 测试通过");
+  }
 }
 
 // ============================================================
@@ -1128,8 +1162,13 @@ async function main(): Promise<void> {
     await testInMemoryVectorStoreDimensionValidation();
 
     console.log("\n╔══════════════════════════════════════════╗");
-    console.log("║   🎉 所有测试通过!                        ║");
+    console.log(`║   通过: ${passCount}  失败: ${failCount}  跳过: ${skipCount}`.padEnd(46) + "║");
     console.log("╚══════════════════════════════════════════╝");
+    if (failCount > 0) {
+      console.error(`❌ ${failCount} 项测试失败`);
+      process.exit(1);
+    }
+    console.log("🎉 所有测试通过!");
     process.exit(0);
   } catch (e) {
     console.error("\n❌ 测试失败:", e);

@@ -146,7 +146,7 @@ pnpm frontend:dev
 pnpm test
 ```
 
-包含的测试文件：
+包含的测试文件（全部 8 个由 `pnpm test` 运行）：
 
 | 测试文件 | 测试内容 |
 |----------|---------|
@@ -157,7 +157,7 @@ pnpm test
 | `tests/memory-system-test.ts` | 记忆提取与整理 |
 | `tests/provider-caching-test.ts` | 模型 Prompt 缓存 |
 | `tests/provider-manager-test.ts` | 模型加载与 MCP 安全校验 |
-| `tests/windows-sandbox-test.ts` | Windows 沙箱限制验证 |
+| `tests/windows-sandbox-test.ts` | Windows 沙箱限制验证（非 Windows 自动跳过） |
 
 ---
 
@@ -168,7 +168,15 @@ pnpm test
 - **[API_REFERENCE.md](doc/API_REFERENCE.md)** — 完整 API 参考
 - **[message_processing_design.md](doc/message_processing_design.md)** — 消息处理管线架构设计
 - **[provider_interface_design.md](doc/provider_interface_design.md)** — Provider 接口与多模型适配设计
-- **[webhook_adapter_design.md](doc/webhook_adapter_design.md)** — 平台适配器系统设计
+- **[webhook_adapter_design.md](doc/webhook_adapter_design.md)** — 平台适配器系统设计（历史设计稿，部分未实现）
+
+---
+
+## 社区
+
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — 贡献指南与开发规范
+
+我们欢迎 Issues 和 PR，也接受 AI 辅助编码，但提交前请确保通过全部测试并在 PR 描述中注明使用的模型/工具。
 
 ---
 

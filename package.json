@@ -11,7 +11,7 @@
     "dev": "tsx watch src/server.ts",
     "lint": "eslint \"src/**/*.ts\" \"tests/**/*.ts\" \"packages/*/src/**/*.ts\"",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && tsx tests/test.ts && tsx tests/message-processing-test.ts && tsx tests/platform-adapter-test.ts && tsx tests/context-system-test.ts && tsx tests/memory-system-test.ts && tsx tests/critical-high-fix-test.ts",
+    "test": "tsc && tsx tests/test.ts && tsx tests/message-processing-test.ts && tsx tests/platform-adapter-test.ts && tsx tests/context-system-test.ts && tsx tests/memory-system-test.ts && tsx tests/provider-caching-test.ts && tsx tests/provider-manager-test.ts && tsx tests/windows-sandbox-test.ts",
     "test:watch": "tsx watch tests/test.ts",
     "frontend:install": "cd frontend && pnpm install --frozen-lockfile --ignore-workspace",
     "frontend:dev": "cd frontend && pnpm run dev",
@@ -52,7 +52,6 @@
     "@typescript-eslint/parser": "^8.0.0",
     "eslint": "^9.0.0",
     "https-proxy-agent": "^9.0.0",
-    "ts-node": "^10.9.0",
     "tsx": "^4.22.3",
     "typescript": "^6.0.0",
     "undici": "^8.3.0"
