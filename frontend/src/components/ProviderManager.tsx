@@ -847,6 +847,11 @@ export default function ProviderManager() {
       const json = await parseResponseJson(res)
       if (json.status === 'error') throw new Error(json.message)
       showMessage(json.message || (isAdding ? '添加成功' : '更新成功'))
+      if (isAdding) {
+        setProviders(prev => [...prev, providerEditData])
+      } else {
+        setProviders(prev => prev.map(p => p.id === providerEditData.id ? providerEditData : p))
+      }
       setShowProviderEditDialog(false)
     } catch (error: any) {
       showMessage(error.message || '保存失败', 'error')

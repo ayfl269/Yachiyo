@@ -93,6 +93,8 @@ export default function ConfigManager() {
 
   // Form helper for safety keywords string
   const [safetyKeywordsStr, setSafetyKeywordsStr] = useState('')
+  // Form helper for fallback provider selection
+  const [fallbackSelectValue, setFallbackSelectValue] = useState('')
 
   const { toast, showMessage } = useToast()
 
@@ -495,6 +497,88 @@ export default function ConfigManager() {
                     <option key={p.id} value={p.id}>{p.id} ({p.type})</option>
                   ))}
                 </select>
+              </div>
+              <div className="form-group span-2">
+                <label>回退模型列表</label>
+                <span className="help-text" style={{ marginBottom: '0.5rem' }}>
+                  主模型请求失败时，按顺序切换到这些对话模型。排在上方的优先级更高。
+                </span>
+                {/* 已选回退模型列表（有序） */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', marginBottom: '0.5rem' }}>
+                  {config.fallbackProviderIds.length === 0 && (
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', padding: '0.5rem 0' }}>
+                      （未配置回退模型）
+                    </div>
+                  )}
+                  {config.fallbackProviderIds.map((fbId, idx) => {
+                    const prov = providersList.find((p) => p.id === fbId)
+                    return (
+                      <div key={fbId} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.4rem 0.6rem', background: 'var(--bg-secondary)', borderRadius: '4px' }}>
+                        <span style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', minWidth: '1.5rem' }}>#{idx + 1}</span>
+                        <span className="font-mono" style={{ flex: 1 }}>
+                          {fbId} {prov && <span style={{ color: 'var(--text-secondary)' }}>({prov.type})</span>}
+                        </span>
+                        <button
+                          type="button"
+                          className="btn"
+                          style={{ padding: '0.2rem 0.5rem', fontSize: '0.8rem' }}
+                          disabled={idx === 0}
+                          onClick={() => {
+                            const newList = [...config.fallbackProviderIds]
+                            ;[newList[idx - 1], newList[idx]] = [newList[idx], newList[idx - 1]]
+                            updateField('fallbackProviderIds', newList)
+                          }}
+                        >↑</button>
+                        <button
+                          type="button"
+                          className="btn"
+                          style={{ padding: '0.2rem 0.5rem', fontSize: '0.8rem' }}
+                          disabled={idx === config.fallbackProviderIds.length - 1}
+                          onClick={() => {
+                            const newList = [...config.fallbackProviderIds]
+                            ;[newList[idx + 1], newList[idx]] = [newList[idx], newList[idx + 1]]
+                            updateField('fallbackProviderIds', newList)
+                          }}
+                        >↓</button>
+                        <button
+                          type="button"
+                          className="btn"
+                          style={{ padding: '0.2rem 0.5rem', fontSize: '0.8rem', color: 'var(--text-danger, #ef4444)' }}
+                          onClick={() => {
+                            updateField('fallbackProviderIds', config.fallbackProviderIds.filter((id) => id !== fbId))
+                          }}
+                        >✕</button>
+                      </div>
+                    )
+                  })}
+                </div>
+                {/* 添加回退模型 */}
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <select
+                    className="form-control font-mono"
+                    value={fallbackSelectValue}
+                    onChange={(e) => setFallbackSelectValue(e.target.value)}
+                  >
+                    <option value="">选择要添加的模型…</option>
+                    {providersList
+                      .filter((p) => !config.fallbackProviderIds.includes(p.id) && p.id !== config.defaultProviderId)
+                      .map((p) => (
+                        <option key={p.id} value={p.id}>{p.id} ({p.type})</option>
+                      ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="btn primary"
+                    style={{ whiteSpace: 'nowrap' }}
+                    disabled={!fallbackSelectValue}
+                    onClick={() => {
+                      if (fallbackSelectValue) {
+                        updateField('fallbackProviderIds', [...config.fallbackProviderIds, fallbackSelectValue])
+                        setFallbackSelectValue('')
+                      }
+                    }}
+                  >添加</button>
+                </div>
               </div>
               <div className="form-group">
                 <label>系统默认角色 Persona</label>

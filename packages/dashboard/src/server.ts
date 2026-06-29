@@ -2760,7 +2760,12 @@ export class DashboardServer {
 
   /**
    * 从提供商获取可用模型列表
-   * 支持: openai, openai_responses, gemini, anthropic 及兼容 OpenAI 的自定义端点
+   * 按 type 严格匹配接口格式：
+   *   - openai / openai_responses → OpenAI 兼容 /v1/models + Bearer auth
+   *   - gemini                   → Gemini 原生 /v1beta/models?key=xxx
+   *   - anthropic                → Anthropic 原生 /v1/models + x-api-key
+   * 若用户使用 OpenAI 兼容代理（如 one-api）代理 Gemini 模型，
+   * 应将 Provider 类型选为 openai/openai_responses 以使用对应格式获取列表。
    */
   private async fetchModelsFromProvider(type: string, config: Record<string, any>): Promise<string[]> {
     const apiKey = config.apiKey;
@@ -2790,48 +2795,42 @@ export class DashboardServer {
         .sort();
     }
 
-    // Google Gemini
+    // Google Gemini — 始终使用 Gemini 原生格式 /v1beta/models?key=xxx
+    // 如需使用 OpenAI 兼容代理获取 Gemini 模型，请将 Provider 类型选为 openai/openai_responses
     if (type === "gemini") {
-      if (baseUrl && !baseUrl.includes("generativelanguage.googleapis.com")) {
-        let cleanBase = baseUrl.replace(/\/+$/, "");
-        const knownSuffixes = ["/v1beta", "/v1"];
-        for (const suffix of knownSuffixes) {
-          if (cleanBase.endsWith(suffix)) {
-            cleanBase = cleanBase.slice(0, -suffix.length);
+      const cleanBase = (baseUrl || "").replace(/\/+$/, "");
+      // Google 官方端点（baseUrl 为空或显式指向 google 官方）
+      let geminiBase: string;
+      if (!cleanBase || cleanBase.includes("generativelanguage.googleapis.com")) {
+        geminiBase = "https://generativelanguage.googleapis.com/v1beta";
+      } else {
+        // 强制使用 /v1beta 路径：剥离任何已有的版本后缀（/v1、/v1beta 等），统一追加 /v1beta
+        let stripped = cleanBase;
+        const versionSuffixes = ["/v1beta", "/v1", "/v2beta", "/v2"];
+        for (const suffix of versionSuffixes) {
+          if (stripped.endsWith(suffix)) {
+            stripped = stripped.slice(0, -suffix.length);
             break;
           }
         }
-        const url = `${cleanBase}/v1/models`;
-        console.log(`[Dashboard] Gemini proxy mode: fetching models from ${url}`);
-        const response = await fetch(url, {
-          headers: { Authorization: `Bearer ${apiKey}` },
-          signal: AbortSignal.timeout(15000),
-        });
-        const respText = await response.text();
-        console.log(`[Dashboard] Gemini models response status=${response.status}, contentType=${response.headers.get('content-type')}, bodyLen=${respText.length}`);
-
-        if (!response.ok || !respText.startsWith("{")) {
-          if (respText.startsWith("<")) {
-            throw new Error(`代理端点返回了HTML页面而非JSON (${response.status})，请确认 Base URL 正确指向 OpenAI 兼容 API。请求URL: ${url}`);
-          }
-          throw new Error(`获取模型列表失败 (${response.status}): ${respText.substring(0, 200)}`);
-        }
-        const data = JSON.parse(respText) as any;
-        if (!Array.isArray(data.data)) return [];
-        return data.data
-          .map((m: any) => m.id || "")
-          .filter((id: string) => !!id)
-          .sort();
+        geminiBase = `${stripped}/v1beta`;
       }
-      // Google 官方端点
-      const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`;
+      const url = `${geminiBase}/models?key=${encodeURIComponent(apiKey)}`;
+      console.log(`[Dashboard] Gemini: fetching models from ${url}`);
       const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
+      const respText = await response.text();
 
       if (!response.ok) {
-        throw new Error(`获取模型列表失败 (${response.status}): ${response.statusText}`);
+        if (respText.startsWith("<")) {
+          throw new Error(`端点返回了HTML页面而非JSON (${response.status})。如果是 OpenAI 兼容代理，请将 Provider 类型改为 openai/openai_responses。请求URL: ${url}`);
+        }
+        throw new Error(`获取模型列表失败 (${response.status}): ${respText.substring(0, 200) || response.statusText}`);
+      }
+      if (!respText.startsWith("{")) {
+        throw new Error(`端点返回了非JSON响应。如果是 OpenAI 兼容代理，请将 Provider 类型改为 openai/openai_responses。请求URL: ${url}`);
       }
 
-      const data = await response.json() as any;
+      const data = JSON.parse(respText) as any;
       if (!Array.isArray(data.models)) {
         return [];
       }
