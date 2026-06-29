@@ -728,7 +728,7 @@ async function testErrorResponseHandling(): Promise<void> {
   console.log("  最终回复 role:", finalResp?.role);
   console.log("  最终回复 content:", finalResp?.completionText);
 
-  const { runAgent } = await import("../src/agent/agent-runner.js");
+  const { runAgent } = await import("@yachiyo/agent/agent-runner.js");
   const runResult = await runAgent(runner, {
     maxStep: 30,
   });

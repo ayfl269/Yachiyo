@@ -1,5 +1,5 @@
 import { bootstrap } from "./bootstrap.js";
-import type { ChatProviderType } from "./provider/factory.js";
+import type { ChatProviderType } from "@yachiyo/provider/factory.js";
 
 /**
  * 便捷启动入口

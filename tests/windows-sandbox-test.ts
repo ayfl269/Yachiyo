@@ -8,8 +8,8 @@ import {
   setupWindowsJobObject,
   teardownWindowsJobObject,
   DEFAULT_WINDOWS_PROCESS_SANDBOX_CONFIG,
-} from "../src/agent/sandbox.js";
-import type { WindowsProcessSandboxConfig } from "../src/agent/sandbox.js";
+} from "@yachiyo/agent/sandbox.js";
+import type { WindowsProcessSandboxConfig } from "@yachiyo/agent/sandbox.js";
 
 // ============================================================
 // 1. 测试: buildWindowsSandboxScript

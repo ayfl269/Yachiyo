@@ -65,7 +65,7 @@ import {
   type MessageChain,
   type ProviderRequest,
 } from "../src/index.js";
-import { FunctionToolManager } from "../src/agent/func-tool-manager.js";
+import { FunctionToolManager } from "@yachiyo/agent/func-tool-manager.js";
 
 // ============================================================
 // 1. 测试: 通用工具�?// ============================================================

@@ -7,9 +7,9 @@ import { mkdirSync, rmSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
-import { SqliteMemoryStore, MEMORY_MIGRATIONS, type MemoryType, type MemoryScope } from "../src/agent/sqlite-memory-store.js";
-import { MemoryConsolidator, DEFAULT_CONSOLIDATION_CONFIG, type ConsolidationConfig } from "../src/agent/memory-consolidator.js";
-import { SqliteConversationStore, CHAT_MIGRATIONS } from "../src/conversation/sqlite-conversation-store.js";
+import { SqliteMemoryStore, MEMORY_MIGRATIONS, type MemoryType, type MemoryScope } from "@yachiyo/agent/sqlite-memory-store.js";
+import { MemoryConsolidator, DEFAULT_CONSOLIDATION_CONFIG, type ConsolidationConfig } from "@yachiyo/agent/memory-consolidator.js";
+import { SqliteConversationStore, CHAT_MIGRATIONS } from "@yachiyo/conversation/sqlite-conversation-store.js";
 
 // ── Helpers ──
 

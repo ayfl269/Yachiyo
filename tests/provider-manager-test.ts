@@ -5,7 +5,7 @@
 import type {
   ProviderLoadConfig,
   MCPServerConfigMap,
-} from "../src/provider/manager.js";
+} from "@yachiyo/provider/manager.js";
 
 // ============================================================
 // 1. 测试: ProviderManager 基础功能
@@ -15,7 +15,7 @@ async function testProviderManagerBasic(): Promise<void> {
   console.log("\n=== 测试: ProviderManager 基础功能 ===");
 
   // Lazy import to avoid circular dependency
-  const { ProviderManager } = await import("../src/provider/manager.js");
+  const { ProviderManager } = await import("@yachiyo/provider/manager.js");
 
   const manager = new ProviderManager();
 
@@ -44,7 +44,7 @@ async function testProviderManagerBasic(): Promise<void> {
   console.log("  查找不存在的 ID:", notFound === null ? "✅ (返回 null)" : "❌");
 
   // getUsingProvider
-  const { ProviderType } = await import("../src/provider/types.js");
+  const { ProviderType } = await import("@yachiyo/provider/types.js");
   const using = manager.getUsingProvider(ProviderType.CHAT_COMPLETION);
   console.log("  getUsingProvider:", using !== null ? "✅" : "❌");
 
@@ -63,7 +63,7 @@ async function testProviderManagerBasic(): Promise<void> {
 async function testProviderManagerCallbacks(): Promise<void> {
   console.log("\n=== 测试: ProviderManager Change Callbacks ===");
 
-  const { ProviderManager } = await import("../src/provider/manager.js");
+  const { ProviderManager } = await import("@yachiyo/provider/manager.js");
 
   const manager = new ProviderManager();
   const events: Array<{ id: string; type: string; change: string }> = [];
@@ -102,7 +102,7 @@ async function testProviderManagerCallbacks(): Promise<void> {
 async function testProviderManagerMCPIntegration(): Promise<void> {
   console.log("\n=== 测试: ProviderManager MCP 集成 ===");
 
-  const { ProviderManager } = await import("../src/provider/manager.js");
+  const { ProviderManager } = await import("@yachiyo/provider/manager.js");
 
   const manager = new ProviderManager();
 
@@ -148,7 +148,7 @@ async function testProviderManagerMCPIntegration(): Promise<void> {
 async function testProviderManagerDynamicLifecycle(): Promise<void> {
   console.log("\n=== 测试: ProviderManager 动态 Provider 生命周期 ===");
 
-  const { ProviderManager } = await import("../src/provider/manager.js");
+  const { ProviderManager } = await import("@yachiyo/provider/manager.js");
 
   const manager = new ProviderManager();
   const events: Array<{ id: string; change: string }> = [];
@@ -222,7 +222,7 @@ async function testProviderManagerDynamicLifecycle(): Promise<void> {
 async function testDynamicImportProviderModule(): Promise<void> {
   console.log("\n=== 测试: dynamicImportProviderModule ===");
 
-  const { dynamicImportProviderModule, PROVIDER_TYPE_MODULE_MAP } = await import("../src/provider/factory.js");
+  const { dynamicImportProviderModule, PROVIDER_TYPE_MODULE_MAP } = await import("@yachiyo/provider/factory.js");
 
   // 测试所有已知类型
   const knownTypes = [
@@ -262,7 +262,7 @@ async function testDynamicCreateFactories(): Promise<void> {
     dynamicCreateRerankProvider,
     dynamicCreateTtsProvider,
     dynamicCreateSttProvider,
-  } = await import("../src/provider/factory.js");
+  } = await import("@yachiyo/provider/factory.js");
 
   // Chat Provider
   try {
@@ -345,7 +345,7 @@ async function testDynamicCreateFactories(): Promise<void> {
 async function testMcpSecurityValidation(): Promise<void> {
   console.log("\n=== 测试: MCP 安全校验 ===");
 
-  const { validateMcpStdioConfig } = await import("../src/agent/mcp-client.js");
+  const { validateMcpStdioConfig } = await import("@yachiyo/agent/mcp-client.js");
 
   // 合法配置
   const validTests = [
@@ -408,7 +408,7 @@ async function testMcpSecurityValidation(): Promise<void> {
 async function testProviderManagerTerminateAndCleanup(): Promise<void> {
   console.log("\n=== 测试: ProviderManager 终止和清理 ===");
 
-  const { ProviderManager } = await import("../src/provider/manager.js");
+  const { ProviderManager } = await import("@yachiyo/provider/manager.js");
 
   const manager = new ProviderManager();
 

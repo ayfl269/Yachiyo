@@ -1,6 +1,6 @@
-import { AnthropicProvider } from "../src/provider/implementations/anthropic-provider.js";
-import { GeminiProvider } from "../src/provider/implementations/gemini-provider.js";
-import { OpenAIResponsesProvider } from "../src/provider/implementations/openai-responses-provider.js";
+import { AnthropicProvider } from "@yachiyo/provider/implementations/anthropic-provider.js";
+import { GeminiProvider } from "@yachiyo/provider/implementations/gemini-provider.js";
+import { OpenAIResponsesProvider } from "@yachiyo/provider/implementations/openai-responses-provider.js";
 import { Message } from "@yachiyo/common/llm-message.js";
 
 // ── Assert helpers ───────────────────────────────────────────────────

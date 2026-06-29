@@ -1,45 +1,45 @@
-import { AsyncQueue } from "./common/async-queue.js";
+import { AsyncQueue } from "@yachiyo/common/async-queue.js";
 import { join } from "path";
-import type { MessageEvent } from "./message/event.js";
-import { ProviderManager } from "./provider/manager.js";
-import { ConversationManager } from "./conversation/manager.js";
-import { PersonaManager } from "./persona/manager.js";
-import { KnowledgeBaseManager } from "./knowledge-base/manager.js";
-import { SessionLockManager } from "./pipeline/session-lock.js";
-import { SessionServiceManager } from "./pipeline/stages/session-status-check.js";
-import { PluginManager } from "./plugin/manager.js";
-import { ConfigManager } from "./config/manager.js";
-import { EventBus } from "./pipeline/event-bus.js";
-import { PipelineScheduler } from "./pipeline/scheduler.js";
-import { PipelineContext } from "./pipeline/context.js";
-import { ensureBuiltinStagesRegistered } from "./pipeline/bootstrap.js";
-import { AdapterRegistry, registerBuiltinAdapterFactories } from "./platform/registry.js";
-import { validateAdapterConfig, type OneBot11AdapterConfig, type AdapterConfigBase } from "./platform/config.js";
-import { SqliteAdapterStore, ADAPTER_MIGRATIONS } from "./platform/sqlite-adapter-store.js";
-import { createChatProvider, createEmbeddingProvider, createRerankProvider, type ChatProviderConfig, type EmbeddingProviderConfig, type RerankProviderConfig } from "./provider/factory.js";
-import { callHandler as callHandlerUtil, callEventHook as callEventHookUtil } from "./pipeline/handler-utils.js";
-import { DatabaseManager } from "./common/database.js";
-import { CHAT_MIGRATIONS, SqliteConversationStore } from "./conversation/sqlite-conversation-store.js";
-import { MEMORY_MIGRATIONS, SqliteMemoryStore } from "./agent/sqlite-memory-store.js";
-import { CONFIG_MIGRATIONS } from "./config/sqlite-config-store.js";
-import { CONFIG_EXTRAS_MIGRATIONS, SqlitePluginStore, SqliteSkillStore, SqliteSessionDisabledStore } from "./config/sqlite-config-extras-store.js";
-import { PROVIDER_CONFIG_MIGRATIONS, SqliteProviderStore } from "./provider/sqlite-provider-store.js";
-import { PERSONA_MIGRATIONS, SqlitePersonaStore } from "./persona/sqlite-persona-store.js";
-import { KNOWLEDGE_MIGRATIONS, SqliteKBMetadataStore, SqliteVectorStore } from "./knowledge-base/stores/sqlite-kb-store.js";
-import { loadEncryptionKey } from "./common/secret-crypto.js";
+import type { MessageEvent } from "@yachiyo/message/event.js";
+import { ProviderManager } from "@yachiyo/provider/manager.js";
+import { ConversationManager } from "@yachiyo/conversation/manager.js";
+import { PersonaManager } from "@yachiyo/persona/manager.js";
+import { KnowledgeBaseManager } from "@yachiyo/knowledge-base/manager.js";
+import { SessionLockManager } from "@yachiyo/pipeline/session-lock.js";
+import { SessionServiceManager } from "@yachiyo/pipeline/stages/session-status-check.js";
+import { PluginManager } from "@yachiyo/plugin/manager.js";
+import { ConfigManager } from "@yachiyo/config/manager.js";
+import { EventBus } from "@yachiyo/pipeline/event-bus.js";
+import { PipelineScheduler } from "@yachiyo/pipeline/scheduler.js";
+import { PipelineContext } from "@yachiyo/pipeline/context.js";
+import { ensureBuiltinStagesRegistered } from "@yachiyo/pipeline/bootstrap.js";
+import { AdapterRegistry, registerBuiltinAdapterFactories } from "@yachiyo/platform/registry.js";
+import { validateAdapterConfig, type OneBot11AdapterConfig, type AdapterConfigBase } from "@yachiyo/platform/config.js";
+import { SqliteAdapterStore, ADAPTER_MIGRATIONS } from "@yachiyo/platform/sqlite-adapter-store.js";
+import { createChatProvider, createEmbeddingProvider, createRerankProvider, type ChatProviderConfig, type EmbeddingProviderConfig, type RerankProviderConfig } from "@yachiyo/provider/factory.js";
+import { callHandler as callHandlerUtil, callEventHook as callEventHookUtil } from "@yachiyo/pipeline/handler-utils.js";
+import { DatabaseManager } from "@yachiyo/common/database.js";
+import { CHAT_MIGRATIONS, SqliteConversationStore } from "@yachiyo/conversation/sqlite-conversation-store.js";
+import { MEMORY_MIGRATIONS, SqliteMemoryStore } from "@yachiyo/agent/sqlite-memory-store.js";
+import { CONFIG_MIGRATIONS } from "@yachiyo/config/sqlite-config-store.js";
+import { CONFIG_EXTRAS_MIGRATIONS, SqlitePluginStore, SqliteSkillStore, SqliteSessionDisabledStore } from "@yachiyo/config/sqlite-config-extras-store.js";
+import { PROVIDER_CONFIG_MIGRATIONS, SqliteProviderStore } from "@yachiyo/provider/sqlite-provider-store.js";
+import { PERSONA_MIGRATIONS, SqlitePersonaStore } from "@yachiyo/persona/sqlite-persona-store.js";
+import { KNOWLEDGE_MIGRATIONS, SqliteKBMetadataStore, SqliteVectorStore } from "@yachiyo/knowledge-base/stores/sqlite-kb-store.js";
+import { loadEncryptionKey } from "@yachiyo/common/secret-crypto.js";
 
-import { FunctionToolManager } from "./agent/func-tool-manager.js";
-import { SkillManager } from "./skill/index.js";
+import { FunctionToolManager } from "@yachiyo/agent/func-tool-manager.js";
+import { SkillManager } from "@yachiyo/skill/index.js";
 import {
   getWebTools,
-} from "./agent/web-tools.js";
+} from "@yachiyo/agent/web-tools.js";
 import {
   getRuntimeComputerTools,
-} from "./agent/computer-tools.js";
-import { createMemoryTool } from "./agent/memory-tool.js";
-import { MemoryConsolidator } from "./agent/memory-consolidator.js";
-import { createCodeSearchTool } from "./agent/code-search-tool.js";
-import { getSubAgentManagementTools } from "./agent/subagent-create-tool.js";
+} from "@yachiyo/agent/computer-tools.js";
+import { createMemoryTool } from "@yachiyo/agent/memory-tool.js";
+import { MemoryConsolidator } from "@yachiyo/agent/memory-consolidator.js";
+import { createCodeSearchTool } from "@yachiyo/agent/code-search-tool.js";
+import { getSubAgentManagementTools } from "@yachiyo/agent/subagent-create-tool.js";
 
 export interface BootstrapOptions {
   /** 数据目录路径，默认 ./data，支持 DATA_DIR 环境变量覆盖 */
@@ -156,7 +156,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
   const providerManager = new ProviderManager();
   providerManager.setSqliteStore(sqliteProviderStore);
 
-  const sqliteConfigStore = new (await import("./config/sqlite-config-store.js")).SqliteConfigStore(dbManager.getDb("config"));
+  const sqliteConfigStore = new (await import("@yachiyo/config/sqlite-config-store.js")).SqliteConfigStore(dbManager.getDb("config"));
   const configManager = new ConfigManager(undefined, sqliteConfigStore);
 
   // Apply maxHistoryMessages from config to ConversationManager
@@ -405,7 +405,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
   // 9.5 启动管理后台
   let dashboardServer: any;
   if (options.dashboard?.enabled) {
-    const { DashboardServer } = await import("./dashboard/server.js");
+    const { DashboardServer } = await import("@yachiyo/dashboard/server.js");
     dashboardServer = new DashboardServer(
       {
         eventQueue,

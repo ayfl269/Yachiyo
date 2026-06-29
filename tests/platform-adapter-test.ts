@@ -1,12 +1,12 @@
-import { OneBot11Adapter } from "../src/platform/implementations/onebot11-adapter.js";
-import { AdapterRegistry, registerBuiltinAdapterFactories } from "../src/platform/registry.js";
-import { PlatformAdapter, type AdapterStatus } from "../src/platform/adapter.js";
-import { AsyncQueue } from "../src/common/async-queue.js";
-import type { MessageEvent } from "../src/message/event.js";
-import type { OneBot11AdapterConfig } from "../src/platform/config.js";
-import { validateAdapterConfig } from "../src/platform/config.js";
-import { EventResult } from "../src/message/event-result.js";
-import { ComponentType } from "../src/message/components.js";
+import { OneBot11Adapter } from "@yachiyo/platform/implementations/onebot11-adapter.js";
+import { AdapterRegistry, registerBuiltinAdapterFactories } from "@yachiyo/platform/registry.js";
+import { PlatformAdapter, type AdapterStatus } from "@yachiyo/platform/adapter.js";
+import { AsyncQueue } from "@yachiyo/common/async-queue.js";
+import type { MessageEvent } from "@yachiyo/message/event.js";
+import type { OneBot11AdapterConfig } from "@yachiyo/platform/config.js";
+import { validateAdapterConfig } from "@yachiyo/platform/config.js";
+import { EventResult } from "@yachiyo/message/event-result.js";
+import { ComponentType } from "@yachiyo/message/components.js";
 import { WebSocket } from "ws";
 
 let passed = 0;
