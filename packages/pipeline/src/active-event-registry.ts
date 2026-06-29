@@ -11,7 +11,14 @@ export class ActiveEventRegistry {
 
   unregister(event: MessageEvent): void {
     const key = event.unifiedMsgOrigin;
-    this.events.get(key)?.delete(event);
+    const set = this.events.get(key);
+    if (!set) return;
+    set.delete(event);
+    // Purge empty sets to prevent the Map from accumulating an entry for
+    // every unifiedMsgOrigin ever seen (unbounded growth over long runs).
+    if (set.size === 0) {
+      this.events.delete(key);
+    }
   }
 
   stopAll(umo: string, exclude?: MessageEvent): number {

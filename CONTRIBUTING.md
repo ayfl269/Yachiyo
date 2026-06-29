@@ -130,4 +130,3 @@ main();
 
 - 发现 Bug 请提交 [Issue](../../issues)，附上复现步骤和环境信息
 - 功能建议请先在 Issue 中讨论，达成共识后再提交 PR
-- 安全漏洞请参考 [SECURITY.md](SECURITY.md) 中的披露流程

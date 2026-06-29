@@ -12,12 +12,7 @@ tsconfig.tsbuildinfo
 *.tsbuildinfo
 
 # SQLite databases and temp files
-data/*.db
-data/*.db-journal
-data/*.db-wal
-*.db
-*.db-journal
-*.db-wal
+data/
 
 # Log files and crash reports
 logs/
