@@ -176,8 +176,8 @@ export class WebChatAdapter extends PlatformAdapter {
   private config: WebChatConfig;
   private server: Server | null = null;
   private activeStreams: Map<string, SSEConnection> = new Map();
-  /** sessionId → SHA-256 hash of the caller's authToken (ownership check). */
-  private sessionOwners: Map<string, Buffer> = new Map();
+  /** sessionId → { hash, createdAt } for ownership check + TTL cleanup. */
+  private sessionOwners: Map<string, { hash: Buffer; createdAt: number }> = new Map();
   /** Per-caller sliding-window rate limit: tokenHash → { count, windowStart }. */
   private rateBuckets: Map<string, { count: number; windowStart: number }> = new Map();
   private metadata: PlatformMetadata = {
@@ -190,6 +190,12 @@ export class WebChatAdapter extends PlatformAdapter {
 
   private static readonly RATE_LIMIT_WINDOW_MS = 60_000;
   private static readonly RATE_LIMIT_MAX_REQUESTS = 30;
+  /** Max age (ms) for a sessionOwners entry before it's purged by the periodic cleanup. */
+  private static readonly SESSION_OWNER_TTL_MS = 60 * 60 * 1000; // 1 hour
+  /** Interval (ms) between sessionOwners / rateBuckets purge sweeps. */
+  private static readonly PURGE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+  /** Handle for the periodic purge timer (sessionOwners + rateBuckets). */
+  private purgeTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(config: WebChatConfig, eventQueue: AsyncQueue<MessageEvent>) {
     super(config as unknown as Record<string, unknown>, eventQueue);
@@ -199,6 +205,10 @@ export class WebChatAdapter extends PlatformAdapter {
   async initialize(): Promise<void> {
     await super.initialize();
     this.server = createServer((req, res) => this.handleRequest(req, res));
+    // Start periodic purge of stale sessionOwners and expired rateBuckets
+    // to prevent unbounded Map growth over long-running processes.
+    this.purgeTimer = setInterval(() => this.purgeStaleEntries(), WebChatAdapter.PURGE_INTERVAL_MS);
+    this.purgeTimer.unref();
   }
 
   async run(): Promise<void> {
@@ -225,12 +235,19 @@ export class WebChatAdapter extends PlatformAdapter {
   async stop(): Promise<void> {
     this._status = "stopping";
 
+    if (this.purgeTimer) {
+      clearInterval(this.purgeTimer);
+      this.purgeTimer = null;
+    }
+
     for (const [, conn] of this.activeStreams) {
       if (!conn.res.writableEnded) {
         try { conn.res.end(); } catch { /* ignore */ }
       }
     }
     this.activeStreams.clear();
+    this.sessionOwners.clear();
+    this.rateBuckets.clear();
 
     if (this.server) {
       await new Promise<void>(resolve => this.server!.close(() => resolve()));
@@ -238,6 +255,34 @@ export class WebChatAdapter extends PlatformAdapter {
     }
 
     await super.stop();
+  }
+
+  /**
+   * Periodic sweep that removes:
+   * - sessionOwners entries older than SESSION_OWNER_TTL_MS (abandoned sessions
+   *   whose caller never subscribed to a stream, or whose stream closed without
+   *   triggering the close handler).
+   * - rateBuckets entries whose window has fully elapsed (no longer needed for
+   *   rate limiting; would otherwise accumulate one entry per tokenHash forever).
+   */
+  private purgeStaleEntries(): void {
+    const now = Date.now();
+
+    // Purge stale session owners
+    for (const [sessionId, entry] of this.sessionOwners) {
+      // Don't purge sessions that still have an active stream — they're live.
+      if (this.activeStreams.has(sessionId)) continue;
+      if (now - entry.createdAt > WebChatAdapter.SESSION_OWNER_TTL_MS) {
+        this.sessionOwners.delete(sessionId);
+      }
+    }
+
+    // Purge expired rate limit buckets
+    for (const [key, bucket] of this.rateBuckets) {
+      if (now - bucket.windowStart >= WebChatAdapter.RATE_LIMIT_WINDOW_MS) {
+        this.rateBuckets.delete(key);
+      }
+    }
   }
 
   meta(): PlatformMetadata {
@@ -391,7 +436,10 @@ export class WebChatAdapter extends PlatformAdapter {
     // Record session ownership so only the caller who created the session
     // can subscribe to its stream. When auth is disabled, all callers map
     // to the same hash and ownership is effectively skipped.
-    this.sessionOwners.set(sessionId, Buffer.from(this.hashCaller(req), "hex"));
+    this.sessionOwners.set(sessionId, {
+      hash: Buffer.from(this.hashCaller(req), "hex"),
+      createdAt: Date.now(),
+    });
 
     const event = this.createEvent({
       sessionId,
@@ -426,9 +474,10 @@ export class WebChatAdapter extends PlatformAdapter {
     // Verify that the caller owns this session (i.e. created it via
     // POST /message with the same auth token). Prevents cross-session
     // eavesdropping when multiple callers share the adapter.
-    const ownerHash = this.sessionOwners.get(sessionId);
-    if (ownerHash) {
+    const ownerEntry = this.sessionOwners.get(sessionId);
+    if (ownerEntry) {
       const callerHash = Buffer.from(this.hashCaller(req), "hex");
+      const ownerHash = ownerEntry.hash;
       if (callerHash.length !== ownerHash.length || !timingSafeEqual(callerHash, ownerHash)) {
         res.writeHead(403, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Forbidden: session owned by another caller" }));
@@ -441,6 +490,10 @@ export class WebChatAdapter extends PlatformAdapter {
 
     req.on("close", () => {
       this.activeStreams.delete(sessionId);
+      // Clean up session ownership when the stream closes — the session
+      // is no longer active. A subsequent POST /message for the same
+      // sessionId will re-create the owner entry.
+      this.sessionOwners.delete(sessionId);
     });
   }
 

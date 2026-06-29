@@ -119,6 +119,10 @@ export class MemoryConsolidator {
   /**
    * Run the full consolidation pipeline.
    * On LLM extraction failure, short-term memories are preserved for next cycle.
+   *
+   * This method is safe to call from any site (timer, dashboard, memory-tool)
+   * — it acquires an internal concurrency lock so overlapping calls short-
+   * circuit and return a zero-result instead of running concurrently.
    */
   async consolidate(options?: { force?: boolean }): Promise<ConsolidationResult> {
     if (!this.config.enabled || this.config.memoryEnabled === false) {
@@ -131,78 +135,100 @@ export class MemoryConsolidator {
         extractionFailed: false,
       };
     }
-    console.log("[MemoryConsolidator] Starting consolidation...");
 
-    const result: ConsolidationResult = {
-      extracted: 0,
-      merged: 0,
-      expired: 0,
-      aged: { demoted: 0, archived: 0 },
-      extractionFailed: false,
-    };
+    // Concurrency lock: if a consolidation is already running (e.g. timer
+    // triggered while dashboard manually invoked), skip this call. Previously
+    // the lock was only enforced by runConsolidateSafe/checkAndConsolidate
+    // wrappers, but consolidate() is public and called directly from
+    // server.ts and memory-tool.ts — those calls bypassed the lock.
+    if (this.consolidating) {
+      console.log("[MemoryConsolidator] Consolidation already in progress, skipping.");
+      return {
+        extracted: 0,
+        merged: 0,
+        expired: 0,
+        aged: { demoted: 0, archived: 0 },
+        extractionFailed: false,
+      };
+    }
 
-    let extractionSkipped = false;
+    this.consolidating = true;
+    try {
+      console.log("[MemoryConsolidator] Starting consolidation...");
 
-    // Step 1: Extract memories from recent conversations (if provider available)
-    // On failure, skip extraction and preserve short-term buffer for retry
-    if (this.provider) {
-      const extractionResult = await this.extractFromConversations(options?.force);
-      if (extractionResult.failed) {
-        result.extractionFailed = true;
-        this.consecutiveFailures++;
-        console.warn(
-          `[MemoryConsolidator] Extraction failed (${this.consecutiveFailures}/${this.config.maxRetries}). ` +
-          `Short-term buffer preserved for next cycle.`
-        );
-        // Only proceed with dedup/aging if we've exceeded max retries
-        // (otherwise we want to preserve the buffer untouched)
-        if (this.consecutiveFailures < this.config.maxRetries) {
-          return result;
+      const result: ConsolidationResult = {
+        extracted: 0,
+        merged: 0,
+        expired: 0,
+        aged: { demoted: 0, archived: 0 },
+        extractionFailed: false,
+      };
+
+      let extractionSkipped = false;
+
+      // Step 1: Extract memories from recent conversations (if provider available)
+      // On failure, skip extraction and preserve short-term buffer for retry
+      if (this.provider) {
+        const extractionResult = await this.extractFromConversations(options?.force);
+        if (extractionResult.failed) {
+          result.extractionFailed = true;
+          this.consecutiveFailures++;
+          console.warn(
+            `[MemoryConsolidator] Extraction failed (${this.consecutiveFailures}/${this.config.maxRetries}). ` +
+            `Short-term buffer preserved for next cycle.`
+          );
+          // Only proceed with dedup/aging if we've exceeded max retries
+          // (otherwise we want to preserve the buffer untouched)
+          if (this.consecutiveFailures < this.config.maxRetries) {
+            return result;
+          }
+          // Max retries exceeded — reset counter and proceed with other steps
+          console.warn("[MemoryConsolidator] Max retries exceeded, proceeding with dedup/aging.");
+          this.consecutiveFailures = 0;
+        } else {
+          result.extracted = extractionResult.count;
+          extractionSkipped = !!(extractionResult as any).skipped;
+          this.consecutiveFailures = 0;
         }
-        // Max retries exceeded — reset counter and proceed with other steps
-        console.warn("[MemoryConsolidator] Max retries exceeded, proceeding with dedup/aging.");
-        this.consecutiveFailures = 0;
       } else {
-        result.extracted = extractionResult.count;
-        extractionSkipped = !!(extractionResult as any).skipped;
-        this.consecutiveFailures = 0;
+        console.warn("[MemoryConsolidator] Skipping extraction: No LLM provider is configured on the consolidator.");
+        extractionSkipped = true;
       }
-    } else {
-      console.warn("[MemoryConsolidator] Skipping extraction: No LLM provider is configured on the consolidator.");
-      extractionSkipped = true;
-    }
 
-    // Step 2: Deduplicate and merge similar memories
-    result.merged = this.deduplicate();
+      // Step 2: Deduplicate and merge similar memories
+      result.merged = this.deduplicate();
 
-    // Step 3: Delete expired memories
-    result.expired = this.store.deleteExpired();
+      // Step 3: Delete expired memories
+      result.expired = this.store.deleteExpired();
 
-    // Step 4: Apply aging
-    result.aged = this.store.applyAging({
-      accessThreshold: this.config.agingAccessThreshold,
-      maxAgeDays: this.config.agingMaxAgeDays,
-    });
+      // Step 4: Apply aging
+      result.aged = this.store.applyAging({
+        accessThreshold: this.config.agingAccessThreshold,
+        maxAgeDays: this.config.agingMaxAgeDays,
+      });
 
-    console.log(
-      `[MemoryConsolidator] Consolidation complete: extracted=${result.extracted}, merged=${result.merged}, ` +
-      `expired=${result.expired}, aged=${result.aged.demoted}d/${result.aged.archived}a` +
-      (result.extractionFailed ? " (extraction failed, buffer preserved)" : "")
-    );
+      console.log(
+        `[MemoryConsolidator] Consolidation complete: extracted=${result.extracted}, merged=${result.merged}, ` +
+        `expired=${result.expired}, aged=${result.aged.demoted}d/${result.aged.archived}a` +
+        (result.extractionFailed ? " (extraction failed, buffer preserved)" : "")
+      );
 
-    if (!result.extractionFailed && !extractionSkipped) {
-      try {
-        this.store.save("system_last_consolidate_time", Date.now().toString(), [], {
-          memoryType: "long_term",
-          scope: "global",
-          priority: 0,
-        });
-      } catch (e) {
-        console.error("[MemoryConsolidator] Failed to save system_last_consolidate_time:", e);
+      if (!result.extractionFailed && !extractionSkipped) {
+        try {
+          this.store.save("system_last_consolidate_time", Date.now().toString(), [], {
+            memoryType: "long_term",
+            scope: "global",
+            priority: 0,
+          });
+        } catch (e) {
+          console.error("[MemoryConsolidator] Failed to save system_last_consolidate_time:", e);
+        }
       }
-    }
 
-    return result;
+      return result;
+    } finally {
+      this.consolidating = false;
+    }
   }
 
   /**
@@ -359,7 +385,18 @@ ${bufferTexts.join("\n")}
         }>;
 
         if (Array.isArray(memories)) {
-          for (const mem of memories) {
+          // Cap the number of memories extracted in a single cycle to
+          // prevent LLM hallucination / prompt injection from triggering a
+          // write storm that pollutes long-term storage.
+          const MAX_MEMORIES_PER_EXTRACTION = 50;
+          const cappedMemories = memories.slice(0, MAX_MEMORIES_PER_EXTRACTION);
+          if (memories.length > MAX_MEMORIES_PER_EXTRACTION) {
+            console.warn(
+              `[MemoryConsolidator] LLM returned ${memories.length} memories, ` +
+              `capping to ${MAX_MEMORIES_PER_EXTRACTION} to prevent write storm.`
+            );
+          }
+          for (const mem of cappedMemories) {
             if (!mem.key || !mem.value) continue;
             this.store.save(mem.key, this.truncateValue(mem.value), mem.tags ?? [], {
               memoryType: "long_term",
@@ -619,18 +656,8 @@ ${bufferTexts.join("\n")}
     this.activeTimerConfig = null;
   }
 
-  /** 安全执行 consolidate，捕获异常不影响定时器，防止并发 */
+  /** 安全执行 consolidate，捕获异常不影响定时器。并发锁由 consolidate() 内部管理。 */
   private async runConsolidateSafe(): Promise<void> {
-    if (this.consolidating) {
-      // Another consolidation is in progress. Its `finally` block will
-      // reschedule the next check, so we must NOT schedule here — doing so
-      // would create a competing timer that fires before the in-flight run
-      // completes (the previous code called scheduleNextCheck(60000) here,
-      // which was redundant and fragile).
-      return;
-    }
-
-    this.consolidating = true;
     try {
       const lastTimeEntry = this.store.recall("system_last_consolidate_time");
       const lastTimeMs = lastTimeEntry ? parseInt(lastTimeEntry.value, 10) : 0;
@@ -647,7 +674,6 @@ ${bufferTexts.join("\n")}
     } catch (e) {
       console.error("[MemoryConsolidator] 整理异常:", e);
     } finally {
-      this.consolidating = false;
       this.scheduleNextCheck();
     }
   }
@@ -697,16 +723,10 @@ ${bufferTexts.join("\n")}
     }
 
     if (shouldConsolidate) {
-      if (this.consolidating) {
-        console.log("[MemoryConsolidator] Consolidation already in progress, skipping checkAndConsolidate execution.");
-        return null;
-      }
-      this.consolidating = true;
-      try {
-        return await this.consolidate();
-      } finally {
-        this.consolidating = false;
-      }
+      // consolidate() handles the concurrency lock internally — if another
+      // run is in progress, it returns a zero-result instead of running
+      // concurrently.
+      return await this.consolidate();
     }
 
     return null;

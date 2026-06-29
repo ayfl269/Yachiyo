@@ -346,7 +346,7 @@ export class DashboardServer {
       } else {
         await this.handleStaticRequest(req, res, pathname);
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error(`[DashboardServer] Error handling request ${req.method} ${pathname}:`, error);
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Internal Server Error", details: safeClientMessage(error) }));
@@ -440,7 +440,7 @@ export class DashboardServer {
         });
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, message: response.completionText || "Connection success" }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ success: false, error: safeClientMessage(err) }));
       }
@@ -465,7 +465,7 @@ export class DashboardServer {
         const models = await this.fetchModelsFromProvider(type, config);
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, models }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ success: false, error: safeClientMessage(err) }));
       }
@@ -580,7 +580,7 @@ export class DashboardServer {
         }
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, disabled: this.ctx.providerManager.isDisabled(id) }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(500);
         res.end(JSON.stringify({ error: safeClientMessage(err) }));
       }
@@ -732,7 +732,7 @@ export class DashboardServer {
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ success: true, results }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error("[Dashboard] Error processing skill ZIP upload:", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ success: false, error: safeClientMessage(err) }));
@@ -865,7 +865,7 @@ export class DashboardServer {
         });
         res.writeHead(200);
         res.end(JSON.stringify({ success: true }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ success: false, message: safeClientMessage(err) }));
       }
@@ -908,7 +908,7 @@ export class DashboardServer {
         const kb = await this.ctx.knowledgeBaseManager.createKb(options);
         res.writeHead(200);
         res.end(JSON.stringify(kb));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ error: safeClientMessage(err) }));
       }
@@ -928,7 +928,7 @@ export class DashboardServer {
         // KB update is limited - just return success for now
         res.writeHead(200);
         res.end(JSON.stringify({ success: true }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ success: false, message: safeClientMessage(err) }));
       }
@@ -948,7 +948,7 @@ export class DashboardServer {
         await this.ctx.knowledgeBaseManager.deleteKb(kb_id);
         res.writeHead(200);
         res.end(JSON.stringify({ success: true }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ success: false, message: safeClientMessage(err) }));
       }
@@ -982,7 +982,7 @@ export class DashboardServer {
         await this.ctx.knowledgeBaseManager.uploadText(kb_id, text, doc_name);
         res.writeHead(200);
         res.end(JSON.stringify({ success: true }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ success: false, message: safeClientMessage(err) }));
       }
@@ -1002,7 +1002,7 @@ export class DashboardServer {
         await this.ctx.knowledgeBaseManager.deleteDocument(doc_id);
         res.writeHead(200);
         res.end(JSON.stringify({ success: true }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ success: false, message: safeClientMessage(err) }));
       }
@@ -1022,7 +1022,7 @@ export class DashboardServer {
         const result = await this.ctx.knowledgeBaseManager.retrieve(query, kb_names, top_k);
         res.writeHead(200);
         res.end(JSON.stringify({ result }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ result: null, error: safeClientMessage(err) }));
       }
@@ -1110,8 +1110,8 @@ export class DashboardServer {
 
         res.writeHead(200);
         res.end(JSON.stringify(tools));
-      } catch (err: any) {
-        console.error("[tools/list] Error:", err.message);
+      } catch (err: unknown) {
+        console.error("[tools/list] Error:", err instanceof Error ? err.message : String(err));
         res.writeHead(200);
         res.end(JSON.stringify([]));
       }
@@ -1159,7 +1159,7 @@ export class DashboardServer {
             config: (adapter as any).config || {},
           }
         }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(500);
         res.end(JSON.stringify({ error: safeClientMessage(err) }));
       }
@@ -1174,7 +1174,7 @@ export class DashboardServer {
         if (success) this.ctx.adapterStore?.delete(id);
         res.writeHead(200);
         res.end(JSON.stringify({ success }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(500);
         res.end(JSON.stringify({ error: safeClientMessage(err) }));
       }
@@ -1209,7 +1209,7 @@ export class DashboardServer {
         this.ctx.adapterStore?.save(fullConfig as any);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ success: true, adapter: { id: adapter.meta().id, status: adapter.status } }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error("[DashboardServer] PUT /api/adapters error:", err);
         try {
           res.writeHead(500, { "Content-Type": "application/json" });
@@ -1236,7 +1236,7 @@ export class DashboardServer {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ loggedIn: true, qrStatus: null, qrImgContent: null, qrError: null }));
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(500);
         res.end(JSON.stringify({ error: safeClientMessage(err) }));
       }
@@ -1282,7 +1282,7 @@ export class DashboardServer {
         }
         res.writeHead(200);
         res.end(JSON.stringify({ success: true }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(500);
         res.end(JSON.stringify({ error: safeClientMessage(err) }));
       }
@@ -1357,7 +1357,7 @@ export class DashboardServer {
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ success: true, updatedCount: history.length }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error("[Dashboard] Error updating conversation:", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: safeClientMessage(err, "更新对话失败") }));
@@ -1481,7 +1481,7 @@ export class DashboardServer {
           },
         }));
         return;
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ status: "error", message: safeClientMessage(err, "获取模型列表失败") }));
         return;
@@ -1549,7 +1549,7 @@ export class DashboardServer {
             providers: providers,
           },
         }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ status: "error", message: safeClientMessage(err, "获取模板失败") }));
       }
@@ -1625,7 +1625,7 @@ export class DashboardServer {
 
         res.writeHead(200);
         res.end(JSON.stringify({ status: "ok", message: "提供商源已保存" }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ status: "error", message: safeClientMessage(err, "保存失败") }));
       }
@@ -1668,7 +1668,7 @@ export class DashboardServer {
 
         res.writeHead(200);
         res.end(JSON.stringify({ status: "ok", message: "提供商源已删除" }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ status: "error", message: safeClientMessage(err, "删除失败") }));
       }
@@ -1743,7 +1743,7 @@ export class DashboardServer {
 
         res.writeHead(200);
         res.end(JSON.stringify({ status: "ok", message: "提供商已创建" }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ status: "error", message: safeClientMessage(err, "创建失败") }));
       }
@@ -1765,7 +1765,7 @@ export class DashboardServer {
         await this.ctx.providerManager.deleteProvider(id);
         res.writeHead(200);
         res.end(JSON.stringify({ status: "ok", message: "提供商已删除" }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ status: "error", message: safeClientMessage(err, "删除失败") }));
       }
@@ -1821,7 +1821,7 @@ export class DashboardServer {
 
         res.writeHead(200);
         res.end(JSON.stringify({ status: "ok", message: "提供商已更新" }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ status: "error", message: safeClientMessage(err, "更新失败") }));
       }
@@ -1883,7 +1883,7 @@ export class DashboardServer {
 
         res.writeHead(200);
         res.end(JSON.stringify({ status: "ok", data: { error: null } }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ status: "ok", data: { error: safeClientMessage(err, "测试失败") } }));
       }
@@ -1916,7 +1916,7 @@ export class DashboardServer {
             })),
           },
         }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ status: "error", message: safeClientMessage(err) }));
       }
@@ -2008,7 +2008,7 @@ export class DashboardServer {
             range_success_rate: 1.0,
           },
         }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ status: "error", message: safeClientMessage(err) }));
       }
@@ -2059,7 +2059,7 @@ export class DashboardServer {
           res.writeHead(200);
           res.end(JSON.stringify({ success: false, tools: [], message: error || "连接失败" }));
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ success: false, tools: [], message: safeClientMessage(err, "连接失败") }));
       }
@@ -2098,7 +2098,7 @@ export class DashboardServer {
 
         res.writeHead(200);
         res.end(JSON.stringify({ success: true }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ success: false, message: safeClientMessage(err) }));
       }
@@ -2116,7 +2116,7 @@ export class DashboardServer {
         await toolMgr?.terminateMcpClient?.(serverName);
         res.writeHead(200);
         res.end(JSON.stringify({ success: true }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ success: false, message: safeClientMessage(err) }));
       }
@@ -2166,7 +2166,7 @@ export class DashboardServer {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Archiver not available", path: skillPath }));
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(500);
         res.end(JSON.stringify({ error: safeClientMessage(err) }));
       }
@@ -2242,7 +2242,7 @@ export class DashboardServer {
         const total = memoryStore.count(filterOptions);
         res.writeHead(200);
         res.end(JSON.stringify({ memories, total }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ memories: [], total: 0, error: safeClientMessage(err) }));
       }
@@ -2284,7 +2284,7 @@ export class DashboardServer {
         memoryStore.save(key, value || "", tags || [], options);
         res.writeHead(200);
         res.end(JSON.stringify({ success: true }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ success: false, error: safeClientMessage(err) }));
       }
@@ -2343,7 +2343,7 @@ export class DashboardServer {
         const deleted = memoryStore.delete(key);
         res.writeHead(200);
         res.end(JSON.stringify({ success: deleted }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ success: false, error: safeClientMessage(err) }));
       }
@@ -2362,7 +2362,7 @@ export class DashboardServer {
         const count = memoryStore.clear();
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, deletedCount: count }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ success: false, error: safeClientMessage(err) }));
       }
@@ -2381,7 +2381,7 @@ export class DashboardServer {
         const stats = memoryStore.stats();
         res.writeHead(200);
         res.end(JSON.stringify(stats));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ total: 0, byType: {}, byScope: {}, error: safeClientMessage(err) }));
       }
@@ -2400,7 +2400,7 @@ export class DashboardServer {
         const result = await consolidator.consolidate({ force: true });
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, result }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ success: false, error: safeClientMessage(err) }));
       }
@@ -2419,7 +2419,7 @@ export class DashboardServer {
         const config = consolidator.getConfig();
         res.writeHead(200);
         res.end(JSON.stringify(config));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ enabled: false, error: safeClientMessage(err) }));
       }
@@ -2441,7 +2441,7 @@ export class DashboardServer {
         const config = consolidator.getConfig();
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, config }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ success: false, error: safeClientMessage(err) }));
       }
@@ -2474,7 +2474,7 @@ export class DashboardServer {
         const content = await readFile(fullPath, "utf-8");
         res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
         res.end(content);
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ error: safeClientMessage(err) }));
       }
@@ -2507,7 +2507,7 @@ export class DashboardServer {
         await writeFile(fullPath, content, "utf-8");
         res.writeHead(200);
         res.end(JSON.stringify({ success: true }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ success: false, message: safeClientMessage(err) }));
       }
@@ -2609,7 +2609,7 @@ export class DashboardServer {
 
         res.writeHead(200);
         res.end(JSON.stringify({ response: responseText, session_id: sessionId, umo }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error("[DebugWebhook] Error:", err);
         res.writeHead(500);
         res.end(JSON.stringify({ error: safeClientMessage(err) }));
@@ -2630,7 +2630,7 @@ export class DashboardServer {
         }
         res.writeHead(200);
         res.end(JSON.stringify({ umo, convId, messageCount: history.length, history }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(500);
         res.end(JSON.stringify({ error: safeClientMessage(err) }));
       }
@@ -2648,7 +2648,7 @@ export class DashboardServer {
         }
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, umo }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(500);
         res.end(JSON.stringify({ error: safeClientMessage(err) }));
       }
@@ -3168,7 +3168,7 @@ export class DashboardServer {
             }
           }
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         zipResult.skills.push({
           name: file.originalName,
           status: "error",

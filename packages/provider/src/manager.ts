@@ -268,14 +268,22 @@ export class ProviderManager {
 
   /**
    * Register a callback that fires when a provider is loaded, reloaded, or terminated.
+   * Returns an unsubscribe function — call it to remove the callback and prevent
+   * leaks from duplicate registrations (e.g. plugin hot-reload, component remount).
    */
-  setProviderChangeCallback(cb: ProviderChangeCallback): void {
+  setProviderChangeCallback(cb: ProviderChangeCallback): () => void {
     this.changeCallbacks.push(cb);
+    return () => {
+      this.changeCallbacks = this.changeCallbacks.filter(c => c !== cb);
+    };
   }
 
-  /** Alias for setProviderChangeCallback. */
-  registerProviderChangeHook(hook: ProviderChangeCallback): void {
+  /** Alias for setProviderChangeCallback. Also returns an unsubscribe function. */
+  registerProviderChangeHook(hook: ProviderChangeCallback): () => void {
     this.changeCallbacks.push(hook);
+    return () => {
+      this.changeCallbacks = this.changeCallbacks.filter(c => c !== hook);
+    };
   }
 
   private notifyChange(

@@ -64,11 +64,18 @@ async function compressImage(filePath: string): Promise<{ buffer: Buffer; mimeTy
   }
 }
 
+/** Default download timeout (60s). Callers may pass a larger value for big files. */
+const DEFAULT_DOWNLOAD_TIMEOUT_MS = 60_000;
+
 /**
  * Download a file from a URL and return its bytes.
  * Uses fetch() with SSL verification (Node.js 18+).
+ *
+ * @param timeoutMs Optional timeout in milliseconds (default: 60s). Pass a
+ *   larger value for big files (long audio/video); pass a smaller value for
+ *   quick avatar/thumbnail fetches.
  */
-export async function downloadBytes(url: string): Promise<Uint8Array> {
+export async function downloadBytes(url: string, timeoutMs: number = DEFAULT_DOWNLOAD_TIMEOUT_MS): Promise<Uint8Array> {
   const headers: Record<string, string> = {};
   // QQ 多媒体下载需要 Referer 头
   if (url.includes("multimedia.nt.qq.com.cn")) {
@@ -77,7 +84,7 @@ export async function downloadBytes(url: string): Promise<Uint8Array> {
   const response = await fetch(url, {
     redirect: "follow",
     headers,
-    signal: AbortSignal.timeout(60_000), // 60s timeout
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) {
     throw new Error(`Failed to download ${url}: HTTP ${response.status}`);
@@ -89,12 +96,15 @@ export async function downloadBytes(url: string): Promise<Uint8Array> {
 /**
  * Download an image from a URL and save it to a temp file.
  * Returns the local file path.
+ *
+ * @param timeoutMs Optional download timeout in milliseconds (default: 60s).
  */
 export async function downloadImageByUrl(
   url: string,
   targetPath?: string,
+  timeoutMs?: number,
 ): Promise<string> {
-  const bytes = await downloadBytes(url);
+  const bytes = await downloadBytes(url, timeoutMs);
   const filePath = targetPath ?? join(tmpdir(), `img_${crypto.randomUUID().slice(0, 8)}.jpg`);
   await mkdir(join(filePath, ".."), { recursive: true });
   await writeFile(filePath, bytes);
@@ -103,12 +113,15 @@ export async function downloadImageByUrl(
 
 /**
  * Download a file from a URL to a specified local path.
+ *
+ * @param timeoutMs Optional download timeout in milliseconds (default: 60s).
  */
 export async function downloadFile(
   url: string,
   targetPath: string,
+  timeoutMs?: number,
 ): Promise<void> {
-  const bytes = await downloadBytes(url);
+  const bytes = await downloadBytes(url, timeoutMs);
   await mkdir(join(targetPath, ".."), { recursive: true });
   await writeFile(targetPath, bytes);
 }

@@ -88,6 +88,10 @@ class BackgroundTaskEventBus extends EventEmitter {
   /**
    * Notify that a background task has completed.
    * Emits event, calls waker, and logs.
+   *
+   * If no waker is registered, emits a warning so the operator knows the
+   * result was logged but NOT delivered to any agent. This makes the default
+   * (no-waker) behavior visible instead of silently dropping results.
    */
   async notifyCompleted(result: BackgroundTaskResult): Promise<void> {
     // 1. Emit event for subscribers
@@ -100,6 +104,12 @@ class BackgroundTaskEventBus extends EventEmitter {
       } catch (e) {
         console.error(`[BackgroundTask] Waker failed for task ${result.taskId}:`, e);
       }
+    } else {
+      console.warn(
+        `[BackgroundTask] No waker registered. Result for task ${result.taskId} ` +
+        `(${result.summaryName}) was logged but NOT delivered to any agent. ` +
+        `Call backgroundTaskBus.setWaker(...) to enable delivery.`
+      );
     }
 
     // 3. Log
@@ -599,7 +609,7 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
   protected async executeBackground(
     tool: FunctionTool<TContext>,
     runContext: ContextWrapper<TContext>,
-    _taskId: string,
+    taskId: string,
     toolArgs: Record<string, unknown>
   ): Promise<void> {
     // Background tasks use a longer timeout than regular tool calls.
@@ -610,14 +620,38 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
       ...runContext,
       toolCallTimeout: BACKGROUND_TASK_TIMEOUT_SECONDS,
     };
+    let resultText = "";
     try {
       const iter = this.executeLocal(tool, backgroundContext, toolArgs);
-      while (!(await iter.next()).done) {
-        // Consume results silently for background tasks
+      let iterResult;
+      while (!(iterResult = await iter.next()).done) {
+        // Collect text content from the tool's yielded results so the main
+        // agent receives the output when the background task finishes.
+        const yielded = iterResult.value;
+        if (yielded && yielded.content) {
+          for (const c of yielded.content) {
+            if (c.type === "text") {
+              resultText += (c as import("./types.js").TextContent).text + "\n";
+            }
+          }
+        }
       }
     } catch (e) {
+      resultText = `error: Background task execution failed: ${e}`;
       console.error(`Background task error: ${e}`);
     }
+
+    // Notify the background task bus so the main agent can be woken (if a
+    // waker is registered) or at minimum the result is logged. Previously
+    // results were consumed silently and completely lost.
+    await this.wakeMainAgentForBackgroundResult(runContext, {
+      taskId,
+      toolName: tool.name,
+      resultText,
+      toolArgs,
+      note: `Background task '${tool.name}' finished.`,
+      summaryName: `Background tool \`${tool.name}\``,
+    });
   }
 
   protected async *executeLocal(
