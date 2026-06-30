@@ -14,16 +14,17 @@ Yachiyo 是一个基于 TypeScript 实现的模块化 Agent 系统。采用 pnpm
 
 ## 核心特性
 
-- **模块化架构 (PNPM Workspaces)**：14 个子包解耦核心逻辑（`@yachiyo/agent`、`@yachiyo/provider`、`@yachiyo/pipeline`、`@yachiyo/platform` 等），通过 `src/` 代理层统一导出。
+- **模块化架构 (PNPM Workspaces)**：14 个子包解耦核心逻辑（`@yachiyo/agent`、`@yachiyo/provider`、`@yachiyo/pipeline`、`@yachiyo/platform` 等），`src/` 仅保留引导与入口文件，所有逻辑直接引用 `@yachiyo/*` 工作区包。
 - **多模型提供商接入 (Unified Providers)**：原生支持 OpenAI Chat Completions & Responses API、Google Gemini 以及 Anthropic API，提供流式输出解析、Prompt 缓存及多模态输入转换。同时支持 Embedding、Rerank、STT、TTS 等扩展能力。
 - **洋葱模型管线 (Stages Pipeline)**：基于事件驱动的 8 阶段消息处理管线（WakingCheck → SessionStatusCheck → RateLimit → ContentSafetyCheck → Preprocess → Process → ResultDecorate → Respond），支持会话锁定与后续事件处理。
+- **会话访问控制 (Session Access Control)**：支持基于 UMO（Unified Message Origin）的会话黑名单与白名单机制。白名单模式开启后，仅白名单内会话可获得响应，适用于限定特定群组/用户使用场景。
 - **分层记忆存储 (Layered SQLite Memory)**：利用 SQLite 存储短期对话缓冲区、长期记忆、角色偏好以及用户画像。内置 LLM 整理提炼机制、Jaccard 相似度去重、降权老化机制与 FTS5 全文搜索。
 - **丰富的工具系统 (Tool System)**：内置文件操作、Shell 执行、代码执行、网页搜索/抓取、Playwright 浏览器控制、记忆管理、代码搜索、Text-to-Image 渲染等工具，支持通过 MCP 协议接入外部工具。
 - **子代理编排 (Sub-Agent Orchestration)**：支持创建子代理并行处理任务，通过 Handoff 机制实现代理间协作，支持沙箱隔离执行。
 - **安全沙箱 (Process Sandbox)**：基于 Windows Job Object / Linux cgroup 的进程级安全沙箱，可限制 CPU 权重、最大内存使用与最大衍生进程数，保障本地命令及代码安全执行。
 - **多平台适配器中心 (Adapter Registry)**：支持 QQ (OneBot11 WebSocket)、QQ Official Bot、微信 (WeChat OC) 平台适配，统一生命周期管理并共享异步事件队列。
 - **插件与技能系统 (Plugin & Skill)**：可扩展的插件注册与技能管理机制，支持事件过滤、自定义处理逻辑。
-- **React 管理后台 (Admin Dashboard)**：集成 React + Vite 管理面板，可视化管理提供商、插件、技能、角色、知识库、对话、记忆、配置与消息平台。
+- **React 管理后台 (Admin Dashboard)**：集成 React + Vite 管理面板，可视化管理提供商、插件、技能、角色、知识库、对话、记忆、配置、消息平台与会话白名单。
 
 ---
 
@@ -52,39 +53,25 @@ Yachiyo 是一个基于 TypeScript 实现的模块化 Agent 系统。采用 pnpm
 
 ```
 yachiyo/
-├── src/                          # 核心源代码（代理层，re-export 自 packages/）
+├── src/                          # 入口与引导（直接引用 @yachiyo/* 工作区包）
 │   ├── server.ts                 # 主入口，读取环境变量并调用 bootstrap()
 │   ├── bootstrap.ts              # 系统引导，初始化所有管理器与管线
-│   ├── index.ts                  # 库入口，统一 re-export
-│   ├── agent/                    # 代理核心（构建器、运行器、工具、沙箱、上下文管理）
-│   ├── provider/                 # 模型提供商（实现、转换器、流解析器）
-│   ├── pipeline/                 # 消息处理管线（调度器、8 个阶段）
-│   ├── platform/                 # 平台适配器（OneBot11、QQ Official、WebChat、WeChat）
-│   ├── common/                   # 公共工具（数据库、错误、ID 生成、Token 计数）
-│   ├── config/                   # 配置管理
-│   ├── conversation/             # 对话管理
-│   ├── knowledge-base/           # 知识库（分块、向量存储、RAG）
-│   ├── persona/                  # 角色/人格管理
-│   ├── plugin/                   # 插件系统
-│   ├── skill/                    # 技能管理
-│   ├── message/                  # 消息模型与序列化
-│   ├── t2i/                      # Text-to-Image 渲染
-│   └── dashboard/                # 管理后台 API 服务
-├── packages/                     # 14 个 PNPM 子软件包
-│   ├── agent/                    # @yachiyo/agent
-│   ├── common/                   # @yachiyo/common
-│   ├── config/                   # @yachiyo/config
-│   ├── conversation/             # @yachiyo/conversation
-│   ├── dashboard/                # @yachiyo/dashboard
-│   ├── knowledge-base/           # @yachiyo/knowledge-base
-│   ├── message/                  # @yachiyo/message
-│   ├── persona/                  # @yachiyo/persona
-│   ├── pipeline/                 # @yachiyo/pipeline
-│   ├── platform/                 # @yachiyo/platform
-│   ├── plugin/                   # @yachiyo/plugin
-│   ├── provider/                 # @yachiyo/provider
-│   ├── skill/                    # @yachiyo/skill
-│   └── t2i/                      # @yachiyo/t2i
+│   └── index.ts                  # 库入口，统一 re-export 各子包公共 API
+├── packages/                     # 14 个 PNPM 子软件包（真正源代码所在）
+│   ├── agent/                    # @yachiyo/agent — 代理核心（构建器、运行器、工具、沙箱、上下文管理）
+│   ├── common/                   # @yachiyo/common — 公共工具（数据库、错误、ID 生成、Token 计数、SSRF 防护、加密）
+│   ├── config/                   # @yachiyo/config — 配置管理（含会话黑/白名单存储）
+│   ├── conversation/             # @yachiyo/conversation — 对话管理
+│   ├── dashboard/                # @yachiyo/dashboard — 管理后台 API 服务
+│   ├── knowledge-base/           # @yachiyo/knowledge-base — 知识库（分块、向量存储、RAG）
+│   ├── message/                  # @yachiyo/message — 消息模型与序列化
+│   ├── persona/                  # @yachiyo/persona — 角色/人格管理
+│   ├── pipeline/                 # @yachiyo/pipeline — 消息处理管线（调度器、8 个阶段）
+│   ├── platform/                 # @yachiyo/platform — 平台适配器（OneBot11、QQ Official、WebChat、WeChat）
+│   ├── plugin/                   # @yachiyo/plugin — 插件系统
+│   ├── provider/                 # @yachiyo/provider — 模型提供商（实现、转换器、流解析器）
+│   ├── skill/                    # @yachiyo/skill — 技能管理
+│   └── t2i/                      # @yachiyo/t2i — Text-to-Image 渲染
 ├── frontend/                     # React + Vite 管理后台
 │   └── src/components/           # 12 个管理面板组件
 ├── tests/                        # 测试套件（tsx 直接运行）
@@ -95,7 +82,7 @@ yachiyo/
 │   └── webhook_adapter_design.md      # 平台适配器设计
 ├── data/                         # SQLite 数据库文件
 │   ├── chat.db                   # 对话历史
-│   ├── config.db                 # 配置、提供商、角色、适配器
+│   ├── config.db                 # 配置、提供商、角色、适配器、会话黑白名单
 │   ├── memory.db                 # 代理长期记忆
 │   └── knowledge.db              # 知识库存储
 ├── dist/                         # 编译输出
