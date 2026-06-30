@@ -54,7 +54,7 @@ export const CONFIG_EXTRAS_MIGRATIONS: Migration[] = [
       CREATE TABLE IF NOT EXISTS skills (
         name TEXT PRIMARY KEY,
         description TEXT DEFAULT '',
-        path TEXT NOT NULL DEFAULT '',
+        path TEXT NOT NULL,
         active INTEGER NOT NULL DEFAULT 1,
         source_type TEXT DEFAULT '',
         source_label TEXT DEFAULT '',
@@ -89,6 +89,16 @@ export const CONFIG_EXTRAS_MIGRATIONS: Migration[] = [
         started_at TEXT,
         completed_at TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `,
+  },
+  {
+    version: 7,
+    name: "session_whitelist",
+    up: `
+      CREATE TABLE IF NOT EXISTS whitelisted_sessions (
+        unified_msg_origin TEXT PRIMARY KEY,
+        added_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
     `,
   },
@@ -213,5 +223,34 @@ export class SqliteSessionDisabledStore {
 
   enable(umo: string): void {
     this.db.prepare("DELETE FROM disabled_sessions WHERE unified_msg_origin = ?").run(umo);
+  }
+}
+
+// ── Session Whitelist Store ──
+
+export class SqliteSessionWhitelistStore {
+  constructor(private db: Database.Database) {}
+
+  isWhitelisted(umo: string): boolean {
+    const row = this.db.prepare(
+      "SELECT 1 FROM whitelisted_sessions WHERE unified_msg_origin = ?"
+    ).get(umo);
+    return !!row;
+  }
+
+  add(umo: string): void {
+    this.db.prepare(
+      "INSERT OR IGNORE INTO whitelisted_sessions (unified_msg_origin) VALUES (?)"
+    ).run(umo);
+  }
+
+  remove(umo: string): void {
+    this.db.prepare("DELETE FROM whitelisted_sessions WHERE unified_msg_origin = ?").run(umo);
+  }
+
+  listAll(): Array<{ unified_msg_origin: string; added_at: string }> {
+    return this.db.prepare(
+      "SELECT unified_msg_origin, added_at FROM whitelisted_sessions ORDER BY added_at DESC"
+    ).all() as Array<{ unified_msg_origin: string; added_at: string }>;
   }
 }

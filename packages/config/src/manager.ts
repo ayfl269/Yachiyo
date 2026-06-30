@@ -69,6 +69,8 @@ export interface AgentConfig {
   // History storage limit
   maxHistoryMessages: number;
   temperature?: number;
+  // Session whitelist: when enabled, only whitelisted UMOs get responses
+  sessionWhitelistEnabled: boolean;
 }
 
 export interface ConfigInfo {
@@ -250,6 +252,8 @@ export class ConfigManager {
       // History storage limit
       maxHistoryMessages: 200,
       temperature: 0.7,
+      // Session whitelist
+      sessionWhitelistEnabled: false,
     };
   }
 }

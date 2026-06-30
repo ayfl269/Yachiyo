@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Save, Settings, ShieldAlert, Cpu, Share2, Info, Brain } from 'lucide-react'
+import { Save, Settings, ShieldAlert, Cpu, Share2, Info, Brain, Plus, Trash2 } from 'lucide-react'
 import { useToast, ToastPortal } from './shared'
 
 interface AgentConfig {
@@ -66,6 +66,7 @@ interface AgentConfig {
   llmCompressProviderId: string
   fallbackMaxContextTokens: number
   temperature: number
+  sessionWhitelistEnabled: boolean
 }
 
 interface Provider {
@@ -80,6 +81,16 @@ interface Persona {
 
 type ActiveSection = 'basic' | 'context' | 'provider' | 'security' | 'multimodal' | 'reply' | 'memory'
 
+interface WhitelistEntry {
+  unified_msg_origin: string
+  added_at: string
+}
+
+interface CandidateEntry {
+  umo: string
+  title: string
+}
+
 export default function ConfigManager() {
   const [config, setConfig] = useState<AgentConfig | null>(null)
   const [providersList, setProvidersList] = useState<Provider[]>([])
@@ -90,6 +101,11 @@ export default function ConfigManager() {
   const [saveSuccess, setSaveSuccess] = useState(false)
   const saveSuccessTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [fetchError, setFetchError] = useState('')
+
+  // Session whitelist state
+  const [whitelistEntries, setWhitelistEntries] = useState<WhitelistEntry[]>([])
+  const [whitelistCandidates, setWhitelistCandidates] = useState<CandidateEntry[]>([])
+  const [whitelistCustomUmo, setWhitelistCustomUmo] = useState('')
 
   // Form helper for safety keywords string
   const [safetyKeywordsStr, setSafetyKeywordsStr] = useState('')
@@ -129,6 +145,53 @@ export default function ConfigManager() {
     } finally {
       setLoading(false)
     }
+  }
+
+  const fetchWhitelist = async () => {
+    try {
+      const [wlRes, candRes] = await Promise.all([
+        fetch('/api/session-whitelist'),
+        fetch('/api/session-whitelist/candidates'),
+      ])
+      if (wlRes.ok) {
+        const data = await wlRes.json()
+        setWhitelistEntries(data.entries ?? [])
+      }
+      if (candRes.ok) {
+        const data = await candRes.json()
+        setWhitelistCandidates(data.candidates ?? [])
+      }
+    } catch { /* ignore */ }
+  }
+
+  const handleWhitelistAdd = async (umo: string) => {
+    if (!umo.trim()) return
+    try {
+      const res = await fetch('/api/session-whitelist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ umo: umo.trim() }),
+      })
+      if (res.ok) {
+        showMessage('已添加到白名单')
+        setWhitelistCustomUmo('')
+        fetchWhitelist()
+      }
+    } catch { /* ignore */ }
+  }
+
+  const handleWhitelistRemove = async (umo: string) => {
+    try {
+      const res = await fetch('/api/session-whitelist', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ umo }),
+      })
+      if (res.ok) {
+        showMessage('已从白名单移除')
+        fetchWhitelist()
+      }
+    } catch { /* ignore */ }
   }
 
   const handleSave = async () => {
@@ -174,6 +237,7 @@ export default function ConfigManager() {
 
   useEffect(() => {
     fetchConfig()
+    fetchWhitelist()
   }, [])
 
   useEffect(() => {
@@ -671,6 +735,84 @@ export default function ConfigManager() {
                 />
                 <label htmlFor="safetyCheckResponse">对模型的输出也执行过滤安全检查</label>
               </div>
+              <div className="form-group row-checkbox">
+                <input
+                  type="checkbox"
+                  checked={config.sessionWhitelistEnabled ?? false}
+                  onChange={(e) => updateField('sessionWhitelistEnabled', e.target.checked)}
+                  id="sessionWhitelistEnabled"
+                />
+                <label htmlFor="sessionWhitelistEnabled">开启会话白名单 (仅白名单内会话获得响应)</label>
+              </div>
+              {config.sessionWhitelistEnabled && (
+                <>
+                  {whitelistEntries.length === 0 && (
+                    <div style={{ padding: 12, marginBottom: 12, borderRadius: 6, background: 'rgba(255,193,7,0.1)', border: '1px solid rgba(255,193,7,0.3)', color: '#856404', fontSize: 13 }}>
+                      ⚠ 白名单为空 — 当前所有会话都将被阻止，请从下方添加会话。
+                    </div>
+                  )}
+                  {/* Whitelisted sessions */}
+                  {whitelistEntries.length > 0 && (
+                    <div className="form-group span-2">
+                      <label>已加入白名单的会话 ({whitelistEntries.length})</label>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 200, overflowY: 'auto' }}>
+                        {whitelistEntries.map((entry) => (
+                          <div key={entry.unified_msg_origin} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 8px', background: 'var(--bg-secondary)', borderRadius: 4 }}>
+                            <div>
+                              <span style={{ fontFamily: 'monospace', fontSize: 13 }}>{entry.unified_msg_origin}</span>
+                              <span style={{ fontSize: 11, color: 'var(--text-secondary)', marginLeft: 8 }}>{entry.added_at}</span>
+                            </div>
+                            <button className="btn btn-danger btn-sm" style={{ padding: '2px 6px' }} onClick={() => handleWhitelistRemove(entry.unified_msg_origin)}>
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {/* Add custom UMO */}
+                  <div className="form-group span-2">
+                    <label>添加会话到白名单</label>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <input
+                        type="text"
+                        value={whitelistCustomUmo}
+                        onChange={(e) => setWhitelistCustomUmo(e.target.value)}
+                        placeholder="手动输入 UMO，例如: onebot11:group:123456"
+                        className="form-control"
+                        style={{ flex: 1 }}
+                        onKeyDown={(e) => { if (e.key === 'Enter') handleWhitelistAdd(whitelistCustomUmo) }}
+                      />
+                      <button className="btn primary" style={{ whiteSpace: 'nowrap' }} onClick={() => handleWhitelistAdd(whitelistCustomUmo)} disabled={!whitelistCustomUmo.trim()}>
+                        <Plus size={14} /> 添加
+                      </button>
+                    </div>
+                    <span className="help-text">UMO 格式: 平台:类型:ID，如 onebot11:group:123456、weixin_oc:private:wxid_xxx</span>
+                  </div>
+                  {/* Candidates from existing conversations */}
+                  {(() => {
+                    const whitelistedSet = new Set(whitelistEntries.map((e) => e.unified_msg_origin))
+                    const unlisted = whitelistCandidates.filter((c) => !whitelistedSet.has(c.umo))
+                    if (unlisted.length === 0) return null
+                    return (
+                      <div className="form-group span-2">
+                        <label>已知会话 (点击添加)</label>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 160, overflowY: 'auto' }}>
+                          {unlisted.map((cand) => (
+                            <div key={cand.umo} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 8px', background: 'var(--bg-secondary)', borderRadius: 4, cursor: 'pointer' }} onClick={() => handleWhitelistAdd(cand.umo)}>
+                              <div>
+                                <span style={{ fontSize: 13 }}>{cand.title}</span>
+                                <span style={{ fontFamily: 'monospace', fontSize: 11, color: 'var(--text-secondary)', marginLeft: 8 }}>{cand.umo}</span>
+                              </div>
+                              <Plus size={14} style={{ color: 'var(--text-secondary)' }} />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )
+                  })()}
+                </>
+              )}
               <div className="form-group row-checkbox">
                 <input
                   type="checkbox"

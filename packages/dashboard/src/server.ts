@@ -418,7 +418,73 @@ export class DashboardServer {
       return;
     }
 
-    // 4.5 POST /api/providers/test
+    // 4.5 Session Whitelist — list / add / remove / candidates
+    if (pathname === "/api/session-whitelist" && req.method === "GET") {
+      const entries = this.ctx.sessionServiceManager.listWhitelist();
+      const config = this.ctx.configManager.getActiveConfig();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ enabled: config?.sessionWhitelistEnabled ?? false, entries }));
+      return;
+    }
+    if (pathname === "/api/session-whitelist" && req.method === "POST") {
+      const parsed = await this.readJsonObject(req);
+      if (!parsed.ok) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: parsed.error }));
+        return;
+      }
+      const { umo } = parsed.value as { umo?: string };
+      if (!umo || typeof umo !== "string") {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Missing 'umo' field" }));
+        return;
+      }
+      this.ctx.sessionServiceManager.addWhitelist(umo);
+      res.writeHead(200);
+      res.end(JSON.stringify({ success: true }));
+      return;
+    }
+    if (pathname === "/api/session-whitelist" && req.method === "DELETE") {
+      const parsed = await this.readJsonObject(req);
+      if (!parsed.ok) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: parsed.error }));
+        return;
+      }
+      const { umo } = parsed.value as { umo?: string };
+      if (!umo || typeof umo !== "string") {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Missing 'umo' field" }));
+        return;
+      }
+      this.ctx.sessionServiceManager.removeWhitelist(umo);
+      res.writeHead(200);
+      res.end(JSON.stringify({ success: true }));
+      return;
+    }
+    if (pathname === "/api/session-whitelist/candidates" && req.method === "GET") {
+      const store = (this.ctx.conversationManager as any).store;
+      if (!store) {
+        res.writeHead(200);
+        res.end(JSON.stringify({ candidates: [] }));
+        return;
+      }
+      const allConvs = await store.getAllConversations();
+      const seen = new Set<string>();
+      const candidates: Array<{ umo: string; title: string }> = [];
+      for (const conv of allConvs) {
+        const umo = conv.unifiedMsgOrigin;
+        if (umo && !seen.has(umo)) {
+          seen.add(umo);
+          candidates.push({ umo, title: conv.title || umo });
+        }
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ candidates }));
+      return;
+    }
+
+    // 4.6 POST /api/providers/test
     if (pathname === "/api/providers/test" && req.method === "POST") {
       const parsed = await this.readJsonObject(req);
       if (!parsed.ok) {

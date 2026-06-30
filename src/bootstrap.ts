@@ -22,7 +22,7 @@ import { DatabaseManager } from "@yachiyo/common/database.js";
 import { CHAT_MIGRATIONS, SqliteConversationStore } from "@yachiyo/conversation/sqlite-conversation-store.js";
 import { MEMORY_MIGRATIONS, SqliteMemoryStore } from "@yachiyo/agent/sqlite-memory-store.js";
 import { CONFIG_MIGRATIONS } from "@yachiyo/config/sqlite-config-store.js";
-import { CONFIG_EXTRAS_MIGRATIONS, SqlitePluginStore, SqliteSkillStore, SqliteSessionDisabledStore } from "@yachiyo/config/sqlite-config-extras-store.js";
+import { CONFIG_EXTRAS_MIGRATIONS, SqlitePluginStore, SqliteSkillStore, SqliteSessionDisabledStore, SqliteSessionWhitelistStore } from "@yachiyo/config/sqlite-config-extras-store.js";
 import { PROVIDER_CONFIG_MIGRATIONS, SqliteProviderStore } from "@yachiyo/provider/sqlite-provider-store.js";
 import { PERSONA_MIGRATIONS, SqlitePersonaStore } from "@yachiyo/persona/sqlite-persona-store.js";
 import { KNOWLEDGE_MIGRATIONS, SqliteKBMetadataStore, SqliteVectorStore } from "@yachiyo/knowledge-base/stores/sqlite-kb-store.js";
@@ -183,7 +183,8 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
   const sessionLockManager = new SessionLockManager();
 
   const sqliteSessionDisabledStore = new SqliteSessionDisabledStore(dbManager.getDb("config"));
-  const sessionServiceManager = new SessionServiceManager(sqliteSessionDisabledStore);
+  const sqliteSessionWhitelistStore = new SqliteSessionWhitelistStore(dbManager.getDb("config"));
+  const sessionServiceManager = new SessionServiceManager(sqliteSessionDisabledStore, sqliteSessionWhitelistStore);
 
   const sqlitePluginStore = new SqlitePluginStore(dbManager.getDb("config"));
   const pluginManager = new PluginManager();
