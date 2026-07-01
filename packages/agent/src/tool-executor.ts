@@ -66,6 +66,10 @@ export interface BackgroundTaskWaker {
 class BackgroundTaskEventBus extends EventEmitter {
   private static instance: BackgroundTaskEventBus | null = null;
   private waker: BackgroundTaskWaker | null = null;
+  /** Results produced before a waker was registered; replayed on setWaker. */
+  private pendingResults: BackgroundTaskResult[] = [];
+  /** Cap to prevent unbounded growth if no waker is ever set. */
+  private static readonly MAX_PENDING = 100;
 
   static getInstance(): BackgroundTaskEventBus {
     if (!BackgroundTaskEventBus.instance) {
@@ -75,9 +79,26 @@ class BackgroundTaskEventBus extends EventEmitter {
     return BackgroundTaskEventBus.instance;
   }
 
-  /** Register a waker that will be called when any background task completes. */
+  /**
+   * Register a waker that will be called when any background task completes.
+   * If results were produced before a waker was set, they are replayed
+   * asynchronously (best-effort) so no completion is silently lost.
+   */
   setWaker(waker: BackgroundTaskWaker | null): void {
     this.waker = waker;
+    if (waker && this.pendingResults.length > 0) {
+      const queued = this.pendingResults.splice(0);
+      // Replay asynchronously so setWaker returns immediately.
+      queueMicrotask(async () => {
+        for (const result of queued) {
+          try {
+            await waker.wake(result);
+          } catch (e) {
+            console.error(`[BackgroundTask] Waker replay failed for task ${result.taskId}:`, e);
+          }
+        }
+      });
+    }
   }
 
   /** Get the currently registered waker, if any. */
@@ -89,9 +110,9 @@ class BackgroundTaskEventBus extends EventEmitter {
    * Notify that a background task has completed.
    * Emits event, calls waker, and logs.
    *
-   * If no waker is registered, emits a warning so the operator knows the
-   * result was logged but NOT delivered to any agent. This makes the default
-   * (no-waker) behavior visible instead of silently dropping results.
+   * If no waker is registered, the result is buffered into `pendingResults`
+   * (up to MAX_PENDING) so it can be delivered when a waker is later set,
+   * rather than being silently dropped.
    */
   async notifyCompleted(result: BackgroundTaskResult): Promise<void> {
     // 1. Emit event for subscribers
@@ -105,10 +126,19 @@ class BackgroundTaskEventBus extends EventEmitter {
         console.error(`[BackgroundTask] Waker failed for task ${result.taskId}:`, e);
       }
     } else {
+      // Buffer for replay; trim oldest if over capacity.
+      this.pendingResults.push(result);
+      if (this.pendingResults.length > BackgroundTaskEventBus.MAX_PENDING) {
+        const dropped = this.pendingResults.shift();
+        console.warn(
+          `[BackgroundTask] Pending buffer full; dropping oldest result ` +
+          `for task ${dropped?.taskId}.`
+        );
+      }
       console.warn(
         `[BackgroundTask] No waker registered. Result for task ${result.taskId} ` +
-        `(${result.summaryName}) was logged but NOT delivered to any agent. ` +
-        `Call backgroundTaskBus.setWaker(...) to enable delivery.`
+        `(${result.summaryName}) buffered (${this.pendingResults.length} pending) ` +
+        `and will be replayed when setWaker is called.`
       );
     }
 

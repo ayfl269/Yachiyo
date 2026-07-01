@@ -1,4 +1,5 @@
 import type { ToolLoopAgentRunner } from "./runners/tool-loop-agent-runner.js";
+import { MAX_STEPS_REACHED_PROMPT } from "./runners/tool-loop-agent-runner.js";
 import type { LLMResponse, MessageChain } from "./types.js";
 import { createMessageChain } from "./types.js";
 
@@ -23,10 +24,6 @@ export interface RunAgentResult {
   wasAborted: boolean;
   chains: MessageChain[];
 }
-
-const MAX_STEPS_REACHED_PROMPT =
-  "Maximum tool call limit reached. Stop calling tools, and based on the information " +
-  "you have gathered, summarize your task and findings, and reply to the user directly.";
 
 /**
  * High-level agent runner that processes AgentResponse stream and collects results.

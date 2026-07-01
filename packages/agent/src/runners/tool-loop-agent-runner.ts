@@ -55,7 +55,7 @@ const FOLLOW_UP_NOTICE_TEMPLATE =
   "that their follow-up message(s) were received before continuing.\n" +
   "{followUpLines}";
 
-const MAX_STEPS_REACHED_PROMPT =
+export const MAX_STEPS_REACHED_PROMPT =
   "Maximum tool call limit reached. " +
   "Stop calling tools, and based on the information you have gathered, " +
   "summarize your task and findings, and reply to the user directly.";
@@ -1128,15 +1128,16 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
           continue;
         }
 
-        // Parameter filtering
+        // Parameter filtering: strip keys not declared in the tool's schema.
+        // This applies to ALL tools (local handler, MCP, handoff) so LLM
+        // hallucination params don't leak into tool execution. Tools without
+        // a `properties` schema fall through to pass-through.
         let validParams: Record<string, unknown> = {};
-        if (funcTool.handler) {
-          const params = funcTool.parameters as Record<string, unknown>;
-          if (params?.properties) {
-            const expectedParams = new Set(Object.keys(params.properties as Record<string, unknown>));
-            for (const [k, v] of Object.entries(funcToolArgs as Record<string, unknown>)) {
-              if (expectedParams.has(k)) validParams[k] = v;
-            }
+        const params = funcTool.parameters as Record<string, unknown>;
+        if (params?.properties && typeof params.properties === "object") {
+          const expectedParams = new Set(Object.keys(params.properties as Record<string, unknown>));
+          for (const [k, v] of Object.entries(funcToolArgs as Record<string, unknown>)) {
+            if (expectedParams.has(k)) validParams[k] = v;
           }
         } else {
           validParams = funcToolArgs as Record<string, unknown>;
