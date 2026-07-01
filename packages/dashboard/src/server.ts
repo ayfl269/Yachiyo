@@ -2,7 +2,32 @@ import { createServer, type IncomingMessage, type ServerResponse, type Server } 
 import { join, extname, resolve, relative, isAbsolute } from "path";
 import { readFile, stat, writeFile, mkdir, unlink, readdir } from "fs/promises";
 import { cpus, tmpdir, totalmem } from "os";
-import { timingSafeEqual } from "crypto";
+import { timingSafeEqual, randomBytes, scryptSync } from "crypto";
+
+/**
+ * Helper to generate an scrypt password hash.
+ */
+function hashPassword(password: string): string {
+  const salt = randomBytes(16).toString("hex");
+  const hash = scryptSync(password, salt, 64).toString("hex");
+  return `${salt}:${hash}`;
+}
+
+/**
+ * Helper to verify an scrypt password hash.
+ * Uses `timingSafeEqual` to prevent timing attacks.
+ */
+function verifyPassword(password: string, stored: string): boolean {
+  const parts = stored.split(":");
+  if (parts.length !== 2) return false;
+  const [salt, hash] = parts;
+  const verifyHash = scryptSync(password, salt, 64).toString("hex");
+  // Constant-time comparison to mitigate timing attacks.
+  const a = Buffer.from(verifyHash, "hex");
+  const b = Buffer.from(hash, "hex");
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
 
 import type { AsyncQueue } from "@yachiyo/common/async-queue.js";
 import type { MessageEvent } from "@yachiyo/message/event.js";
@@ -143,13 +168,6 @@ export interface DashboardServerOptions {
   host?: string;
   debugChatEnabled?: boolean;
   /**
-   * Bearer token required for all `/api/` requests. When empty/undefined,
-   * authentication is DISABLED (dev mode) and a warning is logged. Set this
-   * to a strong secret in production so that anyone who can reach the port
-   * cannot fully control the system (providers, conversations, shell tools…).
-   */
-  authToken?: string;
-  /**
    * Allowed CORS origins. When set, `Access-Control-Allow-Origin` echoes a
    * matching request `Origin` instead of `*`, preventing cross-origin abuse.
    * The SPA is served same-origin and does not need CORS; this is mainly for
@@ -164,35 +182,112 @@ export class DashboardServer {
   private port: number;
   private host: string;
   private debugChatEnabled: boolean;
-  private authToken: string | undefined;
   private allowedOrigins: Set<string> | undefined;
   private startTime: number = 0;
   private prevCpuInfo: { idle: number; total: number } | null = null;
   private todayTokens: number = 0;
   private lastTokenDate: string = new Date().toDateString();
+  private activeSessions: Map<string, { username: string; mustChange: boolean; expiresAt: number; lastActivity: number }> = new Map();
+  /** Session absolute lifetime in ms (8 hours). */
+  private static readonly SESSION_ABSOLUTE_TTL_MS = 8 * 60 * 60 * 1000;
+  /** Session idle timeout in ms (30 minutes). */
+  private static readonly SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+  /** Login rate-limit: max attempts per key (username+ip) within the window. */
+  private static readonly LOGIN_RATE_LIMIT_MAX = 5;
+  /** Login rate-limit window in ms (1 minute). */
+  private static readonly LOGIN_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+  private loginAttempts: Map<string, { count: number; firstAttemptAt: number }> = new Map();
+
+  private ensureDefaultUser(): void {
+    try {
+      const db = this.ctx.dbManager.getDb("config");
+      const countRow = db.prepare("SELECT COUNT(*) as count FROM dashboard_users").get() as { count: number } | undefined;
+      if (!countRow || countRow.count === 0) {
+        const defaultUser = process.env.DASHBOARD_DEFAULT_USER || "admin";
+        const defaultPass = process.env.DASHBOARD_DEFAULT_PASSWORD || "admin";
+        const hashedPassword = hashPassword(defaultPass);
+        db.prepare(`
+          INSERT INTO dashboard_users (username, password_hash, is_first_login)
+          VALUES (?, ?, 1)
+        `).run(defaultUser, hashedPassword);
+        console.log(`[DashboardServer] Created default user "${defaultUser}". Forced password change on first login is active.`);
+      }
+    } catch (err) {
+      console.error("[DashboardServer] Failed to ensure default user exists:", err);
+    }
+  }
 
   constructor(ctx: BootstrapContext, options: DashboardServerOptions = {}) {
     this.ctx = ctx;
     this.port = options.port ?? 8000;
     this.host = options.host ?? "127.0.0.1";
     this.debugChatEnabled = options.debugChatEnabled === true;
-    this.authToken = options.authToken;
     this.allowedOrigins = options.allowedOrigins ? new Set(options.allowedOrigins) : undefined;
   }
 
   /**
-   * Constant-time Bearer token check. Returns true when auth is disabled
-   * (no authToken configured) so dev mode keeps working.
+   * Bearer token check via dynamic session tokens (with sliding expiration).
    */
-  private isRequestAuthenticated(req: IncomingMessage): boolean {
-    if (!this.authToken) return true; // auth disabled (dev mode)
+  private isRequestAuthenticated(req: IncomingMessage, pathname: string): boolean {
     const header = req.headers["authorization"];
     if (typeof header !== "string") return false;
-    const expected = `Bearer ${this.authToken}`;
-    const a = Buffer.from(header);
-    const b = Buffer.from(expected);
-    if (a.length !== b.length) return false;
-    return timingSafeEqual(a, b);
+    if (!header.startsWith("Bearer ")) return false;
+    const token = header.slice(7).trim();
+
+    // Dynamic session check (with sliding expiration)
+    const session = this.activeSessions.get(token);
+    if (session) {
+      const now = Date.now();
+      // Expired: absolute lifetime exceeded OR idle timeout exceeded.
+      if (now > session.expiresAt || now - session.lastActivity > DashboardServer.SESSION_IDLE_TIMEOUT_MS) {
+        this.activeSessions.delete(token);
+        return false;
+      }
+      // Sliding window: refresh lastActivity on each authenticated request.
+      session.lastActivity = now;
+      if (session.mustChange) {
+        // If mustChange is true, only /api/auth/change-credentials is allowed
+        return pathname === "/api/auth/change-credentials";
+      }
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Enforce login rate limiting per (username + client IP) key.
+   * Returns `null` if allowed, or an error message string if blocked.
+   */
+  private checkLoginRateLimit(username: string, clientIp: string): string | null {
+    const key = `${username}:${clientIp}`;
+    const now = Date.now();
+    const entry = this.loginAttempts.get(key);
+    if (!entry || now - entry.firstAttemptAt > DashboardServer.LOGIN_RATE_LIMIT_WINDOW_MS) {
+      // Reset window.
+      this.loginAttempts.set(key, { count: 1, firstAttemptAt: now });
+      return null;
+    }
+    entry.count++;
+    if (entry.count > DashboardServer.LOGIN_RATE_LIMIT_MAX) {
+      const retryAfterSec = Math.ceil((DashboardServer.LOGIN_RATE_LIMIT_WINDOW_MS - (now - entry.firstAttemptAt)) / 1000);
+      return `登录尝试过于频繁，请 ${retryAfterSec} 秒后重试`;
+    }
+    return null;
+  }
+
+  /** Reset the rate-limit counter after a successful login. */
+  private clearLoginRateLimit(username: string, clientIp: string): void {
+    this.loginAttempts.delete(`${username}:${clientIp}`);
+  }
+
+  /** Extract client IP from request, accounting for trusted proxies. */
+  private getClientIp(req: IncomingMessage): string {
+    const forwarded = req.headers["x-forwarded-for"];
+    if (typeof forwarded === "string" && forwarded.length > 0) {
+      return forwarded.split(",")[0].trim();
+    }
+    return req.socket.remoteAddress || "unknown";
   }
 
   /** Apply CORS headers based on the configured allowlist. No allowlist => no ACAO (same-origin only). */
@@ -212,15 +307,13 @@ export class DashboardServer {
   }
 
   async start(): Promise<void> {
+    this.ensureDefaultUser();
     this.startTime = Date.now();
     this.server = createServer((req, res) => this.handleRequest(req, res));
 
     await new Promise<void>((resolve, reject) => {
       this.server!.listen(this.port, this.host, () => {
         console.log(`[DashboardServer] Admin Dashboard is running at http://${this.host}:${this.port}`);
-        if (!this.authToken) {
-          console.warn(`[DashboardServer] WARNING: API authentication is DISABLED (no authToken configured). Anyone who can reach this port can fully control the system. Set dashboard.authToken in production.`);
-        }
         if (this.debugChatEnabled) {
           console.warn(`[DashboardServer] WARNING: debug chat endpoint (/api/debug/chat) is ENABLED. It runs the full agent pipeline (tools, shell, file access) on any authorized request — enable only in trusted environments.`);
         }
@@ -333,7 +426,8 @@ export class DashboardServer {
 
     // Authenticate all API routes. Static assets (the SPA shell) are served
     // without auth so the login screen can load.
-    if (pathname.startsWith("/api/") && !this.isRequestAuthenticated(req)) {
+    const isAuthExempt = pathname === "/api/auth/login" || pathname === "/api/auth/status";
+    if (pathname.startsWith("/api/") && !isAuthExempt && !this.isRequestAuthenticated(req, pathname)) {
       res.writeHead(401, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Unauthorized", message: "Missing or invalid Authorization header." }));
       return;
@@ -360,6 +454,300 @@ export class DashboardServer {
     url: URL
   ): Promise<void> {
     res.setHeader("Content-Type", "application/json");
+
+    // Auth Endpoint: POST /api/auth/login
+    if (pathname === "/api/auth/login" && req.method === "POST") {
+      const result = await this.readJsonObject(req);
+      if (!result.ok) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Bad Request", message: result.error }));
+        return;
+      }
+      const { username, password } = result.value;
+      if (typeof username !== "string" || typeof password !== "string") {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Bad Request", message: "用户名或密码格式不正确" }));
+        return;
+      }
+
+      // Rate-limit check (per username + client IP).
+      const clientIp = this.getClientIp(req);
+      const rateLimited = this.checkLoginRateLimit(username, clientIp);
+      if (rateLimited) {
+        res.writeHead(429, { "Retry-After": String(Math.ceil(DashboardServer.LOGIN_RATE_LIMIT_WINDOW_MS / 1000)) });
+        res.end(JSON.stringify({ error: "Too Many Requests", message: rateLimited }));
+        return;
+      }
+
+      const db = this.ctx.dbManager.getDb("config");
+      const user = db.prepare("SELECT * FROM dashboard_users WHERE username = ?").get(username) as { username: string; password_hash: string; is_first_login: number } | undefined;
+
+      if (!user || !verifyPassword(password, user.password_hash)) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: "Unauthorized", message: "用户名或密码错误" }));
+        return;
+      }
+
+      // Success: clear rate-limit counter.
+      this.clearLoginRateLimit(username, clientIp);
+
+      const sessionToken = randomBytes(24).toString("hex");
+      const mustChange = user.is_first_login === 1;
+      const now = Date.now();
+      this.activeSessions.set(sessionToken, {
+        username: user.username,
+        mustChange,
+        expiresAt: now + DashboardServer.SESSION_ABSOLUTE_TTL_MS,
+        lastActivity: now,
+      });
+
+      res.writeHead(200);
+      res.end(JSON.stringify({
+        status: mustChange ? "must_change" : "success",
+        token: sessionToken,
+        username: user.username
+      }));
+      return;
+    }
+
+    // Auth Endpoint: POST /api/auth/change-credentials
+    if (pathname === "/api/auth/change-credentials" && req.method === "POST") {
+      const header = req.headers["authorization"];
+      if (typeof header !== "string" || !header.startsWith("Bearer ")) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: "Unauthorized", message: "未登录" }));
+        return;
+      }
+      const token = header.slice(7).trim();
+      const session = this.activeSessions.get(token);
+      if (!session) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: "Unauthorized", message: "会话已过期" }));
+        return;
+      }
+
+      const result = await this.readJsonObject(req);
+      if (!result.ok) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Bad Request", message: result.error }));
+        return;
+      }
+      const { newUsername, newPassword, confirmPassword } = result.value;
+      if (typeof newUsername !== "string" || typeof newPassword !== "string" || !newUsername.trim() || !newPassword.trim()) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Bad Request", message: "新用户名或密码不能为空" }));
+        return;
+      }
+
+      if (typeof confirmPassword !== "string" || confirmPassword !== newPassword) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Bad Request", message: "两次输入的密码不一致" }));
+        return;
+      }
+
+      if (newUsername.trim().length < 3 || newPassword.trim().length < 8) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Bad Request", message: "用户名长度至少为3位，密码长度至少为8位" }));
+        return;
+      }
+
+      const db = this.ctx.dbManager.getDb("config");
+
+      if (newUsername.trim() !== session.username) {
+        const existing = db.prepare("SELECT 1 FROM dashboard_users WHERE username = ?").get(newUsername.trim());
+        if (existing) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: "Bad Request", message: "用户名已存在" }));
+          return;
+        }
+      }
+
+      try {
+        db.transaction(() => {
+          if (newUsername.trim() !== session.username) {
+            db.prepare("DELETE FROM dashboard_users WHERE username = ?").run(session.username);
+            db.prepare(`
+              INSERT INTO dashboard_users (username, password_hash, is_first_login, updated_at)
+              VALUES (?, ?, 0, datetime('now'))
+            `).run(newUsername.trim(), hashPassword(newPassword));
+          } else {
+            db.prepare(`
+              UPDATE dashboard_users
+              SET password_hash = ?, is_first_login = 0, updated_at = datetime('now')
+              WHERE username = ?
+            `).run(hashPassword(newPassword), session.username);
+          }
+        })();
+      } catch (err) {
+        console.error("[DashboardServer] Failed to update credentials:", err);
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: "Internal Server Error", message: safeClientMessage(err, "更新凭证失败") }));
+        return;
+      }
+
+      this.activeSessions.delete(token);
+      const newSessionToken = randomBytes(24).toString("hex");
+      const now = Date.now();
+      this.activeSessions.set(newSessionToken, {
+        username: newUsername.trim(),
+        mustChange: false,
+        expiresAt: now + DashboardServer.SESSION_ABSOLUTE_TTL_MS,
+        lastActivity: now,
+      });
+
+      res.writeHead(200);
+      res.end(JSON.stringify({
+        status: "success",
+        token: newSessionToken,
+        username: newUsername.trim()
+      }));
+      return;
+    }
+
+    // Auth Endpoint: POST /api/auth/update-credentials
+    // For already-authenticated users to change username/password.
+    // Requires current password verification + new password confirmation.
+    if (pathname === "/api/auth/update-credentials" && req.method === "POST") {
+      const header = req.headers["authorization"];
+      if (typeof header !== "string" || !header.startsWith("Bearer ")) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: "Unauthorized", message: "未登录" }));
+        return;
+      }
+      const token = header.slice(7).trim();
+      const session = this.activeSessions.get(token);
+      if (!session) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: "Unauthorized", message: "会话已过期" }));
+        return;
+      }
+      // Reject if user is in mustChange state (use change-credentials instead).
+      if (session.mustChange) {
+        res.writeHead(403);
+        res.end(JSON.stringify({ error: "Forbidden", message: "请先完成首次密码修改" }));
+        return;
+      }
+
+      const result = await this.readJsonObject(req);
+      if (!result.ok) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Bad Request", message: result.error }));
+        return;
+      }
+      const { currentPassword, newUsername, newPassword, confirmPassword } = result.value;
+      if (typeof currentPassword !== "string" || !currentPassword ||
+          typeof newUsername !== "string" || !newUsername.trim() ||
+          typeof newPassword !== "string" || !newPassword.trim()) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Bad Request", message: "所有字段均为必填项" }));
+        return;
+      }
+
+      if (typeof confirmPassword !== "string" || confirmPassword !== newPassword) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Bad Request", message: "两次输入的新密码不一致" }));
+        return;
+      }
+
+      if (newUsername.trim().length < 3 || newPassword.trim().length < 8) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Bad Request", message: "用户名长度至少为3位，密码长度至少为8位" }));
+        return;
+      }
+
+      const db = this.ctx.dbManager.getDb("config");
+      const user = db.prepare("SELECT * FROM dashboard_users WHERE username = ?").get(session.username) as { username: string; password_hash: string; is_first_login: number } | undefined;
+      if (!user || !verifyPassword(currentPassword, user.password_hash)) {
+        res.writeHead(401);
+        res.end(JSON.stringify({ error: "Unauthorized", message: "当前密码错误" }));
+        return;
+      }
+
+      if (newUsername.trim() !== session.username) {
+        const existing = db.prepare("SELECT 1 FROM dashboard_users WHERE username = ?").get(newUsername.trim());
+        if (existing) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: "Bad Request", message: "用户名已存在" }));
+          return;
+        }
+      }
+
+      try {
+        db.transaction(() => {
+          if (newUsername.trim() !== session.username) {
+            db.prepare("DELETE FROM dashboard_users WHERE username = ?").run(session.username);
+            db.prepare(`
+              INSERT INTO dashboard_users (username, password_hash, is_first_login, updated_at)
+              VALUES (?, ?, 0, datetime('now'))
+            `).run(newUsername.trim(), hashPassword(newPassword));
+          } else {
+            db.prepare(`
+              UPDATE dashboard_users
+              SET password_hash = ?, updated_at = datetime('now')
+              WHERE username = ?
+            `).run(hashPassword(newPassword), session.username);
+          }
+        })();
+      } catch (err) {
+        console.error("[DashboardServer] Failed to update credentials:", err);
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: "Internal Server Error", message: safeClientMessage(err, "更新凭证失败") }));
+        return;
+      }
+
+      // Issue a new session token (invalidates old one).
+      this.activeSessions.delete(token);
+      const newSessionToken = randomBytes(24).toString("hex");
+      const now = Date.now();
+      this.activeSessions.set(newSessionToken, {
+        username: newUsername.trim(),
+        mustChange: false,
+        expiresAt: now + DashboardServer.SESSION_ABSOLUTE_TTL_MS,
+        lastActivity: now,
+      });
+
+      res.writeHead(200);
+      res.end(JSON.stringify({
+        status: "success",
+        token: newSessionToken,
+        username: newUsername.trim()
+      }));
+      return;
+    }
+
+    // Auth Endpoint: GET /api/auth/status
+    if (pathname === "/api/auth/status" && req.method === "GET") {
+      const header = req.headers["authorization"];
+      if (typeof header !== "string" || !header.startsWith("Bearer ")) {
+        res.writeHead(200);
+        res.end(JSON.stringify({ authenticated: false }));
+        return;
+      }
+      const token = header.slice(7).trim();
+
+      const session = this.activeSessions.get(token);
+      if (session) {
+        res.writeHead(200);
+        res.end(JSON.stringify({ authenticated: true, username: session.username, mustChange: session.mustChange }));
+        return;
+      }
+
+      res.writeHead(200);
+      res.end(JSON.stringify({ authenticated: false }));
+      return;
+    }
+
+    // Auth Endpoint: POST /api/auth/logout
+    if (pathname === "/api/auth/logout" && req.method === "POST") {
+      const header = req.headers["authorization"];
+      if (typeof header === "string" && header.startsWith("Bearer ")) {
+        const token = header.slice(7).trim();
+        this.activeSessions.delete(token);
+      }
+      res.writeHead(200);
+      res.end(JSON.stringify({ success: true }));
+      return;
+    }
 
     // 1. GET /api/status
     if (pathname === "/api/status" && req.method === "GET") {

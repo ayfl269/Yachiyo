@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   LayoutDashboard, Settings, HardDrive, Terminal, Sun, Moon,
   Users, FileCode, BookOpen, Sparkles, Menu, MessageSquare,
-  Database, Puzzle, Brain, Lock
+  Database, Puzzle, Brain, Lock, LogOut, UserCircle, KeyRound
 } from 'lucide-react'
 import Dashboard from './components/Dashboard'
 import ConfigManager from './components/ConfigManager'
@@ -16,6 +16,8 @@ import MessagePlatformManager from './components/MessagePlatformManager'
 import ChatDataManager from './components/ChatDataManager'
 import PluginManager from './components/PluginManager'
 import MemoryManager from './components/MemoryManager'
+import AccountSettings from './components/AccountSettings'
+import { Modal } from './components/shared'
 import { ErrorBoundary } from './components/ErrorBoundary'
 
 type TabType =
@@ -24,7 +26,7 @@ type TabType =
   | 'plugins' | 'memory'
 
 const DASHBOARD_TOKEN_KEY = 'dashboardAuthToken'
-type AuthStatus = 'checking' | 'unauthenticated' | 'authenticated'
+type AuthStatus = 'checking' | 'unauthenticated' | 'authenticated' | 'must_change_credentials'
 
 const NAV_ITEMS: Array<{ key: TabType; label: string; icon: typeof LayoutDashboard }> = [
   { key: 'dashboard', label: '仪表盘', icon: LayoutDashboard },
@@ -55,21 +57,36 @@ function App() {
   )
 
   // ── Auth gate ───────────────────────────────────────────────────────────
-  // Probe the API to determine whether a Bearer token is required. When the
-  // server has authToken configured, unauthenticated /api/ calls return 401
-  // and we show a login screen. The token entered here is stored in
-  // localStorage and injected by the global fetch wrapper in main.tsx.
+  // Probe the API to determine authentication status. The session token
+  // returned after login is stored in localStorage and injected by the
+  // global fetch wrapper in main.tsx.
   const [authStatus, setAuthStatus] = useState<AuthStatus>('checking')
-  const [tokenInput, setTokenInput] = useState('')
+  const [usernameInput, setUsernameInput] = useState('')
+  const [passwordInput, setPasswordInput] = useState('')
+  const [newUsernameInput, setNewUsernameInput] = useState('')
+  const [newPasswordInput, setNewPasswordInput] = useState('')
+  const [confirmPasswordInput, setConfirmPasswordInput] = useState('')
   const [authError, setAuthError] = useState('')
+  const [showUserMenu, setShowUserMenu] = useState(false)
+  const [showAccountModal, setShowAccountModal] = useState(false)
+  const userMenuRef = useRef<HTMLDivElement>(null)
 
   const probeAuth = async () => {
     try {
-      const res = await fetch('/api/status')
-      if (res.status === 401) {
-        setAuthStatus('unauthenticated')
+      const res = await fetch('/api/auth/status')
+      if (res.ok) {
+        const data = await res.json()
+        if (data.authenticated) {
+          if (data.mustChange) {
+            setAuthStatus('must_change_credentials')
+          } else {
+            setAuthStatus('authenticated')
+          }
+        } else {
+          setAuthStatus('unauthenticated')
+        }
       } else {
-        setAuthStatus('authenticated')
+        setAuthStatus('unauthenticated')
       }
     } catch {
       // Network error — assume unauthenticated so the user can retry.
@@ -81,26 +98,102 @@ function App() {
     probeAuth()
   }, [])
 
+  // Close user dropdown on outside click.
+  useEffect(() => {
+    if (!showUserMenu) return
+    const handleClick = (e: MouseEvent): void => {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
+        setShowUserMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [showUserMenu])
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
     setAuthError('')
-    const token = tokenInput.trim()
-    if (!token) return
-    // Store the token so the global fetch wrapper picks it up, then verify.
-    localStorage.setItem(DASHBOARD_TOKEN_KEY, token)
+
+    const username = usernameInput.trim()
+    const password = passwordInput.trim()
+    if (!username || !password) return
     try {
-      const res = await fetch('/api/status')
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+      })
+      const data = await res.json()
       if (res.ok) {
-        setAuthStatus('authenticated')
-        setTokenInput('')
+        localStorage.setItem(DASHBOARD_TOKEN_KEY, data.token)
+        if (data.status === 'must_change') {
+          setAuthStatus('must_change_credentials')
+        } else {
+          setAuthStatus('authenticated')
+        }
+        setUsernameInput('')
+        setPasswordInput('')
       } else {
-        localStorage.removeItem(DASHBOARD_TOKEN_KEY)
-        setAuthError('令牌无效，请重试。')
+        setAuthError(data.message || '用户名或密码错误。')
       }
     } catch {
-      localStorage.removeItem(DASHBOARD_TOKEN_KEY)
       setAuthError('无法连接到服务器。')
     }
+  }
+
+  const handleChangeCredentials = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setAuthError('')
+    const newUsername = newUsernameInput.trim()
+    const newPassword = newPasswordInput.trim()
+    const confirmPassword = confirmPasswordInput.trim()
+
+    if (!newUsername || !newPassword || !confirmPassword) {
+      setAuthError('所有字段均为必填项。')
+      return
+    }
+    if (newUsername.length < 3) {
+      setAuthError('用户名长度至少为3位。')
+      return
+    }
+    if (newPassword.length < 8) {
+      setAuthError('密码长度至少为8位。')
+      return
+    }
+    if (newPassword !== confirmPassword) {
+      setAuthError('两次输入的密码不一致。')
+      return
+    }
+
+    try {
+      const res = await fetch('/api/auth/change-credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ newUsername, newPassword, confirmPassword })
+      })
+      const data = await res.json()
+      if (res.ok) {
+        localStorage.setItem(DASHBOARD_TOKEN_KEY, data.token)
+        setAuthStatus('authenticated')
+        setNewUsernameInput('')
+        setNewPasswordInput('')
+        setConfirmPasswordInput('')
+      } else {
+        setAuthError(data.message || '修改凭证失败，请重试。')
+      }
+    } catch {
+      setAuthError('无法连接到服务器。')
+    }
+  }
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' })
+    } catch {
+      // Ignore
+    }
+    localStorage.removeItem(DASHBOARD_TOKEN_KEY)
+    setAuthStatus('unauthenticated')
   }
 
   useEffect(() => {
@@ -133,22 +226,104 @@ function App() {
     return (
       <div className="app-container">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh' }}>
-          <form onSubmit={handleLogin} style={{ width: 320, padding: 24, background: 'var(--bg-secondary)', borderRadius: 12, border: '1px solid var(--border-color)' }}>
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, marginBottom: 16 }}>
-              <Lock size={28} style={{ color: 'var(--accent-color)' }} />
-              <h2 style={{ margin: 0, fontSize: 18 }}>控制台登录</h2>
-              <p style={{ margin: 0, fontSize: 12, color: 'var(--text-secondary)', textAlign: 'center' }}>请输入访问令牌以继续</p>
+          <form onSubmit={handleLogin} style={{ width: 340, padding: 28, background: 'var(--bg-secondary)', borderRadius: 16, border: '1px solid var(--border-color)', boxShadow: '0 8px 30px rgba(0, 0, 0, 0.12)', backdropFilter: 'var(--glass-blur)' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, marginBottom: 20 }}>
+              <Lock size={32} style={{ color: 'var(--accent-primary)' }} />
+              <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>控制台登录</h2>
+              <p style={{ margin: 0, fontSize: 13, color: 'var(--text-secondary)', textAlign: 'center' }}>
+                请输入您的用户名与密码
+              </p>
             </div>
-            <input
-              type="password"
-              value={tokenInput}
-              onChange={(e) => setTokenInput(e.target.value)}
-              placeholder="访问令牌"
-              autoFocus
-              style={{ width: '100%', boxSizing: 'border-box', padding: '8px 10px', borderRadius: 6, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontFamily: 'monospace', marginBottom: 12 }}
-            />
-            {authError && <div style={{ color: '#e5484d', fontSize: 12, marginBottom: 12 }}>{authError}</div>}
-            <button type="submit" style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: 'none', background: 'var(--accent-color)', color: '#fff', cursor: 'pointer', fontWeight: 600 }}>登录</button>
+
+            <div style={{ marginBottom: 12 }}>
+              <label htmlFor="login-username" style={{ position: 'absolute', left: -9999, width: 1, height: 1, overflow: 'hidden' }}>用户名</label>
+              <input
+                id="login-username"
+                type="text"
+                value={usernameInput}
+                onChange={(e) => setUsernameInput(e.target.value)}
+                placeholder="用户名"
+                autoFocus
+                autoComplete="username"
+                style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 14 }}
+              />
+            </div>
+            <div style={{ marginBottom: 16 }}>
+              <label htmlFor="login-password" style={{ position: 'absolute', left: -9999, width: 1, height: 1, overflow: 'hidden' }}>密码</label>
+              <input
+                id="login-password"
+                type="password"
+                value={passwordInput}
+                onChange={(e) => setPasswordInput(e.target.value)}
+                placeholder="密码"
+                autoComplete="current-password"
+                style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 14 }}
+              />
+            </div>
+
+            {authError && <div style={{ color: '#e5484d', fontSize: 12, marginBottom: 14, background: 'rgba(229, 72, 77, 0.1)', padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(229, 72, 77, 0.2)' }}>{authError}</div>}
+
+            <button type="submit" className="auth-submit-btn">
+              登录
+            </button>
+          </form>
+        </div>
+      </div>
+    )
+  }
+
+  if (authStatus === 'must_change_credentials') {
+    return (
+      <div className="app-container">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh' }}>
+          <form onSubmit={handleChangeCredentials} style={{ width: 360, padding: 28, background: 'var(--bg-secondary)', borderRadius: 16, border: '1px solid var(--border-color)', boxShadow: '0 8px 30px rgba(0, 0, 0, 0.12)', backdropFilter: 'var(--glass-blur)' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+              <Lock size={32} style={{ color: 'var(--accent-primary)' }} />
+              <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>初始化安全设置</h2>
+              <p style={{ margin: 0, fontSize: 12, color: '#e5484d', textAlign: 'center', background: 'rgba(229, 72, 77, 0.1)', padding: '6px 12px', borderRadius: 6 }}>
+                检测到您是首次登录，请强制修改默认用户名与密码。
+              </p>
+            </div>
+
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>新用户名</label>
+              <input
+                type="text"
+                value={newUsernameInput}
+                onChange={(e) => setNewUsernameInput(e.target.value)}
+                placeholder="至少3个字符"
+                autoFocus
+                style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 14 }}
+              />
+            </div>
+            
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>新密码</label>
+              <input
+                type="password"
+                value={newPasswordInput}
+                onChange={(e) => setNewPasswordInput(e.target.value)}
+                placeholder="至少5个字符"
+                style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 14 }}
+              />
+            </div>
+
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>确认新密码</label>
+              <input
+                type="password"
+                value={confirmPasswordInput}
+                onChange={(e) => setConfirmPasswordInput(e.target.value)}
+                placeholder="再次输入以确认"
+                style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 14 }}
+              />
+            </div>
+
+            {authError && <div style={{ color: '#e5484d', fontSize: 12, marginBottom: 14, background: 'rgba(229, 72, 77, 0.1)', padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(229, 72, 77, 0.2)' }}>{authError}</div>}
+
+            <button type="submit" className="auth-submit-btn">
+              提交并保存凭证
+            </button>
           </form>
         </div>
       </div>
@@ -203,6 +378,59 @@ function App() {
           >
             {isLightMode ? <Sun className="topbar-icon" /> : <Moon className="topbar-icon" />}
           </button>
+          <div ref={userMenuRef} style={{ position: 'relative' }}>
+            <button
+              className="topbar-theme-toggle"
+              onClick={() => setShowUserMenu((v) => !v)}
+              title="账户菜单"
+            >
+              <UserCircle className="topbar-icon" />
+            </button>
+            {showUserMenu && (
+              <div style={{
+                position: 'absolute',
+                right: 0,
+                top: 'calc(100% + 6px)',
+                minWidth: 160,
+                background: 'var(--bg-secondary)',
+                border: '1px solid var(--border-color)',
+                borderRadius: 10,
+                boxShadow: '0 8px 24px rgba(0,0,0,0.18)',
+                overflow: 'hidden',
+                zIndex: 1000,
+              }}>
+                <button
+                  onClick={() => { setShowUserMenu(false); setShowAccountModal(true) }}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 10, width: '100%',
+                    padding: '10px 14px', border: 'none', background: 'transparent',
+                    color: 'var(--text-primary)', fontSize: 13, fontWeight: 500,
+                    cursor: 'pointer', textAlign: 'left',
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-tertiary)' }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
+                >
+                  <KeyRound size={15} style={{ color: 'var(--accent-primary)' }} />
+                  修改账户
+                </button>
+                <div style={{ height: 1, background: 'var(--border-color)' }} />
+                <button
+                  onClick={() => { setShowUserMenu(false); handleLogout() }}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 10, width: '100%',
+                    padding: '10px 14px', border: 'none', background: 'transparent',
+                    color: '#e5484d', fontSize: 13, fontWeight: 500,
+                    cursor: 'pointer', textAlign: 'left',
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-tertiary)' }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
+                >
+                  <LogOut size={15} />
+                  退出登录
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
@@ -235,6 +463,15 @@ function App() {
           </div>
         </main>
       </div>
+
+      <Modal
+        open={showAccountModal}
+        onClose={() => setShowAccountModal(false)}
+        title="账户设置"
+        size="sm"
+      >
+        <AccountSettings onSuccess={() => setShowAccountModal(false)} />
+      </Modal>
     </div>
   )
 }

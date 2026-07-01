@@ -102,6 +102,19 @@ export const CONFIG_EXTRAS_MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    version: 8,
+    name: "dashboard_users",
+    up: `
+      CREATE TABLE IF NOT EXISTS dashboard_users (
+        username TEXT PRIMARY KEY,
+        password_hash TEXT NOT NULL,
+        is_first_login INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `,
+  },
 ];
 
 // ── Plugin Store ──

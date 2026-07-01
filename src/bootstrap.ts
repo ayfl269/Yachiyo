@@ -86,13 +86,6 @@ export interface BootstrapOptions {
      * environments.
      */
     debugChatEnabled?: boolean;
-    /**
-     * Bearer token required for all Dashboard `/api/` requests. When unset,
-     * auth is DISABLED (dev mode) and a warning is logged. Set a strong
-     * secret in production so that reaching the port does not grant full
-     * control of the system.
-     */
-    authToken?: string;
     /** Allowed CORS origins for the Dashboard API. Leave unset for same-origin only. */
     allowedOrigins?: string[];
   };
@@ -433,7 +426,6 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
         port: options.dashboard.port,
         host: options.dashboard.host,
         debugChatEnabled: options.dashboard.debugChatEnabled === true,
-        authToken: options.dashboard.authToken,
         allowedOrigins: options.dashboard.allowedOrigins,
       }
     );
