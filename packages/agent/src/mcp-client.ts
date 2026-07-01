@@ -83,6 +83,7 @@ export interface MCPClientSession {
     name: string;
     arguments: Record<string, unknown>;
     readTimeoutSeconds?: number;
+    abortSignal?: AbortSignal;
   }): Promise<CallToolResult>;
   close(): Promise<void>;
 }
@@ -442,7 +443,8 @@ export class MCPClient {
   async callToolWithReconnect(
     toolName: string,
     args: Record<string, unknown>,
-    readTimeoutSeconds: number
+    readTimeoutSeconds: number,
+    abortSignal?: AbortSignal
   ): Promise<CallToolResult> {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -451,8 +453,11 @@ export class MCPClient {
           name: toolName,
           arguments: args,
           readTimeoutSeconds,
+          abortSignal,
         });
       } catch (e) {
+        // If the caller aborted, don't retry — propagate immediately.
+        if (abortSignal?.aborted) throw e;
         if (isClosedResourceError(e)) {
           await this.reconnect();
           continue;
@@ -517,9 +522,20 @@ export class MCPClient {
 
 // ---- Helper: Wrap MCP SDK Client as MCPClientSession ----
 
+interface McpSdkCallToolOptions {
+  /** Abort signal to cancel the in-flight request. */
+  signal?: AbortSignal;
+  /** Request timeout in milliseconds. */
+  timeout?: number;
+}
+
 interface McpSdkClient {
   listTools(): Promise<{ tools: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }> }>;
-  callTool(params: { name: string; arguments: Record<string, unknown> }): Promise<CallToolResult>;
+  callTool(
+    params: { name: string; arguments: Record<string, unknown> },
+    resultSchema?: unknown,
+    options?: McpSdkCallToolOptions
+  ): Promise<CallToolResult>;
   close(): Promise<void>;
 }
 
@@ -542,11 +558,20 @@ function wrapMcpClientAsSession(client: McpSdkClient): MCPClientSession {
       name: string;
       arguments: Record<string, unknown>;
       readTimeoutSeconds?: number;
+      abortSignal?: AbortSignal;
     }): Promise<CallToolResult> {
-      return await client.callTool({
-        name: params.name,
-        arguments: params.arguments,
-      });
+      // Build SDK options: pass through abort signal and per-request timeout.
+      // SDK expects timeout in milliseconds; readTimeoutSeconds is in seconds.
+      const options: McpSdkCallToolOptions = {};
+      if (params.abortSignal) options.signal = params.abortSignal;
+      if (params.readTimeoutSeconds && params.readTimeoutSeconds > 0) {
+        options.timeout = params.readTimeoutSeconds * 1000;
+      }
+      return await client.callTool(
+        { name: params.name, arguments: params.arguments },
+        undefined,
+        Object.keys(options).length > 0 ? options : undefined
+      );
     },
     async close(): Promise<void> {
       await client.close();

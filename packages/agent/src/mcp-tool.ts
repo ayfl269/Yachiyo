@@ -31,10 +31,16 @@ export function createMCPTool<TContext = unknown>(
         }
       }
 
+      // Pass the abort signal so the MCP SDK can cancel the in-flight
+      // request when the tool-loop timeout fires. Without this, the
+      // underlying stdio/HTTP call continues running as an orphan.
+      const abortSignal = runContext._toolAbortController?.signal;
+
       return await mcpClient.callToolWithReconnect(
         mcpTool.name,
         args,
-        runContext.toolCallTimeout
+        runContext.toolCallTimeout,
+        abortSignal
       );
     },
   });

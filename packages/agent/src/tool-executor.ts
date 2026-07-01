@@ -595,7 +595,8 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
       const result = await tool.mcpClient.callToolWithReconnect(
         tool.mcpTool.name,
         toolArgs,
-        _runContext.toolCallTimeout
+        _runContext.toolCallTimeout,
+        _runContext._toolAbortController?.signal
       );
       yield result;
     } catch (e) {

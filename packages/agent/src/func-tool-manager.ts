@@ -32,7 +32,6 @@ export class MCPInitTimeoutError extends Error {
 interface MCPServerRuntime {
   name: string;
   client: MCPClient;
-  shutdownEvent: { set(): void };
 }
 
 const DEFAULT_MCP_INIT_TIMEOUT = 180_000; // ms
@@ -259,20 +258,12 @@ export class FunctionToolManager {
       const toolNames = toolsRes.tools.map((t) => t.name);
       console.info(`Connected to MCP server ${name}, Tools: ${toolNames}`);
 
-      const shutdownEvent = { set: () => {} };
-      let resolveShutdown: () => void;
-      const shutdownPromise = new Promise<void>((resolve) => { resolveShutdown = resolve; });
-      shutdownEvent.set = () => resolveShutdown();
-
       this.mcpServerRuntime.set(name, {
         name,
         client: mcpClient,
-        shutdownEvent,
       });
-
-      // Wait for shutdown signal
-      await shutdownPromise;
-      await this.terminateMcpClient(name);
+      // Non-blocking: return immediately after registration. Shutdown is
+      // handled by disableMcpServer → terminateMcpClient directly.
     } finally {
       this.mcpStarting.delete(name);
     }
@@ -284,14 +275,10 @@ export class FunctionToolManager {
 
   async disableMcpServer(name: string | null): Promise<void> {
     if (name) {
-      const runtime = this.mcpServerRuntime.get(name);
-      if (runtime) {
-        runtime.shutdownEvent.set();
-      }
+      await this.terminateMcpClient(name);
     } else {
-      for (const runtime of this.mcpServerRuntime.values()) {
-        runtime.shutdownEvent.set();
-      }
+      const names = Array.from(this.mcpServerRuntime.keys());
+      await Promise.all(names.map((n) => this.terminateMcpClient(n)));
     }
   }
 
@@ -301,7 +288,6 @@ export class FunctionToolManager {
       try {
         await runtime.client.close();
       } catch { /* ignore */ }
-      this.funcList = this.funcList.filter((f) => !isMCPToolOfServer(f, name));
       this.mcpServerRuntime.delete(name);
       console.info(`Disconnected from MCP server ${name}`);
     }
