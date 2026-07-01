@@ -187,11 +187,9 @@ export class DashboardServer {
   private prevCpuInfo: { idle: number; total: number } | null = null;
   private todayTokens: number = 0;
   private lastTokenDate: string = new Date().toDateString();
-  private activeSessions: Map<string, { username: string; mustChange: boolean; expiresAt: number; lastActivity: number }> = new Map();
+  private activeSessions: Map<string, { username: string; mustChange: boolean; expiresAt: number }> = new Map();
   /** Session absolute lifetime in ms (8 hours). */
-  private static readonly SESSION_ABSOLUTE_TTL_MS = 8 * 60 * 60 * 1000;
-  /** Session idle timeout in ms (30 minutes). */
-  private static readonly SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+  private static readonly SESSION_ABSOLUTE_TTL_MS = 168 * 60 * 60 * 1000;
   /** Login rate-limit: max attempts per key (username+ip) within the window. */
   private static readonly LOGIN_RATE_LIMIT_MAX = 5;
   /** Login rate-limit window in ms (1 minute). */
@@ -234,17 +232,15 @@ export class DashboardServer {
     if (!header.startsWith("Bearer ")) return false;
     const token = header.slice(7).trim();
 
-    // Dynamic session check (with sliding expiration)
+    // Dynamic session check (absolute lifetime only; no idle timeout).
     const session = this.activeSessions.get(token);
     if (session) {
       const now = Date.now();
-      // Expired: absolute lifetime exceeded OR idle timeout exceeded.
-      if (now > session.expiresAt || now - session.lastActivity > DashboardServer.SESSION_IDLE_TIMEOUT_MS) {
+      // Expired: absolute lifetime exceeded.
+      if (now > session.expiresAt) {
         this.activeSessions.delete(token);
         return false;
       }
-      // Sliding window: refresh lastActivity on each authenticated request.
-      session.lastActivity = now;
       if (session.mustChange) {
         // If mustChange is true, only /api/auth/change-credentials is allowed
         return pathname === "/api/auth/change-credentials";
@@ -498,7 +494,6 @@ export class DashboardServer {
         username: user.username,
         mustChange,
         expiresAt: now + DashboardServer.SESSION_ABSOLUTE_TTL_MS,
-        lastActivity: now,
       });
 
       res.writeHead(200);
@@ -592,7 +587,6 @@ export class DashboardServer {
         username: newUsername.trim(),
         mustChange: false,
         expiresAt: now + DashboardServer.SESSION_ABSOLUTE_TTL_MS,
-        lastActivity: now,
       });
 
       res.writeHead(200);
@@ -703,7 +697,6 @@ export class DashboardServer {
         username: newUsername.trim(),
         mustChange: false,
         expiresAt: now + DashboardServer.SESSION_ABSOLUTE_TTL_MS,
-        lastActivity: now,
       });
 
       res.writeHead(200);
