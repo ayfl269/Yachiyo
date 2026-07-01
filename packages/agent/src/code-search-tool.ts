@@ -5,6 +5,7 @@
 
 import { createFunctionTool, type FunctionTool } from "./tool.js";
 import type { CallToolResult } from "./types.js";
+import { normalizeRwPath } from "./computer-tools.js";
 import { readFile, readdir, stat } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
@@ -197,7 +198,14 @@ export function createCodeSearchTool(workspaceRoot?: string): FunctionTool<CodeS
       }
 
       const root = workspaceRoot ?? process.cwd();
-      const normalizedPath = searchPath ?? root;
+      let normalizedPath: string;
+      try {
+        normalizedPath = searchPath
+          ? normalizeRwPath(searchPath, { localEnv: true, workspaceRoot: root })
+          : root;
+      } catch (e) {
+        return { content: [{ type: "text", text: `error: ${e}` }], isError: true };
+      }
 
       try {
         const results = await searchSymbols(normalizedPath, {

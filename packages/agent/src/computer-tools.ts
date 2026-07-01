@@ -41,7 +41,7 @@ function getToolContext(_ctx: unknown): ComputerToolContext {
  * paths and relative paths are both resolved and then checked against the
  * workspace boundary using directory containment (not substring matching).
  */
-function normalizeRwPath(
+export function normalizeRwPath(
   rawPath: string,
   options: { localEnv: boolean; workspaceRoot?: string }
 ): string {
@@ -750,12 +750,44 @@ export function getRuntimeComputerTools(
 
 // ── Simple grep implementation (fallback when ripgrep is not available) ──
 
+/**
+ * Detect patterns that are likely to cause ReDoS (Regular Expression
+ * Denial of Service). Catches the most common catastrophic backtracking
+ * patterns: nested quantifiers like `(a+)+`, `(a*)*`, overlapping quantifiers
+ * like `a+a*`. This is a best-effort heuristic — not a complete solution.
+ */
+function isPotentialReDoS(pattern: string): boolean {
+  // Nested quantifiers: (…[+*?]…)[+*?{]
+  if (/\([^)]*[+*?][^)]*\)[+*?{]/.test(pattern)) return true;
+  // Overlapping quantifiers: a++ a** a+* etc.
+  if (/[+*?][+*?]/.test(pattern)) return true;
+  return false;
+}
+
+/** Maximum pattern length to prevent overly complex regexes. */
+const GREP_MAX_PATTERN_LENGTH = 500;
+/** Skip lines longer than this to avoid slow regex matching on huge lines. */
+const GREP_MAX_LINE_LENGTH = 10_000;
+
 async function grepSearch(
   pattern: string,
   searchPath: string,
   options: { glob?: string; contextLines: number; resultLimit: number },
 ): Promise<string[]> {
-  const regex = new RegExp(pattern, "i");
+  // Validate pattern to prevent ReDoS
+  if (pattern.length > GREP_MAX_PATTERN_LENGTH) {
+    return [`error: Pattern too long (max ${GREP_MAX_PATTERN_LENGTH} characters).`];
+  }
+  if (isPotentialReDoS(pattern)) {
+    return ["error: Pattern contains potentially dangerous nested quantifiers (e.g. `(a+)+`) which can cause ReDoS. Please simplify the pattern."];
+  }
+  let regex: RegExp;
+  try {
+    regex = new RegExp(pattern, "i");
+  } catch (e) {
+    return [`error: Invalid regex pattern: ${e}`];
+  }
+
   const results: string[] = [];
   const globRegex = options.glob ? globToRegex(options.glob) : null;
 
@@ -784,6 +816,7 @@ async function grepSearch(
 
           for (let i = 0; i < lines.length; i++) {
             if (results.length >= options.resultLimit) return;
+            if (lines[i].length > GREP_MAX_LINE_LENGTH) continue;
             if (!regex.test(lines[i])) continue;
 
             const start = Math.max(0, i - options.contextLines);
@@ -810,6 +843,7 @@ async function grepSearch(
         const lines = content.split("\n");
         for (let i = 0; i < lines.length; i++) {
           if (results.length >= options.resultLimit) return results;
+          if (lines[i].length > GREP_MAX_LINE_LENGTH) continue;
           if (!regex.test(lines[i])) continue;
           const start = Math.max(0, i - options.contextLines);
           const end = Math.min(lines.length, i + options.contextLines + 1);
