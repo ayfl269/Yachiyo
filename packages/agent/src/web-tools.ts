@@ -5,7 +5,48 @@
 import { createFunctionTool, type FunctionTool } from "./tool.js";
 import type { CallToolResult, ImageContent } from "./types.js";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import TurndownService from "turndown";
 import { safeFetch, assertSafeUrl } from "@yachiyo/common/ssrf-guard.js";
+
+// ── Shared Chromium browser instance ──
+//
+// Launching Chromium takes 1-3 seconds. Reusing a single browser across
+// calls avoids this overhead. The browser is lazily launched on first use
+// and closed on process exit.
+
+let sharedBrowser: Browser | null = null;
+let browserLaunchPromise: Promise<Browser> | null = null;
+
+async function getSharedBrowser(): Promise<Browser> {
+  if (sharedBrowser && sharedBrowser.isConnected()) return sharedBrowser;
+  if (browserLaunchPromise) return browserLaunchPromise;
+  browserLaunchPromise = (async () => {
+    const browser = await chromium.launch({
+      headless: true,
+      args: ["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+    });
+    sharedBrowser = browser;
+    browserLaunchPromise = null;
+    // Auto-cleanup on process exit.
+    process.once("exit", () => { try { browser.close(); } catch { /* ignore */ } });
+    return browser;
+  })();
+  return browserLaunchPromise;
+}
+
+/**
+ * Close the shared Chromium browser instance if it exists.
+ * Useful for tests or graceful shutdown.
+ */
+export async function closeSharedBrowser(): Promise<void> {
+  if (browserLaunchPromise) {
+    try { await browserLaunchPromise; } catch { /* ignore */ }
+  }
+  if (sharedBrowser) {
+    try { await sharedBrowser.close(); } catch { /* ignore */ }
+    sharedBrowser = null;
+  }
+}
 
 // ── Shared context type ──
 
@@ -19,58 +60,32 @@ export interface WebToolContext {
   };
 }
 
+// ── HTML → Markdown conversion (using turndown) ──
+//
+// Shared TurndownService instance — stateless after configuration, so a
+// single instance can be reused across calls safely.
+const turndownService = new TurndownService({
+  headingStyle: "atx",
+  codeBlockStyle: "fenced",
+  bulletListMarker: "-",
+  emDelimiter: "*",
+  strongDelimiter: "**",
+  linkStyle: "inlined",
+});
+
 function htmlToMarkdown(html: string): string {
-  let md = html;
+  // Strip non-content elements before conversion.
+  let cleaned = html;
+  cleaned = cleaned.replace(/<head[\s\S]*?<\/head>/gi, "");
+  cleaned = cleaned.replace(/<script[\s\S]*?<\/script>/gi, "");
+  cleaned = cleaned.replace(/<style[\s\S]*?<\/style>/gi, "");
+  cleaned = cleaned.replace(/<nav[\s\S]*?<\/nav>/gi, "");
+  cleaned = cleaned.replace(/<footer[\s\S]*?<\/footer>/gi, "");
+  cleaned = cleaned.replace(/<noscript[\s\S]*?<\/noscript>/gi, "");
 
-  md = md.replace(/<head[\s\S]*?<\/head>/gi, "");
-  md = md.replace(/<script[\s\S]*?<\/script>/gi, "");
-  md = md.replace(/<style[\s\S]*?<\/style>/gi, "");
-  md = md.replace(/<nav[\s\S]*?<\/nav>/gi, "");
-  md = md.replace(/<footer[\s\S]*?<\/footer>/gi, "");
-  md = md.replace(/<noscript[\s\S]*?<\/noscript>/gi, "");
-
-  md = md.replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, "\n# $1\n");
-  md = md.replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, "\n## $1\n");
-  md = md.replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, "\n### $1\n");
-  md = md.replace(/<h4[^>]*>([\s\S]*?)<\/h4>/gi, "\n#### $1\n");
-  md = md.replace(/<h5[^>]*>([\s\S]*?)<\/h5>/gi, "\n##### $1\n");
-  md = md.replace(/<h6[^>]*>([\s\S]*?)<\/h6>/gi, "\n###### $1\n");
-
-  md = md.replace(/<strong[^>]*>([\s\S]*?)<\/strong>/gi, "**$1**");
-  md = md.replace(/<b[^>]*>([\s\S]*?)<\/b>/gi, "**$1**");
-  md = md.replace(/<em[^>]*>([\s\S]*?)<\/em>/gi, "*$1*");
-  md = md.replace(/<i[^>]*>([\s\S]*?)<\/i>/gi, "*$1*");
-
-  md = md.replace(/<a[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, "[$2]($1)");
-
-  md = md.replace(/<img[^>]*alt="([^"]*)"[^>]*>/gi, "![$1]");
-  md = md.replace(/<img[^>]*>/gi, "");
-
-  md = md.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, "- $1");
-
-  md = md.replace(/<br\s*\/?>/gi, "\n");
-  md = md.replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, "\n$1\n");
-  md = md.replace(/<div[^>]*>([\s\S]*?)<\/div>/gi, "\n$1\n");
-  md = md.replace(/<blockquote[^>]*>([\s\S]*?)<\/blockquote>/gi, "\n> $1\n");
-  md = md.replace(/<pre[^>]*>([\s\S]*?)<\/pre>/gi, "\n```\n$1\n```\n");
-  md = md.replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, "`$1`");
-  md = md.replace(/<hr\s*\/?>/gi, "\n---\n");
-
-  md = md.replace(/<[^>]+>/g, "");
-
-  md = md.replace(/&amp;/g, "&");
-  md = md.replace(/&lt;/g, "<");
-  md = md.replace(/&gt;/g, ">");
-  md = md.replace(/&quot;/g, '"');
-  md = md.replace(/&#39;/g, "'");
-  md = md.replace(/&nbsp;/g, " ");
-  md = md.replace(/&#(\d+);/g, (_, num) => String.fromCharCode(parseInt(num)));
-  md = md.replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
-
-  md = md.replace(/\n{3,}/g, "\n\n");
-  md = md.replace(/[ \t]+$/gm, "");
-
-  return md.trim();
+  const md = turndownService.turndown(cleaned);
+  // Collapse excessive blank lines and trim trailing whitespace.
+  return md.replace(/\n{3,}/g, "\n\n").replace(/[ \t]+$/gm, "").trim();
 }
 
 // ── Web Fetch Tool ──
@@ -141,14 +156,14 @@ export function createWebFetchTool(): FunctionTool<WebToolContext> {
         const contentParts: CallToolResult["content"] = [{ type: "text", text: `${header}\n\n${text}` }];
 
         if (screenshot) {
-          let browser: Browser | null = null;
           let browserContext: BrowserContext | null = null;
           let page: Page | null = null;
           try {
             // Re-validate the URL before handing it to Playwright, which
             // bypasses safeFetch. Defense-in-depth against DNS rebinding.
             await assertSafeUrl(url);
-            browser = await chromium.launch({ headless: true, args: ["--disable-blink-features=AutomationControlled", "--no-sandbox"] });
+            // Reuse the shared Chromium instance to avoid 1-3s launch overhead.
+            const browser = await getSharedBrowser();
             browserContext = await browser.newContext({
               userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
               viewport: { width: 1920, height: 1080 },
@@ -167,11 +182,9 @@ export function createWebFetchTool(): FunctionTool<WebToolContext> {
             const msg = e instanceof Error ? e.message : String(e);
             contentParts.push({ type: "text", text: `[Screenshot failed: ${msg}]` });
           } finally {
-            // Ensure Chromium is always released even if any step between
-            // launch() and close() throws — otherwise the process leaks.
+            // Only close the context/page, not the shared browser.
             try { await page?.close(); } catch { /* ignore */ }
             try { await browserContext?.close(); } catch { /* ignore */ }
-            try { await browser?.close(); } catch { /* ignore */ }
           }
         }
 
@@ -643,7 +656,19 @@ export function createWebSearchTool(customProvider?: WebSearchProvider, engine: 
       const fetchContent = args[2] === true;
 
       try {
-        const results = await provider.search(query, maxResults);
+        const rawResults = await provider.search(query, maxResults);
+
+        // Deduplicate by normalized URL (strip trailing slash, lowercase host).
+        const seen = new Set<string>();
+        const results = rawResults.filter((r) => {
+          const normalized = r.url
+            .replace(/^https?:\/\//, "")
+            .replace(/\/$/, "")
+            .toLowerCase();
+          if (seen.has(normalized)) return false;
+          seen.add(normalized);
+          return true;
+        });
 
         if (results.length === 0) {
           return { content: [{ type: "text", text: "No search results found." }] };

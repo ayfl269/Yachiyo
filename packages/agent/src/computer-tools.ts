@@ -11,7 +11,6 @@ import { createWriteStream, existsSync } from "fs";
 import { join, resolve, normalize, dirname, sep } from "path";
 import { execFile, type ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
-import { tmpdir } from "os";
 
 // ── Permission helpers ──
 
@@ -387,7 +386,11 @@ export function createShellTool(workspaceRoot?: string): FunctionTool<ComputerTo
       try {
         if (background) {
           const id = crypto.randomUUID().slice(0, 8);
-          const logPath = join(tmpdir(), `shell_bg_${id}.log`);
+          // Write logs inside the workspace so file_read_tool can access them
+          // (normalizeRwPath rejects paths outside workspaceRoot).
+          const logDir = join(workspaceRoot ?? process.cwd(), ".logs");
+          await mkdir(logDir, { recursive: true });
+          const logPath = join(logDir, `shell_bg_${id}.log`);
           // Actually redirect stdout/stderr to the log file — the previous
           // implementation computed logPath but never wired up the streams,
           // so the returned message was a lie and the output was lost.
@@ -714,7 +717,7 @@ export function createFileMoveTool(workspaceRoot?: string): FunctionTool<Compute
 export function createLocalNodeTool(workspaceRoot?: string): FunctionTool<ComputerToolContext> {
   return createFunctionTool<ComputerToolContext>({
     name: "execute_node",
-    description: "Execute JavaScript/TypeScript code in a Node.js subprocess.",
+    description: "Execute JavaScript code in a Node.js subprocess. (TypeScript is not supported — use execute_shell with tsx for TS.)",
     parameters: {
       type: "object",
       properties: {
@@ -802,7 +805,69 @@ export function getRuntimeComputerTools(
   return tools;
 }
 
-// ── Simple grep implementation (fallback when ripgrep is not available) ──
+// ── grep implementation with ripgrep integration ──
+
+/**
+ * Lazy-loaded ripgrep availability check. Probed once on first use;
+ * cached thereafter to avoid repeated `which rg` overhead.
+ */
+let ripgrepAvailable: boolean | null = null;
+
+async function isRipgrepAvailable(): Promise<boolean> {
+  if (ripgrepAvailable !== null) return ripgrepAvailable;
+  return new Promise<boolean>((resolve) => {
+    const child = execFile(
+      process.platform === "win32" ? "where" : "which",
+      ["rg"],
+      { timeout: 3000 },
+    );
+    child.on("error", () => { ripgrepAvailable = false; resolve(false); });
+    child.on("close", (code) => { ripgrepAvailable = code === 0; resolve(ripgrepAvailable); });
+  });
+}
+
+/**
+ * Run grep using ripgrep. Returns null if ripgrep is unavailable or
+ * fails unexpectedly, so the caller can fall back to the JS implementation.
+ */
+async function grepWithRipgrep(
+  pattern: string,
+  searchPath: string,
+  options: { glob?: string; contextLines: number; resultLimit: number; abortSignal?: AbortSignal },
+): Promise<string[] | null> {
+  if (!(await isRipgrepAvailable())) return null;
+
+  const args = ["-i", "-n", "--no-heading", "--color=never", `--max-count=${options.resultLimit}`];
+  if (options.contextLines > 0) args.push("-C", String(options.contextLines));
+  if (options.glob) args.push("--glob", options.glob);
+  args.push("--", pattern, searchPath);
+
+  return new Promise<string[] | null>((resolve) => {
+    const child = execFile("rg", args, { maxBuffer: 10 * 1024 * 1024, timeout: 30000 });
+    let stdout = "";
+    child.stdout?.on("data", (data: Buffer) => { stdout += data.toString(); });
+
+    // Kill child process when abort signal fires.
+    if (options.abortSignal) {
+      if (options.abortSignal.aborted) child.kill("SIGTERM");
+      else options.abortSignal.addEventListener("abort", () => child.kill("SIGTERM"), { once: true });
+    }
+
+    child.on("error", () => { resolve(null); });
+    child.on("close", (code) => {
+      // Exit code 1 = no matches (not an error).
+      if (code !== 0 && code !== 1) { resolve(null); return; }
+      const results: string[] = [];
+      for (const line of stdout.split("\n")) {
+        if (!line || line === "--") continue;
+        // Format: path:line:content (match) or path-line-content (context)
+        const m = line.match(/^(.+)([:-])(\d+)\2(.*)$/);
+        if (m) results.push(`${m[1]}:${m[3]}: ${m[4]}`);
+      }
+      resolve(results);
+    });
+  });
+}
 
 /**
  * Detect patterns that are likely to cause ReDoS (Regular Expression
@@ -835,6 +900,12 @@ async function grepSearch(
   if (isPotentialReDoS(pattern)) {
     return ["error: Pattern contains potentially dangerous nested quantifiers (e.g. `(a+)+`) which can cause ReDoS. Please simplify the pattern."];
   }
+
+  // Try ripgrep first — it's orders of magnitude faster than the JS fallback.
+  const rgResults = await grepWithRipgrep(pattern, searchPath, options);
+  if (rgResults !== null) return rgResults;
+
+  // Fallback: pure JS implementation
   let regex: RegExp;
   try {
     regex = new RegExp(pattern, "i");
