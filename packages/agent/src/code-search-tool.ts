@@ -5,7 +5,7 @@
 
 import { createFunctionTool, type FunctionTool } from "./tool.js";
 import type { CallToolResult } from "./types.js";
-import { normalizeRwPath } from "./computer-tools.js";
+import { normalizeRwPath, getAbortSignal } from "./computer-tools.js";
 import { readFile, readdir, stat } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
@@ -19,6 +19,15 @@ export interface CodeSearchToolContext {
 }
 
 // ── Symbol patterns for different languages ──
+
+/**
+ * Control-flow keywords that the method regex would otherwise match.
+ * Filtered out after extraction to avoid false positives like `if (x) {`.
+ */
+const CONTROL_FLOW_KEYWORDS = new Set([
+  "if", "else", "while", "for", "switch", "catch", "do", "return",
+  "throw", "try", "finally", "with", "constructor",
+]);
 
 interface SymbolPattern {
   type: string; // "function", "class", "method", "variable", "interface", "type", "constant", "import"
@@ -34,7 +43,7 @@ const SYMBOL_PATTERNS: Record<string, SymbolPattern[]> = {
     { type: "function", regex: /(?:function\s+(\w+)|(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[\w]+)\s*=>)/g, extractName: (m) => m[1] || m[2] },
     { type: "method", regex: /(?:(?:public|private|protected|static|async)\s+)*(\w+)\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*\{/g, extractName: (m) => m[1] },
     { type: "constant", regex: /(?:const|export\s+const)\s+(\w+)\s*=/g, extractName: (m) => m[1] },
-    { type: "import", regex: /import\s+.*?(?:{([^}]+)}|(\w+))\s+from/g, extractName: (m) => (m[1] || m[2]).trim().split(",")[0].trim() },
+    { type: "import", regex: /import\s+.*?(?:{([^}]+)}|(\w+))\s+from/g, extractName: (m) => (m[1] || m[2]).trim() },
   ],
   python: [
     { type: "class", regex: /class\s+(\w+)/g, extractName: (m) => m[1] },
@@ -80,6 +89,7 @@ async function searchSymbols(
     language?: string;
     glob?: string;
     resultLimit: number;
+    abortSignal?: AbortSignal;
   },
 ): Promise<SearchResult[]> {
   const results: SearchResult[] = [];
@@ -87,6 +97,7 @@ async function searchSymbols(
 
   async function walkDir(dir: string): Promise<void> {
     if (results.length >= options.resultLimit) return;
+    if (options.abortSignal?.aborted) return;
 
     let entries;
     try {
@@ -95,6 +106,7 @@ async function searchSymbols(
 
     for (const entry of entries) {
       if (results.length >= options.resultLimit) return;
+      if (options.abortSignal?.aborted) return;
 
       const fullPath = join(dir, entry.name);
 
@@ -121,12 +133,20 @@ async function searchSymbols(
               if (results.length >= options.resultLimit) return;
 
               const line = lines[i];
+              // Skip comment lines to avoid matching symbols in comments.
+              const trimmed = line.trimStart();
+              if (trimmed.startsWith("//") || trimmed.startsWith("#") || trimmed.startsWith("*") || trimmed.startsWith("/*")) continue;
+
               pattern.regex.lastIndex = 0;
               const match = pattern.regex.exec(line);
               if (!match) continue;
 
               const name = pattern.extractName(match);
               if (!name) continue;
+
+              // Filter out control-flow keywords that the method regex
+              // would otherwise match (e.g. `if (x) {`, `while (true) {`).
+              if (pattern.type === "method" && CONTROL_FLOW_KEYWORDS.has(name)) continue;
 
               // Filter by symbol name if specified
               if (options.symbolName && !name.toLowerCase().includes(options.symbolName.toLowerCase())) continue;
@@ -214,6 +234,7 @@ export function createCodeSearchTool(workspaceRoot?: string): FunctionTool<CodeS
           language,
           glob,
           resultLimit,
+          abortSignal: getAbortSignal(_ctx),
         });
 
         if (results.length === 0) {

@@ -10,6 +10,7 @@ import { readFile, writeFile, mkdir, readdir, stat, unlink, rename } from "fs/pr
 import { createWriteStream, existsSync } from "fs";
 import { join, resolve, normalize, dirname, sep } from "path";
 import { execFile, type ChildProcess } from "child_process";
+import { randomUUID } from "crypto";
 import { tmpdir } from "os";
 
 // ── Permission helpers ──
@@ -31,6 +32,19 @@ function isLocalRuntime(context: ComputerToolContext): boolean {
 function getToolContext(_ctx: unknown): ComputerToolContext {
   const wrapper = _ctx as ContextWrapper<ComputerToolContext> | undefined;
   return wrapper?.context ?? ({} as ComputerToolContext);
+}
+
+/**
+ * Extract the tool-level AbortSignal from the run context, if available.
+ *
+ * The tool-loop runner sets `_toolAbortController` before each tool call
+ * and aborts it on timeout. Tools that check this signal can cancel
+ * long-running operations (subprocesses, file scans) cleanly instead of
+ * relying solely on their own timeout.
+ */
+export function getAbortSignal(_ctx: unknown): AbortSignal | undefined {
+  const wrapper = _ctx as ContextWrapper | undefined;
+  return wrapper?._toolAbortController?.signal;
 }
 
 /**
@@ -61,6 +75,26 @@ export function normalizeRwPath(
   }
 
   return p;
+}
+
+/**
+ * Write a file atomically by writing to a temp file then renaming.
+ *
+ * Direct `writeFile` can leave a corrupted/partial file if the process is
+ * killed mid-write. `rename` is atomic on POSIX and on Windows (when the
+ * target doesn't exist or both files are on the same volume), so the
+ * destination either has the old content or the new content — never a mix.
+ */
+async function atomicWriteFile(filePath: string, content: string): Promise<void> {
+  const tmpPath = join(dirname(filePath), `.tmp-${randomUUID()}`);
+  await writeFile(tmpPath, content, "utf-8");
+  try {
+    await rename(tmpPath, filePath);
+  } catch (e) {
+    // Clean up the temp file if rename failed.
+    try { await unlink(tmpPath); } catch { /* ignore */ }
+    throw e;
+  }
 }
 
 // ── File Read Tool ──
@@ -134,8 +168,8 @@ export function createFileWriteTool(workspaceRoot?: string): FunctionTool<Comput
       const normalizedPath = normalizeRwPath(path, { localEnv, workspaceRoot });
 
       try {
-        await mkdir(join(normalizedPath, ".."), { recursive: true });
-        await writeFile(normalizedPath, content, "utf-8");
+        await mkdir(dirname(normalizedPath), { recursive: true });
+        await atomicWriteFile(normalizedPath, content);
         return { content: [{ type: "text", text: `Successfully wrote to ${normalizedPath}` }] };
       } catch (e) {
         return { content: [{ type: "text", text: `error: Failed to write file: ${e}` }], isError: true };
@@ -196,7 +230,7 @@ export function createFileEditTool(workspaceRoot?: string): FunctionTool<Compute
           newContent = content.replace(oldString, newString);
         }
 
-        await writeFile(normalizedPath, newContent, "utf-8");
+        await atomicWriteFile(normalizedPath, newContent);
         return { content: [{ type: "text", text: `Successfully edited ${normalizedPath}` }] };
       } catch (e) {
         return { content: [{ type: "text", text: `error: Failed to edit file: ${e}` }], isError: true };
@@ -230,6 +264,7 @@ export function createGrepTool(workspaceRoot?: string): FunctionTool<ComputerToo
       const contextLines = args[3] != null ? Number(args[3]) : undefined;
       const resultLimit = args[4] != null ? Number(args[4]) : undefined;
       const context = getToolContext(_ctx);
+      const abortSignal = getAbortSignal(_ctx);
       const localEnv = isLocalRuntime(context);
       const root = workspaceRoot ?? process.cwd();
       const normalizedPath = searchPath ? normalizeRwPath(searchPath, { localEnv, workspaceRoot: root }) : root;
@@ -239,6 +274,7 @@ export function createGrepTool(workspaceRoot?: string): FunctionTool<ComputerToo
           glob,
           contextLines: contextLines ?? 2,
           resultLimit: resultLimit ?? 50,
+          abortSignal,
         });
 
         if (results.length === 0) {
@@ -337,6 +373,7 @@ export function createShellTool(workspaceRoot?: string): FunctionTool<ComputerTo
       const background = args[1] === true;
       const timeout = args[2] != null ? Number(args[2]) : undefined;
       const env = (args[3] as Record<string, string>) ?? undefined;
+      const abortSignal = getAbortSignal(_ctx);
 
       // Defense-in-depth guard: block obviously destructive commands.
       // NOTE: this is NOT a security boundary — see isDestructiveCommand docs.
@@ -377,20 +414,37 @@ export function createShellTool(workspaceRoot?: string): FunctionTool<ComputerTo
           return { content: [{ type: "text", text: `Background command started (id=${id}). Output is being written to ${logPath}. Use killBackgroundShell("${id}") to terminate it.` }] };
         }
 
-        const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolvePromise) => {
+        const result = await new Promise<{ stdout: string; stderr: string; code: number; aborted: boolean }>((resolvePromise) => {
           const child = execFile(
             process.platform === "win32" ? "cmd" : "/bin/sh",
             process.platform === "win32" ? ["/c", command] : ["-c", command],
             { cwd, env: { ...process.env, ...env }, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }
           );
 
+          // Kill child process when abort signal fires (e.g. tool timeout).
+          if (abortSignal) {
+            if (abortSignal.aborted) {
+              child.kill("SIGTERM");
+            } else {
+              abortSignal.addEventListener("abort", () => child.kill("SIGTERM"), { once: true });
+            }
+          }
+
           let stdout = "";
           let stderr = "";
           child.stdout?.on("data", (data: Buffer) => { stdout += data.toString(); });
           child.stderr?.on("data", (data: Buffer) => { stderr += data.toString(); });
-          child.on("close", (code) => { resolvePromise({ stdout, stderr, code: code ?? 0 }); });
-          child.on("error", (_err) => { resolvePromise({ stdout, stderr, code: -1 }); });
+          child.on("close", (code) => {
+            resolvePromise({ stdout, stderr, code: code ?? 0, aborted: abortSignal?.aborted ?? false });
+          });
+          child.on("error", (_err) => {
+            resolvePromise({ stdout, stderr, code: -1, aborted: abortSignal?.aborted ?? false });
+          });
         });
+
+        if (result.aborted) {
+          return { content: [{ type: "text", text: `error: Command was aborted (timeout or cancellation).\n${result.stdout || ""}` }], isError: true };
+        }
 
         let output = "";
         if (result.stdout) output += result.stdout;
@@ -772,7 +826,7 @@ const GREP_MAX_LINE_LENGTH = 10_000;
 async function grepSearch(
   pattern: string,
   searchPath: string,
-  options: { glob?: string; contextLines: number; resultLimit: number },
+  options: { glob?: string; contextLines: number; resultLimit: number; abortSignal?: AbortSignal },
 ): Promise<string[]> {
   // Validate pattern to prevent ReDoS
   if (pattern.length > GREP_MAX_PATTERN_LENGTH) {
@@ -793,6 +847,7 @@ async function grepSearch(
 
   async function walkDir(dir: string): Promise<void> {
     if (results.length >= options.resultLimit) return;
+    if (options.abortSignal?.aborted) return;
 
     let entries;
     try {
@@ -801,6 +856,7 @@ async function grepSearch(
 
     for (const entry of entries) {
       if (results.length >= options.resultLimit) return;
+      if (options.abortSignal?.aborted) return;
       const fullPath = join(dir, entry.name);
 
       if (entry.isDirectory()) {
