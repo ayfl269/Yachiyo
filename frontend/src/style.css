@@ -4296,6 +4296,10 @@ body.light-theme .content-block {
   align-items: center;
 }
 
+.platform-card .card-footer {
+  border-top: none;
+}
+
 .platform-card .toggle-switch {
   position: relative;
   width: 44px;
