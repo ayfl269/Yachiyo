@@ -62,7 +62,6 @@ export type {
   EmbeddedResource,
   TextResourceContents,
   BlobResourceContents,
-  BuiltinToolConfigRule,
 } from "./types.js";
 
 // Tool system
@@ -109,7 +108,7 @@ export type { SubAgentCreateToolContext, DynamicSubAgentRegistry } from "./subag
 
 // Function Tool Manager
 export { FunctionToolManager, MCPInitError, MCPInitTimeoutError } from "./func-tool-manager.js";
-export type { BuiltinToolConstructor, MCPInitSummary } from "./func-tool-manager.js";
+export type { MCPInitSummary } from "./func-tool-manager.js";
 
 // Agent Runner (high-level)
 export { runAgent, runLiveAgent } from "./agent-runner.js";

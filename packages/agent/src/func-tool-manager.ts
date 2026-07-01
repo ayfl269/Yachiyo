@@ -4,11 +4,6 @@ import type { MCPClient } from "./mcp-client.js";
 import { type MCPToolInstance } from "./mcp-tool.js";
 import type { Provider } from "./types.js";
 
-export interface BuiltinToolConstructor {
-  new (): FunctionTool;
-  TOOL_NAME?: string;
-}
-
 export interface MCPInitSummary {
   total: number;
   success: number;
@@ -40,8 +35,6 @@ const DEFAULT_MCP_ENABLE_TIMEOUT = 180_000; // ms
 export class FunctionToolManager {
   /** All tools including MCP tools and plugin tools */
   funcList: FunctionTool[] = [];
-  /** Builtin tools, keyed by name */
-  builtinFuncList: Map<string, FunctionTool> = new Map();
   /** Provider instances for lookup by ID */
   providers: Provider[] = [];
   /** MCP server runtime state */
@@ -103,31 +96,7 @@ export class FunctionToolManager {
     for (let i = this.funcList.length - 1; i >= 0; i--) {
       if (this.funcList[i].name === name) return this.funcList[i];
     }
-    // Check builtin tools
-    const builtin = this.builtinFuncList.get(name);
-    if (builtin && (builtin.active ?? true)) return builtin;
-    return builtin;
-  }
-
-  // ---- Builtin Tool Management ----
-
-  registerBuiltinTool(tool: FunctionTool): void {
-    this.builtinFuncList.set(tool.name, tool);
-  }
-
-  getBuiltinTool(nameOrClass: string | FunctionTool): FunctionTool {
-    const name = typeof nameOrClass === "string" ? nameOrClass : nameOrClass.name;
-    const cached = this.builtinFuncList.get(name);
-    if (cached) return cached;
-    throw new KeyError(`Builtin tool ${name} is not registered.`);
-  }
-
-  isBuiltinTool(name: string): boolean {
-    return this.builtinFuncList.has(name);
-  }
-
-  iterBuiltinTools(): FunctionTool[] {
-    return [...this.builtinFuncList.values()];
+    return undefined;
   }
 
   // ---- Tool Set ----
@@ -310,13 +279,6 @@ export class FunctionToolManager {
   getFuncDescGoogleGenaiStyle(): Record<string, unknown> {
     const tools = this.funcList.filter((f) => f.active);
     return new ToolSet(tools).googleSchema();
-  }
-}
-
-class KeyError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "KeyError";
   }
 }
 

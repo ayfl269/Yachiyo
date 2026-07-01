@@ -1139,6 +1139,10 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
           for (const [k, v] of Object.entries(funcToolArgs as Record<string, unknown>)) {
             if (expectedParams.has(k)) validParams[k] = v;
           }
+          // Lightweight type coercion: fix common LLM type mismatches
+          // (e.g. "123" for integer, true for string) instead of letting
+          // handlers receive NaN/undefined. Does NOT reject — just fixes.
+          validParams = coerceToolParams(validParams, params);
         } else {
           validParams = funcToolArgs as Record<string, unknown>;
         }
@@ -1538,5 +1542,87 @@ class HandleFunctionToolsResult {
 
   static fromCachedImage(image: unknown): HandleFunctionToolsResult {
     return new HandleFunctionToolsResult("cached_image", { cachedImage: image });
+  }
+}
+
+// ── Lightweight parameter type coercion ────────────────────────────────
+// Fixes common LLM type mismatches (e.g. "123" for integer, true for
+// string) so handlers don't receive NaN/undefined. Does NOT reject —
+// just best-effort coerces and logs a warning on mismatch.
+
+function coerceToolParams(
+  params: Record<string, unknown>,
+  schema: Record<string, unknown>
+): Record<string, unknown> {
+  const properties = schema.properties as Record<string, Record<string, unknown>> | undefined;
+  if (!properties) return params;
+
+  const coerced: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(params)) {
+    const propSchema = properties[key];
+    coerced[key] = propSchema ? coerceToolValue(value, propSchema, key) : value;
+  }
+  return coerced;
+}
+
+function coerceToolValue(
+  value: unknown,
+  schema: Record<string, unknown>,
+  paramName: string
+): unknown {
+  const type = schema.type as string | undefined;
+  if (!type) return value;
+
+  // Enum check — try string-based match if exact match fails.
+  if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
+    const strValue = String(value);
+    const match = (schema.enum as unknown[]).find((e) => String(e) === strValue);
+    if (match !== undefined) return match;
+    console.warn(
+      `[ToolParam] "${paramName}" value ${JSON.stringify(value)} not in enum ${JSON.stringify(schema.enum)}`
+    );
+    return value;
+  }
+
+  switch (type) {
+    case "string":
+      if (typeof value === "string") return value;
+      if (typeof value === "number" || typeof value === "boolean") return String(value);
+      console.warn(`[ToolParam] Coercing "${paramName}" from ${typeof value} to string`);
+      return JSON.stringify(value);
+
+    case "number": {
+      if (typeof value === "number") return value;
+      if (typeof value === "string") {
+        const n = Number(value);
+        if (!Number.isNaN(n)) return n;
+      }
+      console.warn(`[ToolParam] Cannot coerce "${paramName}" from ${typeof value} to number, using 0`);
+      return 0;
+    }
+
+    case "integer": {
+      if (typeof value === "number" && Number.isInteger(value)) return value;
+      if (typeof value === "string") {
+        const n = parseInt(value, 10);
+        if (!Number.isNaN(n)) return n;
+      }
+      if (typeof value === "number") return Math.trunc(value);
+      console.warn(`[ToolParam] Cannot coerce "${paramName}" from ${typeof value} to integer, using 0`);
+      return 0;
+    }
+
+    case "boolean":
+      if (typeof value === "boolean") return value;
+      if (typeof value === "string") {
+        if (value === "true") return true;
+        if (value === "false") return false;
+      }
+      if (typeof value === "number") return value !== 0;
+      console.warn(`[ToolParam] Coercing "${paramName}" from ${typeof value} to boolean`);
+      return Boolean(value);
+
+    default:
+      return value;
   }
 }

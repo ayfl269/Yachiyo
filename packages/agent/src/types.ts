@@ -154,11 +154,3 @@ export interface CallToolResult {
   content: (TextContent | ImageContent | EmbeddedResource)[];
   isError?: boolean;
 }
-
-// Builtin tool config rule
-export interface BuiltinToolConfigRule {
-  configKey: string;
-  configValue?: unknown;
-  providerKey?: string;
-  providerValue?: string;
-}

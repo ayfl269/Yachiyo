@@ -1509,35 +1509,23 @@ export class DashboardServer {
         const mcpClientDict = toolMgr?.mcpClientDict as Map<string, any> | undefined;
         const tools: Array<{ name: string; description: string; origin: string; active: boolean; readonly: boolean }> = [];
 
-        // Collect from funcList (all registered tools)
+        // Collect from funcList (all registered tools, including MCP tools)
         if (Array.isArray(toolMgr?.funcList)) {
           for (const fnTool of toolMgr.funcList) {
+            // MCP tools in funcList carry mcpServerName — use it for origin
+            const isMcp = "mcpServerName" in fnTool;
             tools.push({
               name: fnTool.name || "",
               description: fnTool.description || "",
-              origin: fnTool.origin || "builtin",
+              origin: isMcp ? `mcp:${fnTool.mcpServerName}` : (fnTool.origin || "builtin"),
               active: fnTool.active !== false,
               readonly: false,
             });
           }
         }
 
-        // Collect from builtinFuncList
-        if (toolMgr?.builtinFuncList instanceof Map) {
-          for (const [name, fnTool] of toolMgr.builtinFuncList.entries()) {
-            if (!tools.find(t => t.name === name)) {
-              tools.push({
-                name,
-                description: fnTool.description || "",
-                origin: "builtin",
-                active: fnTool.active !== false,
-                readonly: true,
-              });
-            }
-          }
-        }
-
-        // Collect MCP tools
+        // Also check mcpClientDict for any tools not yet in funcList
+        // (e.g. mid-connection race). This is a defensive fallback.
         if (mcpClientDict) {
           for (const [serverName, client] of mcpClientDict.entries()) {
             const mcpTools = client?.tools || [];
