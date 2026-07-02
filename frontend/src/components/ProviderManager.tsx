@@ -1010,7 +1010,7 @@ export default function ProviderManager() {
       <div className="page-header">
         <div>
           <h1>模型提供商</h1>
-          <p>集中管理对话模型、向量嵌入、重排序及语音合成/识别等第三方 API 通道</p>
+          <p>集中管理对话模型、向量嵌入、重排序及语音生成/识别等第三方 API 通道</p>
         </div>
         {selectedProviderType === 'chat_completion' ? (
           <div className="add-source-wrapper">

@@ -226,7 +226,7 @@ function App() {
     return (
       <div className="app-container">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh' }}>
-          <form onSubmit={handleLogin} style={{ width: 340, padding: 28, background: 'var(--bg-secondary)', borderRadius: 16, border: '1px solid var(--border-color)', boxShadow: '0 8px 30px rgba(0, 0, 0, 0.12)', backdropFilter: 'var(--glass-blur)' }}>
+          <form onSubmit={handleLogin} style={{ width: 400, padding: 32, background: 'var(--bg-secondary)', borderRadius: 16, border: '1px solid var(--border-color)', boxShadow: '0 8px 30px rgba(0, 0, 0, 0.12)', backdropFilter: 'var(--glass-blur)' }}>
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, marginBottom: 20 }}>
               <Lock size={32} style={{ color: 'var(--accent-primary)' }} />
               <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>控制台登录</h2>
@@ -276,7 +276,7 @@ function App() {
     return (
       <div className="app-container">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh' }}>
-          <form onSubmit={handleChangeCredentials} style={{ width: 360, padding: 28, background: 'var(--bg-secondary)', borderRadius: 16, border: '1px solid var(--border-color)', boxShadow: '0 8px 30px rgba(0, 0, 0, 0.12)', backdropFilter: 'var(--glass-blur)' }}>
+          <form onSubmit={handleChangeCredentials} style={{ width: 500, padding: 42, background: 'var(--bg-secondary)', borderRadius: 16, border: '1px solid var(--border-color)', boxShadow: '0 8px 30px rgba(0, 0, 0, 0.12)', backdropFilter: 'var(--glass-blur)' }}>
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, marginBottom: 16 }}>
               <Lock size={32} style={{ color: 'var(--accent-primary)' }} />
               <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>初始化安全设置</h2>

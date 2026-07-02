@@ -248,7 +248,7 @@ export default function ChatDataManager() {
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
               placeholder="搜索标题、消息源 UMO..."
-              className="search-input"
+              className="sidebar-search-input"
             />
           </div>
         </div>

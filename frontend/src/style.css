@@ -1242,6 +1242,8 @@ select.form-control {
 .search-icon {
   position: absolute;
   left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
   color: var(--text-muted);
   pointer-events: none;
 }
@@ -2505,6 +2507,9 @@ body.light-theme .linked-provider-row {
 .search-bar {
   position: relative;
   margin-bottom: 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .search-bar .search-icon {
@@ -4925,16 +4930,23 @@ body.light-theme .session-sidebar {
   height: 16px;
 }
 
-.search-input {
-  background: transparent;
-  border: none;
+.sidebar-search-input {
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
   color: var(--text-primary);
   font-size: 0.85rem;
   outline: none;
   width: 100%;
+  padding: 0.5rem 0.75rem 0.5rem 2rem;
+  transition: border-color 0.15s ease;
 }
 
-body.light-theme .search-input {
+.sidebar-search-input:focus {
+  border-color: var(--accent-primary);
+}
+
+body.light-theme .sidebar-search-input {
   color: #0F172A !important;
 }
 
