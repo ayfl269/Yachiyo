@@ -115,6 +115,20 @@ export const CONFIG_EXTRAS_MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    version: 9,
+    name: "dashboard_sessions",
+    up: `
+      CREATE TABLE IF NOT EXISTS dashboard_sessions (
+        token TEXT PRIMARY KEY,
+        username TEXT NOT NULL,
+        must_change INTEGER NOT NULL DEFAULT 0,
+        expires_at INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_dashboard_sessions_expires_at ON dashboard_sessions(expires_at);
+    `,
+  },
 ];
 
 // ── Plugin Store ──

@@ -187,14 +187,47 @@ export class DashboardServer {
   private prevCpuInfo: { idle: number; total: number } | null = null;
   private todayTokens: number = 0;
   private lastTokenDate: string = new Date().toDateString();
-  private activeSessions: Map<string, { username: string; mustChange: boolean; expiresAt: number }> = new Map();
-  /** Session absolute lifetime in ms (8 hours). */
+  /** Session absolute lifetime in ms (7 days). */
   private static readonly SESSION_ABSOLUTE_TTL_MS = 168 * 60 * 60 * 1000;
   /** Login rate-limit: max attempts per key (username+ip) within the window. */
   private static readonly LOGIN_RATE_LIMIT_MAX = 5;
   /** Login rate-limit window in ms (1 minute). */
   private static readonly LOGIN_RATE_LIMIT_WINDOW_MS = 60 * 1000;
   private loginAttempts: Map<string, { count: number; firstAttemptAt: number }> = new Map();
+
+  // ── Session persistence (SQLite-backed) ──
+
+  private saveSession(token: string, username: string, mustChange: boolean, expiresAt: number): void {
+    const db = this.ctx.dbManager.getDb("config");
+    db.prepare(`
+      INSERT OR REPLACE INTO dashboard_sessions (token, username, must_change, expires_at)
+      VALUES (?, ?, ?, ?)
+    `).run(token, username, mustChange ? 1 : 0, expiresAt);
+  }
+
+  private deleteSession(token: string): void {
+    const db = this.ctx.dbManager.getDb("config");
+    db.prepare("DELETE FROM dashboard_sessions WHERE token = ?").run(token);
+  }
+
+  private getSession(token: string): { username: string; mustChange: boolean; expiresAt: number } | null {
+    const db = this.ctx.dbManager.getDb("config");
+    const row = db.prepare("SELECT username, must_change, expires_at FROM dashboard_sessions WHERE token = ?").get(token) as
+      | { username: string; must_change: number; expires_at: number } | undefined;
+    if (!row) return null;
+    return {
+      username: row.username,
+      mustChange: row.must_change === 1,
+      expiresAt: row.expires_at,
+    };
+  }
+
+  /** Remove expired sessions to prevent unbounded growth. Called lazily on each auth check. */
+  private cleanExpiredSessions(): void {
+    const now = Date.now();
+    const db = this.ctx.dbManager.getDb("config");
+    db.prepare("DELETE FROM dashboard_sessions WHERE expires_at < ?").run(now);
+  }
 
   private ensureDefaultUser(): void {
     try {
@@ -224,7 +257,7 @@ export class DashboardServer {
   }
 
   /**
-   * Bearer token check via dynamic session tokens (with sliding expiration).
+   * Bearer token check via dynamic session tokens (SQLite-backed).
    */
   private isRequestAuthenticated(req: IncomingMessage, pathname: string): boolean {
     const header = req.headers["authorization"];
@@ -232,13 +265,15 @@ export class DashboardServer {
     if (!header.startsWith("Bearer ")) return false;
     const token = header.slice(7).trim();
 
-    // Dynamic session check (absolute lifetime only; no idle timeout).
-    const session = this.activeSessions.get(token);
+    // Lazy cleanup of expired sessions (cheap DELETE, runs on each auth check).
+    this.cleanExpiredSessions();
+
+    const session = this.getSession(token);
     if (session) {
       const now = Date.now();
       // Expired: absolute lifetime exceeded.
       if (now > session.expiresAt) {
-        this.activeSessions.delete(token);
+        this.deleteSession(token);
         return false;
       }
       if (session.mustChange) {
@@ -490,11 +525,7 @@ export class DashboardServer {
       const sessionToken = randomBytes(24).toString("hex");
       const mustChange = user.is_first_login === 1;
       const now = Date.now();
-      this.activeSessions.set(sessionToken, {
-        username: user.username,
-        mustChange,
-        expiresAt: now + DashboardServer.SESSION_ABSOLUTE_TTL_MS,
-      });
+      this.saveSession(sessionToken, user.username, mustChange, now + DashboardServer.SESSION_ABSOLUTE_TTL_MS);
 
       res.writeHead(200);
       res.end(JSON.stringify({
@@ -514,7 +545,7 @@ export class DashboardServer {
         return;
       }
       const token = header.slice(7).trim();
-      const session = this.activeSessions.get(token);
+      const session = this.getSession(token);
       if (!session) {
         res.writeHead(401);
         res.end(JSON.stringify({ error: "Unauthorized", message: "会话已过期" }));
@@ -580,14 +611,10 @@ export class DashboardServer {
         return;
       }
 
-      this.activeSessions.delete(token);
+      this.deleteSession(token);
       const newSessionToken = randomBytes(24).toString("hex");
       const now = Date.now();
-      this.activeSessions.set(newSessionToken, {
-        username: newUsername.trim(),
-        mustChange: false,
-        expiresAt: now + DashboardServer.SESSION_ABSOLUTE_TTL_MS,
-      });
+      this.saveSession(newSessionToken, newUsername.trim(), false, now + DashboardServer.SESSION_ABSOLUTE_TTL_MS);
 
       res.writeHead(200);
       res.end(JSON.stringify({
@@ -609,7 +636,7 @@ export class DashboardServer {
         return;
       }
       const token = header.slice(7).trim();
-      const session = this.activeSessions.get(token);
+      const session = this.getSession(token);
       if (!session) {
         res.writeHead(401);
         res.end(JSON.stringify({ error: "Unauthorized", message: "会话已过期" }));
@@ -690,14 +717,10 @@ export class DashboardServer {
       }
 
       // Issue a new session token (invalidates old one).
-      this.activeSessions.delete(token);
+      this.deleteSession(token);
       const newSessionToken = randomBytes(24).toString("hex");
       const now = Date.now();
-      this.activeSessions.set(newSessionToken, {
-        username: newUsername.trim(),
-        mustChange: false,
-        expiresAt: now + DashboardServer.SESSION_ABSOLUTE_TTL_MS,
-      });
+      this.saveSession(newSessionToken, newUsername.trim(), false, now + DashboardServer.SESSION_ABSOLUTE_TTL_MS);
 
       res.writeHead(200);
       res.end(JSON.stringify({
@@ -718,7 +741,7 @@ export class DashboardServer {
       }
       const token = header.slice(7).trim();
 
-      const session = this.activeSessions.get(token);
+      const session = this.getSession(token);
       if (session) {
         res.writeHead(200);
         res.end(JSON.stringify({ authenticated: true, username: session.username, mustChange: session.mustChange }));
@@ -735,7 +758,7 @@ export class DashboardServer {
       const header = req.headers["authorization"];
       if (typeof header === "string" && header.startsWith("Bearer ")) {
         const token = header.slice(7).trim();
-        this.activeSessions.delete(token);
+        this.deleteSession(token);
       }
       res.writeHead(200);
       res.end(JSON.stringify({ success: true }));
