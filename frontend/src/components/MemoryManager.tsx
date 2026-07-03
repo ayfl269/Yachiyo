@@ -8,7 +8,7 @@ import { useToast, ToastPortal, Modal } from './shared'
 
 // ===== Types =====
 type MemoryType = 'short_term' | 'long_term' | 'persona' | 'user_profile'
-type MemoryScope = 'global' | 'persona' | 'user' | 'session'
+type MemoryScope = 'global' | 'persona'
 
 interface MemoryEntry {
   key: string
@@ -90,8 +90,6 @@ const memoryTypeColors: Record<MemoryType, string> = {
 const scopeLabels: Record<MemoryScope, string> = {
   global: '全局',
   persona: '角色',
-  user: '用户',
-  session: '会话',
 }
 
 function formatDate(dateStr: string): string {
@@ -872,8 +870,6 @@ export default function MemoryManager() {
                 >
                   <option value="global">全局</option>
                   <option value="persona">角色</option>
-                  <option value="user">用户</option>
-                  <option value="session">会话</option>
                 </select>
               </div>
             </div>

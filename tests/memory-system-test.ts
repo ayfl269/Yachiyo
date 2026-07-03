@@ -109,12 +109,12 @@ async function testMemoryStoreLayered() {
   const store = new SqliteMemoryStore(db);
 
   // 创建不同类型的记忆
-  store.save("st_1", "短期记忆1", ["conversation"], { memoryType: "short_term", scope: "session", scopeId: "session_1" });
-  store.save("st_2", "短期记忆2", ["conversation"], { memoryType: "short_term", scope: "session", scopeId: "session_1" });
+  store.save("st_1", "短期记忆1", ["conversation"], { memoryType: "short_term", scope: "global" });
+  store.save("st_2", "短期记忆2", ["conversation"], { memoryType: "short_term", scope: "global" });
   store.save("lt_1", "长期记忆1", ["important"], { memoryType: "long_term", scope: "global", priority: 7 });
   store.save("lt_2", "长期记忆2", ["fact"], { memoryType: "long_term", scope: "global", priority: 3 });
   store.save("persona_1", "角色记忆1", ["persona"], { memoryType: "persona", scope: "persona", scopeId: "p1" });
-  store.save("profile_pref", "偏好暗色主题", ["profile"], { memoryType: "user_profile", scope: "user", scopeId: "user1" });
+  store.save("profile_pref", "偏好暗色主题", ["profile"], { memoryType: "user_profile", scope: "global" });
 
   // 按类型筛选
   const shortTerm = store.list(50, { memoryType: "short_term" });
@@ -129,9 +129,11 @@ async function testMemoryStoreLayered() {
   const profile = store.list(50, { memoryType: "user_profile" });
   assertEqual(profile.length, 1, "user_profile 数量为 1");
 
-  // 按作用域筛选
-  const sessionMemories = store.list(50, { scope: "session", scopeId: "session_1" });
-  assertEqual(sessionMemories.length, 2, "session 作用域记忆数量为 2");
+  // 按作用域筛选（仅 global / persona 两种作用域）
+  const globalMemories = store.list(50, { scope: "global" });
+  assertEqual(globalMemories.length, 5, "global 作用域记忆数量为 5");
+  const personaScopeMemories = store.list(50, { scope: "persona" });
+  assertEqual(personaScopeMemories.length, 1, "persona 作用域记忆数量为 1");
 
   // 统计
   const stats = store.stats();
@@ -262,10 +264,12 @@ async function testArchiveShortTermMemories() {
   runMigrations(db);
   const store = new SqliteMemoryStore(db);
 
-  // 创建短期记忆
-  store.save("st_a", "重要短期记忆", ["important"], { memoryType: "short_term", scope: "session", scopeId: "sess_1", priority: 5 });
-  store.save("st_b", "普通短期记忆", ["chat"], { memoryType: "short_term", scope: "session", scopeId: "sess_1" });
-  store.save("st_c", "另一个会话", ["chat"], { memoryType: "short_term", scope: "session", scopeId: "sess_2" });
+  // 创建短期记忆（key 遵循 short_term_${umo}_${timestamp}_${role} 约定，
+  // archiveShortTermMemories 现在按 key 前缀 short_term_${scopeId}_ 定位会话）
+  const ts = Date.now();
+  store.save(`short_term_sess_1_${ts}_user`, "重要短期记忆", ["important"], { memoryType: "short_term", scope: "global", priority: 5 });
+  store.save(`short_term_sess_1_${ts}_assistant`, "普通短期记忆", ["chat"], { memoryType: "short_term", scope: "global" });
+  store.save(`short_term_sess_2_${ts}_user`, "另一个会话", ["chat"], { memoryType: "short_term", scope: "global" });
 
   // 归档 sess_1 的短期记忆（提升为长期）
   const result = store.archiveShortTermMemories("sess_1", { promoteToLongTerm: true });
@@ -273,16 +277,17 @@ async function testArchiveShortTermMemories() {
   assertEqual(result.deleted, 0, "0 条被删除");
 
   // 验证提升后的记忆
-  const promoted = store.recall("st_a");
+  const promoted = store.recall(`short_term_sess_1_${ts}_user`);
   assertEqual(promoted!.memoryType, "long_term", "提升后类型为 long_term");
   assertEqual(promoted!.scope, "global", "提升后作用域为 global");
 
-  // sess_2 的记忆不受影响
-  const otherSession = store.list(10, { memoryType: "short_term", scope: "session", scopeId: "sess_2" });
+  // sess_2 的记忆不受影响（按 key 前缀过滤，不会误删其他会话）
+  const otherSession = store.list(10, { memoryType: "short_term" });
   assertEqual(otherSession.length, 1, "其他会话的短期记忆不受影响");
+  assertEqual(otherSession[0].key, `short_term_sess_2_${ts}_user`, "剩余的是 sess_2 的记忆");
 
   // 测试不提升直接删除
-  store.save("st_d", "临时记忆", [], { memoryType: "short_term", scope: "session", scopeId: "sess_3" });
+  store.save(`short_term_sess_3_${ts}_user`, "临时记忆", [], { memoryType: "short_term", scope: "global" });
   const delResult = store.archiveShortTermMemories("sess_3", { promoteToLongTerm: false });
   assertEqual(delResult.promoted, 0, "不提升时 promoted 为 0");
   assertEqual(delResult.deleted, 1, "不提升时 deleted 为 1");
@@ -418,7 +423,7 @@ async function testConsolidatorWithMockProvider() {
       `short_term_sess_${Date.now()}_${i}_${i % 2 === 0 ? 'user' : 'assistant'}`,
       i % 2 === 0 ? `用户消息${i}` : `AI回复${i}`,
       ["conversation", "short_term"],
-      { memoryType: "short_term", scope: "session", scopeId: "sess_test" }
+      { memoryType: "short_term", scope: "global" }
     );
   }
 
@@ -489,7 +494,7 @@ async function testConsolidatorFailureProtection() {
       `short_term_fail_${i}`,
       `消息${i}`,
       ["conversation", "short_term"],
-      { memoryType: "short_term", scope: "session", scopeId: "sess_fail" }
+      { memoryType: "short_term", scope: "global" }
     );
   }
 
@@ -547,7 +552,7 @@ async function testMemoryLengthTruncation() {
       `short_term_trunc_${i}`,
       `消息${i}`,
       ["conversation", "short_term"],
-      { memoryType: "short_term", scope: "session", scopeId: "sess_trunc" }
+      { memoryType: "short_term", scope: "global" }
     );
   }
 
@@ -613,8 +618,8 @@ async function testMemoryDisabledConfiguration() {
   const store = new SqliteMemoryStore(db);
 
   // 1. 写入一些测试短期记忆
-  store.save("st_a", "重要短期记忆", ["important"], { memoryType: "short_term", scope: "session", scopeId: "sess_1", priority: 5 });
-  store.save("st_b", "普通短期记忆", ["chat"], { memoryType: "short_term", scope: "session", scopeId: "sess_1" });
+  store.save("st_a", "重要短期记忆", ["important"], { memoryType: "short_term", scope: "global", priority: 5 });
+  store.save("st_b", "普通短期记忆", ["chat"], { memoryType: "short_term", scope: "global" });
 
   // 2. 初始化整理器，设置 memoryEnabled: false
   const consolidator = new MemoryConsolidator(store, {
@@ -800,14 +805,14 @@ async function testCheckAndConsolidate() {
 
   // 2. 添加 4 条消息（小于 bufferMinMessages (6) 且小于 autoConsolidateBufferCount (10)）
   for (let i = 0; i < 4; i++) {
-    store.save(`short_term_${i}`, `msg ${i}`, ["conversation", "short_term"], { memoryType: "short_term", scope: "session", scopeId: "sess" });
+    store.save(`short_term_${i}`, `msg ${i}`, ["conversation", "short_term"], { memoryType: "short_term", scope: "global" });
   }
   checkResult = await consolidator.checkAndConsolidate();
   assertEqual(checkResult, null, "消息数 (4) 未达任何阈值，不应触发");
 
   // 3. 达到 bufferMinMessages (6)，且由于上次时间为 0 (极旧)，应当触发时间条件整理
   for (let i = 4; i < 8; i++) {
-    store.save(`short_term_${i}`, `msg ${i}`, ["conversation", "short_term"], { memoryType: "short_term", scope: "session", scopeId: "sess" });
+    store.save(`short_term_${i}`, `msg ${i}`, ["conversation", "short_term"], { memoryType: "short_term", scope: "global" });
   }
   checkResult = await consolidator.checkAndConsolidate();
   assert(checkResult !== null, "时间条件满足且达到最小消息数 (8 >= 6)，应触发整理");
@@ -822,7 +827,7 @@ async function testCheckAndConsolidate() {
 
   // 写入 8 条新消息（已达 bufferMinMessages，但时间未到，因此不应触发时间整理，且未到 10 条自动阈值）
   for (let i = 0; i < 8; i++) {
-    store.save(`short_term_new_${i}`, `msg ${i}`, ["conversation", "short_term"], { memoryType: "short_term", scope: "session", scopeId: "sess" });
+    store.save(`short_term_new_${i}`, `msg ${i}`, ["conversation", "short_term"], { memoryType: "short_term", scope: "global" });
   }
   checkResult = await consolidator.checkAndConsolidate();
   assertEqual(checkResult, null, "时间未到且消息数未达自动触发阈值 (8 < 10)，不应触发");
@@ -830,7 +835,7 @@ async function testCheckAndConsolidate() {
   // 5. 写入 2 条新消息使得总数达到 10 (>= autoConsolidateBufferCount)
   // 即使时间间隔未满，也应该触发自动整理！
   for (let i = 8; i < 10; i++) {
-    store.save(`short_term_new_${i}`, `msg ${i}`, ["conversation", "short_term"], { memoryType: "short_term", scope: "session", scopeId: "sess" });
+    store.save(`short_term_new_${i}`, `msg ${i}`, ["conversation", "short_term"], { memoryType: "short_term", scope: "global" });
   }
   checkResult = await consolidator.checkAndConsolidate();
   assert(checkResult !== null, "消息数达到自动触发阈值 (10 >= 10)，即使时间未到也应触发整理");
@@ -1028,13 +1033,16 @@ async function testConsolidatorPassesConversationId() {
   runMigrations(db);
   const store = new SqliteMemoryStore(db);
 
-  // Seed short-term buffer tied to a single session (scopeId = umo)
+  // Seed short-term buffer; key follows short_term_${umo}_${timestamp}_${role}
+  // (one numeric segment) so the consolidator can parse the session id back out.
+  const ts = Date.now();
+  const umo = "umo_test_1";
   for (let i = 0; i < 8; i++) {
     store.save(
-      `st_${i}`,
+      `short_term_${umo}_${ts + i}_${i % 2 === 0 ? 'user' : 'assistant'}`,
       `msg ${i}`,
       ["conversation", "short_term"],
-      { memoryType: "short_term", scope: "session", scopeId: "umo_test_1" }
+      { memoryType: "short_term", scope: "global" }
     );
   }
 

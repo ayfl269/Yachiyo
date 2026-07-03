@@ -619,7 +619,9 @@ export class ProcessStage extends PipelineStage {
 
       if (!userMessage || !assistantMessage) return;
 
-      // Save user message as short-term memory
+      // Save user message as short-term memory.
+      // All memories are global in single-user design; the session id (umo)
+      // is embedded in the key so archiveSession(umo) can still locate them.
       const timestamp = Date.now();
       store.save(
         `short_term_${umo}_${timestamp}_user`,
@@ -627,8 +629,8 @@ export class ProcessStage extends PipelineStage {
         ["conversation", "short_term"],
         {
           memoryType: "short_term",
-          scope: "session",
-          scopeId: umo,
+          scope: "global",
+          scopeId: "",
           priority: 0,
         }
       );
@@ -640,8 +642,8 @@ export class ProcessStage extends PipelineStage {
         ["conversation", "short_term"],
         {
           memoryType: "short_term",
-          scope: "session",
-          scopeId: umo,
+          scope: "global",
+          scopeId: "",
           priority: 0,
         }
       );

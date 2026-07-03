@@ -20,7 +20,7 @@ import { escapeLike, type Migration } from "@yachiyo/common/database.js";
 
 export type MemoryType = "short_term" | "long_term" | "persona" | "user_profile";
 
-export type MemoryScope = "global" | "persona" | "user" | "session";
+export type MemoryScope = "global" | "persona";
 
 export interface MemoryEntry {
   key: string;
@@ -149,6 +149,16 @@ export const MEMORY_MIGRATIONS: Migration[] = [
 
       -- Remove migrated history_index entries from memories table
       DELETE FROM memories WHERE memory_type = 'history_index';
+    `,
+  },
+  {
+    version: 4,
+    name: "memory_simplify_scopes",
+    up: `
+      -- Single-user design: collapse session/user scopes into global.
+      -- short_term conversation records now live in global scope (the
+      -- session id stays embedded in the key for archiveSession lookups).
+      UPDATE memories SET scope = 'global', scope_id = '' WHERE scope IN ('session', 'user');
     `,
   },
 ];
@@ -435,7 +445,7 @@ export class SqliteMemoryStore {
     }
 
     const byScope = {} as Record<MemoryScope, number>;
-    const scopes: MemoryScope[] = ["global", "persona", "user", "session"];
+    const scopes: MemoryScope[] = ["global", "persona"];
     for (const s of scopes) {
       byScope[s] = this.count({ scope: s });
     }
@@ -459,9 +469,12 @@ export class SqliteMemoryStore {
     let deleted = 0;
 
     this.db.transaction(() => {
-      // Find short_term memories for this session
-      const query = `SELECT key, created_at FROM memories WHERE memory_type = 'short_term' AND scope = 'session' AND scope_id = ?`;
-      const params: unknown[] = [scopeId];
+      // Find short_term memories for this session by key prefix.
+      // Key format: short_term_${umo}_${timestamp}_{user|assistant}
+      // (scope is now global for all memories; the session id lives in the key.)
+      const prefix = `short_term_${scopeId}_`;
+      const query = `SELECT key, created_at FROM memories WHERE memory_type = 'short_term' AND key LIKE ? ESCAPE '\\'`;
+      const params: unknown[] = [escapeLike(prefix) + "%"];
 
       const rows = this.db.prepare(query).all(...params) as MemoryKeyDateRow[];
 

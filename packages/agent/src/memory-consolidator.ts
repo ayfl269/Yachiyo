@@ -17,6 +17,21 @@
 import type { SqliteMemoryStore, MemoryEntry } from "./sqlite-memory-store.js";
 import type { Provider } from "./types.js";
 
+// ── Helpers ──
+
+/**
+ * Extract the session id (UMO) from a short-term memory key.
+ * Key format: `short_term_${umo}_${timestamp}_${user|assistant}`
+ * Returns null when the key doesn't follow this convention.
+ */
+function extractSessionIdFromKey(key: string): string | null {
+  const prefix = "short_term_";
+  if (!key.startsWith(prefix)) return null;
+  const rest = key.slice(prefix.length);
+  const match = rest.match(/^(.*)_(\d+)_(user|assistant)$/);
+  return match ? match[1] : null;
+}
+
 // ── Types ──
 
 export interface ConsolidationConfig {
@@ -411,15 +426,16 @@ ${bufferTexts.join("\n")}
         if (parsed.index) {
           const indexData = parsed.index as { title: string; topics: string[] };
           if (indexData.title || (indexData.topics && indexData.topics.length > 0)) {
-            // Link the index back to its conversation/session via the scopeId
-            // (UMO) of the processed short-term memories. When memories span
-            // multiple sessions, leave the link empty rather than guessing.
-            const scopeIds = new Set(
+            // Link the index back to its conversation/session by parsing the
+            // session id (UMO) out of the short-term memory keys.
+            // Key format: short_term_${umo}_${timestamp}_${user|assistant}
+            // When memories span multiple sessions, leave the link empty.
+            const sessionIds = new Set(
               shortTermMemories
-                .map(m => m.scopeId)
+                .map(m => extractSessionIdFromKey(m.key))
                 .filter((id): id is string => Boolean(id))
             );
-            const conversationId = scopeIds.size === 1 ? [...scopeIds][0] : "";
+            const conversationId = sessionIds.size === 1 ? [...sessionIds][0] : "";
             this.store.addConversationIndex({
               title: indexData.title || "",
               topics: indexData.topics ?? [],
