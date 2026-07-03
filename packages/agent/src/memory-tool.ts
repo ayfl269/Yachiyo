@@ -116,12 +116,12 @@ export function createMemoryTool(optionsOrRoot?: string | CreateMemoryToolOption
         },
         scope: {
           type: "string",
-          description: "Memory scope. One of: global, persona, user, session.",
-          enum: ["global", "persona", "user", "session"],
+          description: "Memory scope. One of: global (shared across all sessions), persona (isolated per character).",
+          enum: ["global", "persona"],
         },
         scope_id: {
           type: "string",
-          description: "Scope identifier (e.g., persona ID, user ID, session ID).",
+          description: "Scope identifier (only meaningful when scope is 'persona'; otherwise leave empty).",
         },
         priority: {
           type: "integer",
