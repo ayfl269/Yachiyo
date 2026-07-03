@@ -952,6 +952,112 @@ async function testLikeQueryEscaping() {
   chatDb.close();
 }
 
+async function testClearPreservesSystemMemories() {
+  console.log("\n=== clear() 保留 system_* 系统记忆 ===");
+  const db = createTestDb();
+  runMigrations(db);
+  const store = new SqliteMemoryStore(db);
+
+  // Save user-visible memories + a system bookkeeping key
+  store.save("user_mem_1", "v1", [], { memoryType: "long_term" });
+  store.save("user_mem_2", "v2", [], { memoryType: "short_term" });
+  store.save("system_last_consolidate_time", Date.now().toString(), [], {
+    memoryType: "long_term",
+    scope: "global",
+    priority: 0,
+  });
+
+  const count = store.clear();
+  assertEqual(count, 2, "clear() 返回非系统记忆数量 2");
+  assertEqual(store.count(), 0, "清空后用户可见 count 为 0");
+  // system key must survive
+  const sys = store.recall("system_last_consolidate_time");
+  assert(sys !== null, "system_last_consolidate_time 在 clear() 后仍然保留");
+
+  db.close();
+}
+
+async function testMergeDoesNotInflateAccessCount() {
+  console.log("\n=== merge() 不再虚增 access_count ===");
+  const db = createTestDb();
+  runMigrations(db);
+  const store = new SqliteMemoryStore(db);
+
+  store.save("a_key", "value A", ["tag1"], { memoryType: "long_term", priority: 5 });
+  store.save("b_key", "value B", ["tag1"], { memoryType: "long_term", priority: 3 });
+
+  const beforeA = store.recall("a_key");
+  const beforeB = store.recall("b_key");
+  assertEqual(beforeA!.accessCount, 1, "merge 前 a_key access_count=1");
+  assertEqual(beforeB!.accessCount, 1, "merge 前 b_key access_count=1");
+
+  const ok = store.merge("a_key", "b_key", "value A+B");
+  assert(ok, "merge 返回 true");
+
+  const after = store.recall("a_key");
+  // access_count = a(1) + b(1) merged + 1 from this final recall = 3.
+  // Old buggy code returned 5 (recall-inflate inside merge).
+  assertEqual(after!.accessCount, 3, "merge 后 access_count=3，未被 merge 虚增");
+  assert(store.recall("b_key") === null, "源记忆 b_key 已删除");
+
+  db.close();
+}
+
+async function testFindSimilarFiltersSystemKeys() {
+  console.log("\n=== findSimilar() 过滤 system_* 键 ===");
+  const db = createTestDb();
+  runMigrations(db);
+  const store = new SqliteMemoryStore(db);
+
+  // system_xxx shares the "system" prefix and tag with user memories
+  store.save("system_foo", "system value", ["shared"], { memoryType: "long_term" });
+  store.save("system_bar", "system value 2", ["shared"], { memoryType: "long_term" });
+  store.save("user_foo", "user value", ["shared"], { memoryType: "long_term" });
+
+  const similar = store.findSimilar("user_foo", ["shared"], 10);
+  const keys = similar.map(s => s.key);
+  assert(!keys.includes("system_foo"), "findSimilar 不返回 system_foo");
+  assert(!keys.includes("system_bar"), "findSimilar 不返回 system_bar");
+
+  db.close();
+}
+
+async function testConsolidatorPassesConversationId() {
+  console.log("\n=== 整理器写入 conversationId ===");
+  const db = createTestDb();
+  runMigrations(db);
+  const store = new SqliteMemoryStore(db);
+
+  // Seed short-term buffer tied to a single session (scopeId = umo)
+  for (let i = 0; i < 8; i++) {
+    store.save(
+      `st_${i}`,
+      `msg ${i}`,
+      ["conversation", "short_term"],
+      { memoryType: "short_term", scope: "session", scopeId: "umo_test_1" }
+    );
+  }
+
+  const mockProvider = createMockProvider({
+    profile: { preferences: "", background: "", style: "" },
+    memories: [],
+    index: { title: "test title", topics: ["t1"] },
+  });
+  const consolidator = new MemoryConsolidator(store, {
+    ...DEFAULT_CONSOLIDATION_CONFIG,
+    bufferMinMessages: 6,
+  });
+  consolidator.setProvider(mockProvider as any);
+
+  await consolidator.consolidate();
+
+  const indices = store.listConversationIndices(10);
+  assertEqual(indices.length, 1, "写入 1 条对话索引");
+  assertEqual(indices[0].conversationId, "umo_test_1", "索引 conversationId 来自 short_term scopeId");
+
+  db.close();
+}
+
 // ── Main ──
 
 async function main() {
@@ -978,6 +1084,10 @@ async function main() {
     await testMemoryRefinements();
     await testCheckAndConsolidate();
     await testLikeQueryEscaping();
+    await testClearPreservesSystemMemories();
+    await testMergeDoesNotInflateAccessCount();
+    await testFindSimilarFiltersSystemKeys();
+    await testConsolidatorPassesConversationId();
   } catch (e) {
     console.error("\n!!! 测试执行异常 !!!", e);
     failed++;

@@ -411,9 +411,19 @@ ${bufferTexts.join("\n")}
         if (parsed.index) {
           const indexData = parsed.index as { title: string; topics: string[] };
           if (indexData.title || (indexData.topics && indexData.topics.length > 0)) {
+            // Link the index back to its conversation/session via the scopeId
+            // (UMO) of the processed short-term memories. When memories span
+            // multiple sessions, leave the link empty rather than guessing.
+            const scopeIds = new Set(
+              shortTermMemories
+                .map(m => m.scopeId)
+                .filter((id): id is string => Boolean(id))
+            );
+            const conversationId = scopeIds.size === 1 ? [...scopeIds][0] : "";
             this.store.addConversationIndex({
               title: indexData.title || "",
               topics: indexData.topics ?? [],
+              conversationId,
             });
             extracted++;
           }

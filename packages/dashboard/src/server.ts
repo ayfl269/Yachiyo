@@ -2725,7 +2725,7 @@ export class DashboardServer {
         const { key, value, tags, memory_type, scope, scope_id, priority, expires_at } = parsed.value as {
           key?: string; value?: string; tags?: unknown[];
           memory_type?: string; scope?: string; scope_id?: string;
-          priority?: number; expires_at?: number;
+          priority?: number; expires_at?: string;
         };
         if (!key) {
           res.writeHead(400);
@@ -2896,9 +2896,88 @@ export class DashboardServer {
         const body = await this.readBody(req);
         const updates = JSON.parse(body);
         consolidator.updateConfig(updates);
+        // Apply the new interval / enabled state to the running periodic timer
+        // so config changes take effect immediately (mirrors bootstrap.ts).
+        consolidator.startPeriodic();
         const config = consolidator.getConfig();
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, config }));
+      } catch (err: unknown) {
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: false, error: safeClientMessage(err) }));
+      }
+      return;
+    }
+
+    // M10. GET /api/conversation-indices — 列出/搜索对话索引（由整理器写入的 title+topics）
+    if (pathname === "/api/conversation-indices" && req.method === "GET") {
+      try {
+        const memoryStore = (this.ctx as any).memoryStore;
+        if (!memoryStore) {
+          res.writeHead(200);
+          res.end(JSON.stringify({ indices: [], total: 0 }));
+          return;
+        }
+        const limit = parseInt(url.searchParams.get("limit") || "50");
+        const query = url.searchParams.get("search") || "";
+        let indices: any[];
+        if (query) {
+          indices = memoryStore.searchConversationIndices(query, limit);
+        } else {
+          indices = memoryStore.listConversationIndices(limit);
+        }
+        const total = memoryStore.countConversationIndices();
+        res.writeHead(200);
+        res.end(JSON.stringify({ indices, total }));
+      } catch (err: unknown) {
+        res.writeHead(200);
+        res.end(JSON.stringify({ indices: [], total: 0, error: safeClientMessage(err) }));
+      }
+      return;
+    }
+
+    // M11. DELETE /api/conversation-indices/:id — 删除单条对话索引
+    if (pathname.startsWith("/api/conversation-indices/") && req.method === "DELETE") {
+      try {
+        const memoryStore = (this.ctx as any).memoryStore;
+        if (!memoryStore) {
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: "Memory store not initialized" }));
+          return;
+        }
+        const idStr = pathname.substring("/api/conversation-indices/".length);
+        const id = parseInt(idStr, 10);
+        if (!Number.isFinite(id)) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: "Invalid index id" }));
+          return;
+        }
+        const deleted = memoryStore.deleteConversationIndex(id);
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: deleted }));
+      } catch (err: unknown) {
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: false, error: safeClientMessage(err) }));
+      }
+      return;
+    }
+
+    // M12. POST /api/conversation-indices/clear — 清空所有对话索引
+    if (pathname === "/api/conversation-indices/clear" && req.method === "POST") {
+      try {
+        const memoryStore = (this.ctx as any).memoryStore;
+        if (!memoryStore) {
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: "Memory store not initialized" }));
+          return;
+        }
+        // list all then delete in a loop; store has no bulk-delete for indices
+        const all = memoryStore.listConversationIndices(Number.MAX_SAFE_INTEGER);
+        for (const idx of all) {
+          memoryStore.deleteConversationIndex(idx.id);
+        }
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: true, deletedCount: all.length }));
       } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ success: false, error: safeClientMessage(err) }));

@@ -407,13 +407,15 @@ export class SqliteMemoryStore {
   }
 
   /**
-   * Clear all memories.
+   * Clear all user-visible memories. Preserves internal `system_*` keys
+   * (e.g. `system_last_consolidate_time`) so consolidation bookkeeping
+   * survives a user-initiated "clear all" action.
    */
   clear(): number {
     const countBefore = this.count();
     this.db.transaction(() => {
-      this.db.prepare("DELETE FROM memory_tags").run();
-      this.db.prepare("DELETE FROM memories").run();
+      this.db.prepare("DELETE FROM memory_tags WHERE memory_key NOT LIKE 'system_%'").run();
+      this.db.prepare("DELETE FROM memories WHERE key NOT LIKE 'system_%'").run();
     })();
     return countBefore;
   }
@@ -559,7 +561,7 @@ export class SqliteMemoryStore {
     const prefix = key.split("_").slice(0, -1).join("_");
     if (prefix) {
       const prefixRows = this.db.prepare(`
-        SELECT * FROM memories WHERE key LIKE ? ESCAPE '\\' AND key != ? LIMIT ?
+        SELECT * FROM memories WHERE key LIKE ? ESCAPE '\\' AND key != ? AND key NOT LIKE 'system_%' LIMIT ?
       `).all(`${escapeLike(prefix)}%`, key, limit) as MemoryRow[];
       for (const r of prefixRows) {
         if (!similarKeys.has(r.key)) {
@@ -575,7 +577,7 @@ export class SqliteMemoryStore {
       const tagRows = this.db.prepare(`
         SELECT m.* FROM memories m
         JOIN memory_tags mt ON m.key = mt.memory_key
-        WHERE mt.tag IN (${tagPlaceholders}) AND m.key != ?
+        WHERE mt.tag IN (${tagPlaceholders}) AND m.key != ? AND m.key NOT LIKE 'system_%'
         GROUP BY m.key
         ORDER BY COUNT(mt.tag) DESC
         LIMIT ?
@@ -593,11 +595,15 @@ export class SqliteMemoryStore {
 
   /**
    * Merge a memory into an existing one (combines values and tags).
+   * Reads rows directly (instead of `recall`) to avoid inflating
+   * `access_count` as a side effect of the merge.
    */
   merge(targetKey: string, sourceKey: string, mergedValue: string): boolean {
-    const target = this.recall(targetKey);
-    const source = this.recall(sourceKey);
-    if (!target || !source) return false;
+    const targetRow = this.db.prepare("SELECT * FROM memories WHERE key = ?").get(targetKey) as MemoryRow | undefined;
+    const sourceRow = this.db.prepare("SELECT * FROM memories WHERE key = ?").get(sourceKey) as MemoryRow | undefined;
+    if (!targetRow || !sourceRow) return false;
+    const target = this.rowToEntry(targetRow);
+    const source = this.rowToEntry(sourceRow);
 
     this.db.transaction(() => {
       // Combine tags

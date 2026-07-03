@@ -34,6 +34,7 @@ interface MemoryStats {
 interface ConsolidationConfig {
   interval: string
   enabled: boolean
+  memoryEnabled?: boolean
   agingAccessThreshold: number
   agingMaxAgeDays: number
   promoteOnSessionEnd: boolean
@@ -41,6 +42,7 @@ interface ConsolidationConfig {
   maxMemoryLength: number
   maxRetries: number
   bufferMinMessages: number
+  autoConsolidateBufferCount: number
 }
 
 interface EditingMemory {
@@ -59,6 +61,15 @@ interface ConsolidationResult {
   merged: number
   expired: number
   aged?: { demoted?: number; archived?: number }
+}
+
+interface ConversationIndexEntry {
+  id: number
+  title: string
+  topics: string[]
+  conversationId: string
+  timestamp: string
+  createdAt: string
 }
 
 // ===== Labels =====
@@ -124,6 +135,13 @@ export default function MemoryManager() {
   const [showConsolidationResult, setShowConsolidationResult] = useState(false)
   const [consolidationResult, setConsolidationResult] = useState<ConsolidationResult | null>(null)
 
+  // Conversation indices (history index written by consolidator)
+  const [indices, setIndices] = useState<ConversationIndexEntry[]>([])
+  const [indicesTotal, setIndicesTotal] = useState(0)
+  const [indicesLoading, setIndicesLoading] = useState(false)
+  const [indicesSearch, setIndicesSearch] = useState('')
+  const [showIndices, setShowIndices] = useState(false)
+
   const { toast, showMessage } = useToast()
 
   // ===== API =====
@@ -169,6 +187,60 @@ export default function MemoryManager() {
       }
     } catch (error) {
       console.error('获取整理配置失败:', error)
+    }
+  }
+
+  const fetchIndices = async (search?: string) => {
+    const q = search !== undefined ? search : indicesSearch
+    setIndicesLoading(true)
+    try {
+      const params = new URLSearchParams()
+      params.set('limit', '100')
+      if (q.trim()) params.set('search', q.trim())
+      const res = await fetch(`/api/conversation-indices?${params}`)
+      if (res.ok) {
+        const data = await res.json()
+        setIndices(data.indices || [])
+        setIndicesTotal(data.total || 0)
+      }
+    } catch (error) {
+      console.error('获取对话索引失败:', error)
+    } finally {
+      setIndicesLoading(false)
+    }
+  }
+
+  const handleDeleteIndex = async (id: number) => {
+    try {
+      const res = await fetch(`/api/conversation-indices/${id}`, { method: 'DELETE' })
+      if (res.ok) {
+        const data = await res.json()
+        if (data.success) {
+          showMessage('索引已删除')
+          await fetchIndices()
+        } else {
+          showMessage('删除失败', 'error')
+        }
+      }
+    } catch (error) {
+      console.error('删除对话索引失败:', error)
+      showMessage('删除对话索引失败', 'error')
+    }
+  }
+
+  const handleClearIndices = async () => {
+    try {
+      const res = await fetch('/api/conversation-indices/clear', { method: 'POST' })
+      if (res.ok) {
+        const data = await res.json()
+        if (data.success) {
+          showMessage(`已清空 ${data.deletedCount} 条对话索引`)
+          await fetchIndices()
+        }
+      }
+    } catch (error) {
+      console.error('清空对话索引失败:', error)
+      showMessage('清空对话索引失败', 'error')
     }
   }
 
@@ -361,6 +433,14 @@ export default function MemoryManager() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Lazy-load conversation indices only when the section is first opened
+  useEffect(() => {
+    if (showIndices && indices.length === 0 && !indicesLoading) {
+      fetchIndices()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showIndices])
+
   return (
     <div className="memory-page animate-fade-in">
       {/* Page Header */}
@@ -448,6 +528,8 @@ export default function MemoryManager() {
       {consolidationConfig && (
         <div className="consolidation-info">
           <Settings size={14} />
+          <span>记忆系统: {consolidationConfig.memoryEnabled === false ? '已停用' : '已启用'}</span>
+          <span className="sep">|</span>
           <span>自动整理: {consolidationConfig.enabled ? '已启用' : '已禁用'}</span>
           <span className="sep">|</span>
           <span>间隔: {consolidationConfig.interval}</span>
@@ -458,7 +540,7 @@ export default function MemoryManager() {
           <span className="sep">|</span>
           <span>失败重试: {consolidationConfig.maxRetries}次</span>
           <span className="sep">|</span>
-          <span>缓冲区阈值: {consolidationConfig.bufferMinMessages}条</span>
+          <span>缓冲区触发: {consolidationConfig.bufferMinMessages}/{consolidationConfig.autoConsolidateBufferCount}条</span>
         </div>
       )}
 
@@ -615,6 +697,110 @@ export default function MemoryManager() {
           )}
         </div>
       )}
+
+      {/* ===== Conversation Indices Section ===== */}
+      <div className="indices-section">
+        <div
+          className="indices-header"
+          onClick={() => setShowIndices(prev => !prev)}
+          style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }}
+        >
+          {showIndices ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+          <FileText size={16} />
+          <span>对话历史索引</span>
+          <span className="sep">|</span>
+          <span>共 {indicesTotal} 条</span>
+          <span style={{ marginLeft: 'auto', fontSize: 12, color: '#888' }}>
+            整理器自动从对话中提炼的检索标题与关键词
+          </span>
+        </div>
+
+        {showIndices && (
+          <div className="indices-body" style={{ marginTop: 12 }}>
+            <div className="search-bar" style={{ marginBottom: 12 }}>
+              <div className="search-input-wrapper">
+                <Search size={16} className="search-icon" />
+                <input
+                  type="text"
+                  value={indicesSearch}
+                  onChange={e => setIndicesSearch(e.target.value)}
+                  placeholder="搜索对话标题或关键词..."
+                  className="search-input"
+                  onKeyDown={e => { if (e.key === 'Enter') fetchIndices() }}
+                />
+                {indicesSearch && (
+                  <button
+                    className="search-clear"
+                    onClick={() => { setIndicesSearch(''); fetchIndices('') }}
+                  >
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
+              <button className="btn primary" onClick={() => fetchIndices()} disabled={indicesLoading}>
+                <Search size={14} />
+                {indicesLoading ? <span>搜索中...</span> : <span>搜索</span>}
+              </button>
+              <button className="btn" onClick={() => fetchIndices()} disabled={indicesLoading} title="刷新">
+                <RefreshCw size={14} className={indicesLoading ? 'animate-spin' : ''} />
+              </button>
+              <button className="btn danger" onClick={handleClearIndices} disabled={indices.length === 0}>
+                <Trash2 size={14} /> 清空全部
+              </button>
+            </div>
+
+            {indicesLoading && indices.length === 0 ? (
+              <div className="loading-state">
+                <div className="spinner"></div>
+                <p>加载中...</p>
+              </div>
+            ) : indices.length === 0 ? (
+              <div className="empty-state">
+                <FileText size={36} className="empty-icon" />
+                <h3>暂无对话索引</h3>
+                <p>整理器在自动整理时会从对话中提炼检索标题与关键词</p>
+              </div>
+            ) : (
+              <div className="indices-list">
+                {indices.map(idx => (
+                  <div key={idx.id} className="memory-card">
+                    <div className="memory-card-header">
+                      <div className="memory-main-info">
+                        <div className="memory-key-row">
+                          <FileText size={14} className="key-icon" />
+                          <span className="memory-key">{idx.title || '(无标题)'}</span>
+                        </div>
+                        {idx.topics.length > 0 && (
+                          <div className="memory-tags-preview">
+                            <Tag size={12} className="tag-icon" />
+                            {idx.topics.map(t => (
+                              <span key={t} className="tag-chip">{t}</span>
+                            ))}
+                          </div>
+                        )}
+                        {idx.conversationId && (
+                          <div className="memory-meta-row">
+                            <span className="scope-badge">{idx.conversationId.slice(0, 16)}</span>
+                          </div>
+                        )}
+                      </div>
+                      <div className="memory-meta">
+                        <span className="meta-time"><Clock size={12} /> {formatDate(idx.timestamp)}</span>
+                        <button
+                          className="btn danger sm"
+                          onClick={() => handleDeleteIndex(idx.id)}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* ===== Create/Edit Modal ===== */}
       <Modal
