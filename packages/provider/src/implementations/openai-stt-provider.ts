@@ -1,6 +1,7 @@
 import { STTProvider } from "../manager.js";
 import { withRetry } from "../retry.js";
 import { ProviderAPIError } from "../errors.js";
+import { safeFetch } from "@yachiyo/common/ssrf-guard.js";
 import { readFileSync } from "fs";
 import { basename } from "path";
 
@@ -82,7 +83,10 @@ export class OpenAISttProvider extends STTProvider {
     const { randomUUID } = await import("crypto");
     const { writeFileSync } = await import("fs");
 
-    const res = await fetch(url);
+    // safeFetch validates URL scheme + DNS-resolved IPs against private/reserved
+    // ranges to prevent SSRF (e.g. user-supplied audio URL pointing to internal
+    // services or cloud metadata endpoints).
+    const res = await safeFetch(url);
     if (!res.ok) {
       throw new ProviderAPIError("openai-stt", res.status, undefined, `Failed to download audio from ${url}`);
     }

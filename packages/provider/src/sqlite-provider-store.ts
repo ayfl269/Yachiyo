@@ -9,8 +9,24 @@ import type Database from "better-sqlite3";
 import type { Migration } from "@yachiyo/common/database.js";
 import { encryptSecret, decryptSecret } from "@yachiyo/common/secret-crypto.js";
 
-/** Field names inside `provider_configs.config` JSON that hold secrets. */
-const SECRET_FIELDS = ["key", "apiKey"] as const;
+/**
+ * Field names inside `provider_configs.config` JSON that hold secrets.
+ *
+ * This list MUST stay in sync with `ProviderManager.SECRET_KEYS` in `manager.ts`.
+ * Both lists are kept duplicated (rather than shared) to avoid a circular import
+ * between `manager.ts` and this store module. When you update one, update the other.
+ */
+const SECRET_FIELDS = [
+  "apiKey", "api_key",
+  "apiSecret", "api_secret",
+  "secretKey", "secret_key",
+  "secret",
+  "token",
+  "accessToken", "access_token",
+  "refreshToken", "refresh_token",
+  "password", "passwd",
+  "key",
+] as const;
 
 // ── Migrations ──
 

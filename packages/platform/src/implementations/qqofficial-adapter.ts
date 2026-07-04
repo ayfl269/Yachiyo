@@ -368,6 +368,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body,
+      signal: AbortSignal.timeout(15000),
     });
 
     if (!response.ok) {
@@ -850,6 +851,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
       method: "POST",
       headers: this.getAuthHeaders(),
       body,
+      signal: AbortSignal.timeout(15000),
     });
 
     if (!response.ok) {
@@ -872,6 +874,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
       method: "POST",
       headers: this.getAuthHeaders(),
       body,
+      signal: AbortSignal.timeout(15000),
     });
 
     if (!response.ok) {
@@ -889,6 +892,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
       method: "POST",
       headers: this.getAuthHeaders(),
       body,
+      signal: AbortSignal.timeout(15000),
     });
 
     if (!response.ok) {
@@ -907,6 +911,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
       method: "POST",
       headers: this.getAuthHeaders(),
       body,
+      signal: AbortSignal.timeout(15000),
     });
 
     if (!response.ok) {
@@ -924,6 +929,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
       method: "POST",
       headers: this.getAuthHeaders(),
       body,
+      signal: AbortSignal.timeout(15000),
     });
 
     if (!response.ok) {

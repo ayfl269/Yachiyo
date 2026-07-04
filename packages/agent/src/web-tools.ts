@@ -678,7 +678,10 @@ export function createWebSearchTool(customProvider?: WebSearchProvider, engine: 
           const enrichedResults = await Promise.all(
             results.map(async (r) => {
               try {
-                const resp = await fetch(r.url, {
+                // safeFetch re-validates each result URL (and redirect hop)
+                // against private/reserved IP ranges. Search result URLs are
+                // attacker-influencable and could otherwise be used for SSRF.
+                const resp = await safeFetch(r.url, {
                   headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" },
                   signal: AbortSignal.timeout(10000),
                 });

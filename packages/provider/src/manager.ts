@@ -330,10 +330,17 @@ export class ProviderManager {
     return includeSecrets ? result : ProviderManager.redactSecrets(result);
   }
 
+  /**
+   * Field names considered secret when redacting/masking provider configs.
+   *
+   * This list MUST stay in sync with `SECRET_FIELDS` in `sqlite-provider-store.ts`,
+   * which uses it to decide which fields to encrypt at rest. When you update one,
+   * update the other.
+   */
   private static readonly SECRET_KEYS = new Set([
     "apiKey", "api_key", "apiSecret", "api_secret", "secretKey", "secret_key",
     "secret", "token", "accessToken", "access_token", "refreshToken", "refresh_token",
-    "password", "passwd",
+    "password", "passwd", "key",
   ]);
 
   /** Return a shallow copy of `config` with secret fields masked as `"***"`. */

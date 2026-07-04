@@ -121,7 +121,7 @@ export class GeminiProvider implements Provider {
     ttlStr: string
   ): Promise<string | null> {
     const modelName = useModel.startsWith("models/") ? useModel : `models/${useModel}`;
-    const url = `${this.baseUrl}/cachedContents?key=${this.apiKey}`;
+    const url = `${this.baseUrl}/cachedContents`;
 
     const body: Record<string, any> = {
       model: modelName,
@@ -139,6 +139,7 @@ export class GeminiProvider implements Provider {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "x-goog-api-key": this.apiKey,
       },
       body: JSON.stringify(body),
     });
@@ -282,8 +283,7 @@ export class GeminiProvider implements Provider {
     }
 
     const action = isStream ? "streamGenerateContent?alt=sse" : "generateContent";
-    const separator = action.includes("?") ? "&" : "?";
-    const url = `${this.baseUrl}/models/${useModel}:${action}${separator}key=${this.apiKey}`;
+    const url = `${this.baseUrl}/models/${useModel}:${action}`;
 
     return { body, url, sanitized };
   }
@@ -291,7 +291,10 @@ export class GeminiProvider implements Provider {
   async textChat(params: ProviderChatParams): Promise<LLMResponse> {
     const { abortSignal } = params;
     const { body, url, sanitized } = await this.prepareRequest(params, false);
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "x-goog-api-key": this.apiKey,
+    };
 
     const response = await withRetry(
       async () => {
@@ -317,7 +320,10 @@ export class GeminiProvider implements Provider {
   ): AsyncGenerator<LLMResponse, void, unknown> {
     const { abortSignal } = params;
     const { body, url } = await this.prepareRequest(params, true);
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "x-goog-api-key": this.apiKey,
+    };
 
     const response = await withRetry(
       async () => {

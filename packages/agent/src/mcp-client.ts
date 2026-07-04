@@ -1,5 +1,6 @@
 import path from "path";
 import type { CallToolResult } from "./types.js";
+import { safeFetch } from "@yachiyo/common/ssrf-guard.js";
 
 // ---- Custom Error Types ----
 
@@ -606,7 +607,9 @@ export async function quickTestMcpConnection(
           clientInfo: { name: "test-client", version: "1.0.0" },
         },
       };
-      const response = await fetch(url, {
+      // safeFetch validates the user-configured URL against private/reserved
+      // IP ranges to prevent SSRF via malicious MCP server configs.
+      const response = await safeFetch(url, {
         method: "POST",
         headers: {
           ...headers,
@@ -620,7 +623,7 @@ export async function quickTestMcpConnection(
       if (response.ok) return [true, ""];
       return [false, `HTTP ${response.status}: ${response.statusText}`];
     } else {
-      const response = await fetch(url, {
+      const response = await safeFetch(url, {
         method: "GET",
         headers: {
           ...headers,

@@ -7,6 +7,7 @@
 import { readFile, writeFile, mkdir, unlink } from "fs/promises";
 import { join, extname } from "path";
 import { tmpdir } from "os";
+import { safeFetch } from "./ssrf-guard.js";
 
 // 图片压缩阈值（字节）：超过此大小的图片会被压缩
 const IMAGE_COMPRESS_THRESHOLD = 60 * 1024; // 60KB
@@ -81,8 +82,10 @@ export async function downloadBytes(url: string, timeoutMs: number = DEFAULT_DOW
   if (url.includes("multimedia.nt.qq.com.cn")) {
     headers["Referer"] = "https://web.qq.com/";
   }
-  const response = await fetch(url, {
-    redirect: "follow",
+  // safeFetch validates URL scheme + DNS-resolved IPs against private/reserved
+  // ranges (SSRF defense-in-depth). It also follows redirects safely, re-validating
+  // each hop. The signal-based timeout is preserved.
+  const response = await safeFetch(url, {
     headers,
     signal: AbortSignal.timeout(timeoutMs),
   });

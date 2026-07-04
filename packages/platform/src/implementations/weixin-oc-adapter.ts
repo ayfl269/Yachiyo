@@ -76,6 +76,24 @@ function generateWechatUinHeader(): string {
 }
 
 // ── AES-ECB Helpers ──
+//
+// SECURITY NOTE: AES-128-ECB is required by the WeChat iLink Bot media-download
+// protocol. The iLink gateway derives a per-bot media AES key and decrypts
+// uploaded media using AES-128-ECB with PKCS#7 padding, and there is no
+// negotiation of mode/IV on the wire. We cannot unilaterally switch to a
+// stronger mode (e.g. AES-GCM or AES-CBC) without breaking interop with the
+// official gateway. ECB here is acceptable because:
+//   1. It is used only for individual media-file encryption at rest on the
+//      WeChat CDN, not for general-purpose transport encryption (transport
+//      uses HTTPS).
+//   2. Plaintexts are high-entropy media bytes (already-compressed image/audio
+//      data), not structured data with low-entropy block patterns, so ECB's
+//      classic pattern-leakage weakness has minimal practical impact.
+//   3. Each media file uses the bot's single derived key; we never encrypt
+//      multiple distinct messages with ECB under the same key in a way that
+//      would enable known-plaintext attacks across files.
+// Do not "fix" this by changing the cipher mode without a protocol upgrade
+// from WeChat.
 
 function pkcs7Pad(data: Buffer, blockSize: number = 16): Buffer {
   const padLen = blockSize - (data.length % blockSize);

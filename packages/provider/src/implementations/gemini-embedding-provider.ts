@@ -32,10 +32,13 @@ export class GeminiEmbeddingProvider extends EmbeddingProvider {
   async getEmbedding(text: string): Promise<number[]> {
     const data = await withRetry(async () => {
       const res = await fetch(
-        `${this.baseUrl}/models/${this.model}:embedContent?key=${this.apiKey}`,
+        `${this.baseUrl}/models/${this.model}:embedContent`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": this.apiKey,
+          },
           body: JSON.stringify({
             model: `models/${this.model}`,
             content: { parts: [{ text }] },
@@ -75,10 +78,13 @@ export class GeminiEmbeddingProvider extends EmbeddingProvider {
 
     const data = await withRetry(async () => {
       const res = await fetch(
-        `${this.baseUrl}/models/${this.model}:batchEmbedContents?key=${this.apiKey}`,
+        `${this.baseUrl}/models/${this.model}:batchEmbedContents`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": this.apiKey,
+          },
           body: JSON.stringify({ requests }),
         },
       );
