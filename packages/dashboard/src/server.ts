@@ -3346,25 +3346,25 @@ export class DashboardServer {
    */
   private async fetchModelsFromProvider(type: string, config: Record<string, any>): Promise<string[]> {
     const apiKey = config.apiKey;
-    const baseUrl = config.baseUrl;
+    const rawBaseUrl = (config.baseUrl || "").replace(/\/+$/, "");
 
     // OpenAI 兼容接口 (openai, openai_responses)
     if (type === "openai" || type === "openai_responses") {
-      const url = `${baseUrl || "https://api.openai.com/v1"}/models`;
-      // safeFetch validates baseUrl against private/reserved IP ranges to
-      // prevent SSRF via malicious provider configs pointing to internal services.
+      const url = `${rawBaseUrl || "https://api.openai.com/v1"}/models`;
+      console.log(`[Dashboard] OpenAI: fetching models from ${url}`);
       const response = await safeFetch(url, {
         headers: { Authorization: `Bearer ${apiKey}` },
         signal: AbortSignal.timeout(15000),
       });
 
       if (!response.ok) {
-        throw new Error(`获取模型列表失败 (${response.status}): ${response.statusText}`);
+        const errBody = await response.text().catch(() => "");
+        throw new Error(`获取模型列表失败 (${response.status}): ${errBody.substring(0, 200) || response.statusText}`);
       }
 
       const data = await response.json() as any;
       if (!Array.isArray(data.data)) {
-        return [];
+        throw new Error(`模型列表响应格式异常: 期望 data 数组，得到 ${typeof data.data}。可能是 baseUrl 或 type 配置不匹配。`);
       }
 
       // 过滤出聊天模型，按 id 排序
@@ -3374,17 +3374,16 @@ export class DashboardServer {
         .sort();
     }
 
-    // Google Gemini — 始终使用 Gemini 原生格式 /v1beta/models?key=xxx
+    // Google Gemini — 始终使用 Gemini 原生格式 /v1beta/models
+    // 使用 x-goog-api-key header 鉴权（与 gemini-provider.ts 保持一致，避免 key 泄露到 URL/日志）
     // 如需使用 OpenAI 兼容代理获取 Gemini 模型，请将 Provider 类型选为 openai/openai_responses
     if (type === "gemini") {
-      const cleanBase = (baseUrl || "").replace(/\/+$/, "");
-      // Google 官方端点（baseUrl 为空或显式指向 google 官方）
       let geminiBase: string;
-      if (!cleanBase || cleanBase.includes("generativelanguage.googleapis.com")) {
+      if (!rawBaseUrl || rawBaseUrl.includes("generativelanguage.googleapis.com")) {
         geminiBase = "https://generativelanguage.googleapis.com/v1beta";
       } else {
         // 强制使用 /v1beta 路径：剥离任何已有的版本后缀（/v1、/v1beta 等），统一追加 /v1beta
-        let stripped = cleanBase;
+        let stripped = rawBaseUrl;
         const versionSuffixes = ["/v1beta", "/v1", "/v2beta", "/v2"];
         for (const suffix of versionSuffixes) {
           if (stripped.endsWith(suffix)) {
@@ -3394,10 +3393,12 @@ export class DashboardServer {
         }
         geminiBase = `${stripped}/v1beta`;
       }
-      const url = `${geminiBase}/models?key=${encodeURIComponent(apiKey)}`;
+      const url = `${geminiBase}/models`;
       console.log(`[Dashboard] Gemini: fetching models from ${url}`);
-      // safeFetch prevents SSRF via malicious baseUrl pointing to internal services.
-      const response = await safeFetch(url, { signal: AbortSignal.timeout(15000) });
+      const response = await safeFetch(url, {
+        headers: { "x-goog-api-key": apiKey },
+        signal: AbortSignal.timeout(15000),
+      });
       const respText = await response.text();
 
       if (!response.ok) {
@@ -3412,7 +3413,7 @@ export class DashboardServer {
 
       const data = JSON.parse(respText) as any;
       if (!Array.isArray(data.models)) {
-        return [];
+        throw new Error(`模型列表响应格式异常: 期望 models 数组，得到 ${typeof data.models}。可能是 baseUrl 或 type 配置不匹配。`);
       }
 
       // 只返回支持 generateContent 的模型
@@ -3424,8 +3425,8 @@ export class DashboardServer {
 
     // Anthropic Claude
     if (type === "anthropic") {
-      const url = `${baseUrl || "https://api.anthropic.com"}/v1/models`;
-      // safeFetch prevents SSRF via malicious baseUrl pointing to internal services.
+      const url = `${rawBaseUrl || "https://api.anthropic.com"}/v1/models`;
+      console.log(`[Dashboard] Anthropic: fetching models from ${url}`);
       const response = await safeFetch(url, {
         headers: {
           "x-api-key": apiKey,
@@ -3436,12 +3437,13 @@ export class DashboardServer {
       });
 
       if (!response.ok) {
-        throw new Error(`获取模型列表失败 (${response.status}): ${response.statusText}`);
+        const errBody = await response.text().catch(() => "");
+        throw new Error(`获取模型列表失败 (${response.status}): ${errBody.substring(0, 200) || response.statusText}`);
       }
 
       const data = await response.json() as any;
       if (!Array.isArray(data.data)) {
-        return [];
+        throw new Error(`模型列表响应格式异常: 期望 data 数组，得到 ${typeof data.data}。可能是 baseUrl 或 type 配置不匹配。`);
       }
 
       return data.data.map((m: any) => m.id || "").sort();
