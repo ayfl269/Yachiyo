@@ -152,7 +152,7 @@ function testMessageModel(): void {
   // Serialize / Deserialize
   const serialized = serializeMessage(userMsg);
   const deserialized = validateMessage(serialized);
-  console.log("  序列化/反序列化:", deserialized.role === userMsg.role);
+  assert(deserialized.role === userMsg.role, "序列化/反序列化");
 
   // bindCheckpointMessages / dumpMessagesWithCheckpoints
   const history = [
@@ -345,7 +345,7 @@ function testRoundUtils(): void {
     && rounds[1].length === 2 && rounds[1][0].role === "user" && rounds[1][1].role === "assistant"
     && rounds[2].length === 2 && rounds[2][0].role === "user" && rounds[2][1].role === "assistant"
     && rounds[3].length === 2 && rounds[3][0].role === "user" && rounds[3][1].role === "assistant";
-  console.log("  轮次分割正确:", pass);
+  assert(pass, "轮次分割正确");
 
   // 带工具调用的消息
   const toolMessages: Message[] = [
@@ -365,12 +365,12 @@ function testRoundUtils(): void {
   const toolPass = toolRounds.length === 2
     && toolRounds[0].length === 4
     && toolRounds[1].length === 2;
-  console.log("  工具调用轮次分割正确:", toolPass);
+  assert(toolPass, "工具调用轮次分割正确");
 
   // roundsToText
   const text = roundsToText(rounds);
-  console.log("  roundsToText 包含 'Round 1':", text.includes("Round 1"));
-  console.log("  roundsToText 包含 'Round 3':", text.includes("Round 3"));
+  assert(text.includes("Round 1"), "roundsToText 包含 'Round 1'");
+  assert(text.includes("Round 3"), "roundsToText 包含 'Round 3'");
 
   console.log("  ✅ 轮次分割工具测试通过");
 }
@@ -409,10 +409,10 @@ async function testLLMSummaryCompressor(): Promise<void> {
 
   // Test shouldCompress
   const shouldNot = compressor.shouldCompress([], 100, 4096);
-  console.log("  shouldCompress(100/4096):", shouldNot, "(expect false)");
+  assert(!shouldNot, "shouldCompress(100/4096) 返回 false");
 
   const should = compressor.shouldCompress([], 3500, 4096);
-  console.log("  shouldCompress(3500/4096):", should, "(expect true)");
+  assert(should, "shouldCompress(3500/4096) 返回 true");
 
   // Test compress with enough messages
   const messages: Message[] = [
@@ -432,9 +432,9 @@ async function testLLMSummaryCompressor(): Promise<void> {
   console.log("  压缩前消息数:", messages.length);
   console.log("  压缩后消息数:", compressed.length);
   console.log("  LLM 调用次数:", callCount);
-  console.log("  压缩后包含摘要:", compressed.some(m => typeof m.content === "string" && m.content.includes("Our previous history conversation summary")));
-  console.log("  压缩后保留 system 消息:", compressed[0]?.role === "system");
-  console.log("  压缩后最后一条是用户消息或助手回复:", ["user", "assistant"].includes(compressed[compressed.length - 1]?.role));
+  assert(compressed.some(m => typeof m.content === "string" && m.content.includes("Our previous history conversation summary")), "压缩后包含摘要");
+  assert(compressed[0]?.role === "system", "压缩后保留 system 消息");
+  assert(["user", "assistant"].includes(compressed[compressed.length - 1]?.role), "压缩后最后一条是用户消息或助手回复");
 
   // Test with too few messages (should return original)
   callCount = 0;
@@ -444,12 +444,12 @@ async function testLLMSummaryCompressor(): Promise<void> {
     { role: "assistant", content: "Hello" },
   ];
   const shortResult = await compressor.compress(shortMessages);
-  console.log("  短消息不压缩:", shortResult.length === shortMessages.length && callCount === 0);
+  assert(shortResult.length === shortMessages.length && callCount === 0, "短消息不压缩");
 
   // Test TruncateByTurnsCompressor
   const truncateCompressor = new TruncateByTurnsCompressor(1, 0.82);
   const shouldTruncate = truncateCompressor.shouldCompress([], 3500, 4096);
-  console.log("  TruncateByTurnsCompressor shouldCompress:", shouldTruncate);
+  assert(shouldTruncate, "TruncateByTurnsCompressor shouldCompress");
 
   const truncatedResult = await truncateCompressor.compress(messages);
   console.log("  TruncateByTurnsCompressor 压缩:", messages.length, "→", truncatedResult.length);
@@ -486,7 +486,7 @@ function testContextConfig(): void {
   const pass = defaultConfig.llmCompressKeepRecentRatio === 0.15
     && customConfig.llmCompressKeepRecentRatio === 0.2
     && customConfig.maxContextTokens === 8192;
-  console.log("  ContextConfig 新字段测试:", pass ? "✅ 通过" : "❌ 失败");
+  assert(pass, "ContextConfig 新字段测试");
 }
 
 // ============================================================
@@ -524,41 +524,41 @@ function testMcpValidation(): void {
   // 合法配置
   try {
     validateMcpStdioConfig({ command: "python", args: ["-m", "mcp_server"] });
-    console.log("  合法 python 命令: ✅ 通过");
+    assert(true, "合法 python 命令");
   } catch (e) {
-    console.log("  合法 python 命令: ❌ 失败", e);
+    assert(false, "合法 python 命令");
   }
 
   // 危险命令
   try {
     validateMcpStdioConfig({ command: "bash" });
-    console.log("  危险 bash 命令: ❌ 应该被拦截");
+    assert(false, "危险 bash 命令应该被拦截");
   } catch (e) {
-    console.log("  危险 bash 命令: ✅ 已拦截:", (e as Error).message.slice(0, 50));
+    assert(true, "危险 bash 命令已拦截");
   }
 
   // Python -c 注入
   try {
     validateMcpStdioConfig({ command: "python", args: ["-c", "import os; os.system('rm -rf /')"] });
-    console.log("  Python -c 注入: ❌ 应该被拦截");
+    assert(false, "Python -c 注入应该被拦截");
   } catch (e) {
-    console.log("  Python -c 注入: ✅ 已拦截:", (e as Error).message.slice(0, 60));
+    assert(true, "Python -c 注入已拦截");
   }
 
   // Shell 元字符
   try {
     validateMcpStdioConfig({ command: "node; rm -rf /" });
-    console.log("  Shell 元字符: ❌ 应该被拦截");
+    assert(false, "Shell 元字符应该被拦截");
   } catch (e) {
-    console.log("  Shell 元字符: ✅ 已拦截:", (e as Error).message.slice(0, 50));
+    assert(true, "Shell 元字符已拦截");
   }
 
   // URL 配置 (跳过校验)
   try {
     validateMcpStdioConfig({ url: "http://localhost:8080/mcp" });
-    console.log("  URL 配置: ✅ 跳过 stdio 校验");
+    assert(true, "URL 配置跳过 stdio 校验");
   } catch (e) {
-    console.log("  URL 配置: ❌ 不应校验", e);
+    assert(false, "URL 配置跳过 stdio 校验");
   }
 
   console.log("  ✅ MCP Stdio 校验测试通过");
@@ -584,13 +584,14 @@ function testModalities(): void {
   const [noImage, stats1] = sanitizeContextsByModalities(messages, ["text", "tool_use"]);
   const userContent = (noImage[0] as Record<string, unknown>).content as Record<string, unknown>[];
   const hasImagePlaceholder = userContent.some((p: Record<string, unknown>) => p.type === "text" && p.text === "[Image]");
-  console.log("  不支持 image → [Image] 占位:", hasImagePlaceholder);
+  assert(hasImagePlaceholder, "不支持 image → [Image] 占位");
 
   // 不支持 tool_use
   const [noTool, stats2] = sanitizeContextsByModalities(messages, ["text", "image"]);
   const hasToolResult = noTool.some((m: Record<string, unknown>) => (m.role as string) === "tool");
   const hasToolCalls = noTool.some((m: Record<string, unknown>) => "tool_calls" in m);
-  console.log("  不支持 tool_use → tool 消息转换:", !hasToolResult, "tool_calls 移除:", !hasToolCalls);
+  assert(!hasToolResult, "不支持 tool_use → tool 消息转换");
+  assert(!hasToolCalls, "不支持 tool_use → tool_calls 移除");
 
   console.log("  ✅ Modalities 过滤测试通过");
 }
@@ -721,8 +722,8 @@ async function testErrorResponseHandling(): Promise<void> {
     responses.push(response);
   }
 
-  console.log("  Runner 状态已完成:", runner.done());
-  console.log("  Runner 状态是否为 ERROR:", (runner as any).state === AgentState.ERROR);
+  assert(runner.done(), "Runner 状态已完成");
+  assert((runner as any).state === AgentState.ERROR, "Runner 状态是否为 ERROR");
 
   const finalResp = runner.getFinalLlmResp();
   console.log("  最终回复 role:", finalResp?.role);
@@ -756,7 +757,7 @@ async function testToolImageCache(): Promise<void> {
 
   // 读取图片
   const result = await cache.getImageBase64ByPath(cached.filePath, "image/png");
-  console.log("  读取图片:", result ? "成功" : "失败");
+  assert(!!result, "读取图片");
 
   // 清理过期
   const cleaned = await cache.cleanupExpired();
@@ -791,13 +792,13 @@ async function testNewComputerTools(): Promise<void> {
 
   const listResult = await listDirTool.handler!(adminCtx, undefined, false, 3) as CallToolResult;
   const listText = listResult.content[0] && "text" in listResult.content[0] ? listResult.content[0].text : "";
-  console.log("  list_dir 结果包含 hello.txt:", listText.includes("hello.txt"));
-  console.log("  list_dir 结果包含 subdir/:", listText.includes("subdir/"));
+  assert(listText.includes("hello.txt"), "list_dir 结果包含 hello.txt");
+  assert(listText.includes("subdir/"), "list_dir 结果包含 subdir/");
 
   // 递归列表
   const listRecursive = await listDirTool.handler!(adminCtx, undefined, true, 3) as CallToolResult;
   const listRecText = listRecursive.content[0] && "text" in listRecursive.content[0] ? listRecursive.content[0].text : "";
-  console.log("  list_dir 递归包含 nested.txt:", listRecText.includes("nested.txt"));
+  assert(listRecText.includes("nested.txt"), "list_dir 递归包含 nested.txt");
 
   // --- file_move_tool ---
   const moveTool = createFileMoveTool(testDir);
@@ -805,13 +806,13 @@ async function testNewComputerTools(): Promise<void> {
 
   const moveResult = await moveTool.handler!(adminCtx, "hello.txt", "renamed.txt") as CallToolResult;
   const moveText = moveResult.content[0] && "text" in moveResult.content[0] ? moveResult.content[0].text : "";
-  console.log("  file_move 结果:", moveText.includes("Successfully moved") ? "成功" : moveText);
+  assert(moveText.includes("Successfully moved"), "file_move 结果");
 
   // 验证移动后原文件不存在
   const listAfterMove = await listDirTool.handler!(adminCtx, undefined, false, 3) as CallToolResult;
   const listAfterMoveText = listAfterMove.content[0] && "text" in listAfterMove.content[0] ? listAfterMove.content[0].text : "";
-  console.log("  移动后包含 renamed.txt:", listAfterMoveText.includes("renamed.txt"));
-  console.log("  移动后不含 hello.txt:", !listAfterMoveText.includes("hello.txt"));
+  assert(listAfterMoveText.includes("renamed.txt"), "移动后包含 renamed.txt");
+  assert(!listAfterMoveText.includes("hello.txt"), "移动后不含 hello.txt");
 
   // --- file_delete_tool ---
   const deleteTool = createFileDeleteTool(testDir);
@@ -819,7 +820,7 @@ async function testNewComputerTools(): Promise<void> {
 
   const deleteResult = await deleteTool.handler!(adminCtx, "renamed.txt") as CallToolResult;
   const deleteText = deleteResult.content[0] && "text" in deleteResult.content[0] ? deleteResult.content[0].text : "";
-  console.log("  file_delete 结果:", deleteText.includes("Successfully deleted") ? "成功" : deleteText);
+  assert(deleteText.includes("Successfully deleted"), "file_delete 结果");
 
   // --- execute_node ---
   const nodeTool = createLocalNodeTool(testDir);
@@ -827,13 +828,13 @@ async function testNewComputerTools(): Promise<void> {
 
   const nodeResult = await nodeTool.handler!(adminCtx, "console.log('Hello from Node.js!'); process.stdout.write('42');") as CallToolResult;
   const nodeText = nodeResult.content[0] && "text" in nodeResult.content[0] ? nodeResult.content[0].text : "";
-  console.log("  execute_node 包含 'Hello from Node.js!':", nodeText.includes("Hello from Node.js!"));
-  console.log("  execute_node 包含 '42':", nodeText.includes("42"));
+  assert(nodeText.includes("Hello from Node.js!"), "execute_node 包含 'Hello from Node.js!'");
+  assert(nodeText.includes("42"), "execute_node 包含 '42'");
 
   // 静默模式
   const silentResult = await nodeTool.handler!(adminCtx, "console.log('silent');", true) as CallToolResult;
   const silentText = silentResult.content[0] && "text" in silentResult.content[0] ? silentResult.content[0].text : "";
-  console.log("  execute_node 静默模式:", silentText.includes("silent mode") ? "成功" : silentText);
+  assert(silentText.includes("silent mode"), "execute_node 静默模式");
 
   // 清理
   const { rm } = await import("fs/promises");
@@ -934,7 +935,7 @@ async function testMemoryTool(): Promise<void> {
   // save
   const saveResult = await memoryTool.handler!(adminCtx, "save", "test_key", "Hello Memory", ["test", "demo"]) as CallToolResult;
   const saveText = saveResult.content[0] && "text" in saveResult.content[0] ? saveResult.content[0].text : "";
-  console.log("  save 结果:", saveText.includes("saved") ? "成功" : saveText);
+  assert(saveText.includes("saved"), "save 结果");
 
   // save another
   await memoryTool.handler!(adminCtx, "save", "another_key", "Another value", ["test"]) as CallToolResult;
@@ -942,33 +943,33 @@ async function testMemoryTool(): Promise<void> {
   // recall
   const recallResult = await memoryTool.handler!(adminCtx, "recall", "test_key") as CallToolResult;
   const recallText = recallResult.content[0] && "text" in recallResult.content[0] ? recallResult.content[0].text : "";
-  console.log("  recall 包含 'Hello Memory':", recallText.includes("Hello Memory"));
-  console.log("  recall 包含 tags:", recallText.includes("test") && recallText.includes("demo"));
+  assert(recallText.includes("Hello Memory"), "recall 包含 'Hello Memory'");
+  assert(recallText.includes("test") && recallText.includes("demo"), "recall 包含 tags");
 
   // search
   const searchResult = await memoryTool.handler!(adminCtx, "search", undefined, undefined, undefined, "Hello") as CallToolResult;
   const searchText = searchResult.content[0] && "text" in searchResult.content[0] ? searchResult.content[0].text : "";
-  console.log("  search 'Hello' 有结果:", searchText.includes("test_key"));
+  assert(searchText.includes("test_key"), "search 'Hello' 有结果");
 
   // search by tag
   const tagSearchResult = await memoryTool.handler!(adminCtx, "search", undefined, undefined, undefined, "demo") as CallToolResult;
   const tagSearchText = tagSearchResult.content[0] && "text" in tagSearchResult.content[0] ? tagSearchResult.content[0].text : "";
-  console.log("  search 'demo' 有结果:", tagSearchResult.content.length > 0);
+  assert(tagSearchResult.content.length > 0, "search 'demo' 有结果");
 
   // list
   const listResult = await memoryTool.handler!(adminCtx, "list", undefined, undefined, undefined, undefined, 10) as CallToolResult;
   const listText = listResult.content[0] && "text" in listResult.content[0] ? listResult.content[0].text : "";
-  console.log("  list 包含 2 条:", listText.includes("2 memory"));
+  assert(listText.includes("2 memory"), "list 包含 2 条");
 
   // delete
   const deleteResult = await memoryTool.handler!(adminCtx, "delete", "another_key") as CallToolResult;
   const deleteText = deleteResult.content[0] && "text" in deleteResult.content[0] ? deleteResult.content[0].text : "";
-  console.log("  delete 结果:", deleteText.includes("deleted") ? "成功" : deleteText);
+  assert(deleteText.includes("deleted"), "delete 结果");
 
   // clear
   const clearResult = await memoryTool.handler!(adminCtx, "clear") as CallToolResult;
   const clearText = clearResult.content[0] && "text" in clearResult.content[0] ? clearResult.content[0].text : "";
-  console.log("  clear 结果:", clearText.includes("Cleared") ? "成功" : clearText);
+  assert(clearText.includes("Cleared"), "clear 结果");
 
   // 清理
   await rm(testDir, { recursive: true });
@@ -992,22 +993,22 @@ async function testCodeSearchTool(): Promise<void> {
   // 按符号名搜索
   const searchByName = await codeSearchTool.handler!(adminCtx, "createAgent", undefined, undefined, undefined, undefined, 5) as CallToolResult;
   const nameText = searchByName.content[0] && "text" in searchByName.content[0] ? searchByName.content[0].text : "";
-  console.log("  搜索 'createAgent' 有结果:", !nameText.includes("No symbols") && !nameText.includes("error:"));
+  assert(!nameText.includes("No symbols") && !nameText.includes("error:"), "搜索 'createAgent' 有结果");
 
   // 按符号类型搜索
   const searchByType = await codeSearchTool.handler!(adminCtx, undefined, "interface", "typescript", undefined, "*.ts", 5) as CallToolResult;
   const typeText = searchByType.content[0] && "text" in searchByType.content[0] ? searchByType.content[0].text : "";
-  console.log("  搜索 interface 类型有结果:", !typeText.includes("No symbols"));
+  assert(!typeText.includes("No symbols"), "搜索 interface 类型有结果");
 
   // 搜索 class 类型
   const searchClass = await codeSearchTool.handler!(adminCtx, "ToolSet", "class", "typescript", undefined, "*.ts", 5) as CallToolResult;
   const classText = searchClass.content[0] && "text" in searchClass.content[0] ? searchClass.content[0].text : "";
-  console.log("  搜索 class 'ToolSet' 有结果:", !classText.includes("No symbols"));
+  assert(!classText.includes("No symbols"), "搜索 class 'ToolSet' 有结果");
 
   // 错误参数
   const noParams = await codeSearchTool.handler!(adminCtx) as CallToolResult;
   const noParamsText = noParams.content[0] && "text" in noParams.content[0] ? noParams.content[0].text : "";
-  console.log("  无参数调用返回错误:", noParamsText.includes("error:"));
+  assert(noParamsText.includes("error:"), "无参数调用返回错误");
 
   console.log("  ✅ Code Search Tool 测试通过");
 }
@@ -1029,11 +1030,11 @@ async function testDynamicSubAgentCreate(): Promise<void> {
 
   const createResult = await createTool.handler!(adminCtx, "code-reviewer", "You are a code review expert. Analyze code for bugs, style issues, and best practices.", "Code review sub-agent", ["file_read_tool", "grep_tool"]) as CallToolResult;
   const createText = createResult.content[0] && "text" in createResult.content[0] ? createResult.content[0].text : "";
-  console.log("  create_subagent 成功:", createText.includes("created successfully"));
-  console.log("  包含 handoff 工具名:", createText.includes("transfer_to_code-reviewer"));
+  assert(createText.includes("created successfully"), "create_subagent 成功");
+  assert(createText.includes("transfer_to_code-reviewer"), "包含 handoff 工具名");
 
   // 验证注册
-  console.log("  registry 包含 code-reviewer:", dynamicSubAgentRegistry.has("code-reviewer"));
+  assert(dynamicSubAgentRegistry.has("code-reviewer"), "registry 包含 code-reviewer");
   const entry = dynamicSubAgentRegistry.get("code-reviewer");
   console.log("  handoff 名称:", entry?.handoff.name);
   console.log("  agent instructions:", entry?.agent.instructions?.slice(0, 40));
@@ -1041,17 +1042,17 @@ async function testDynamicSubAgentCreate(): Promise<void> {
   // 创建第二个子代理
   const createResult2 = await createTool.handler!(adminCtx, "translator", "You are a professional translator.", undefined) as CallToolResult;
   const createText2 = createResult2.content[0] && "text" in createResult2.content[0] ? createResult2.content[0].text : "";
-  console.log("  创建第二个子代理成功:", createText2.includes("created successfully"));
+  assert(createText2.includes("created successfully"), "创建第二个子代理成功");
 
   // --- 重名检测 ---
   const dupResult = await createTool.handler!(adminCtx, "code-reviewer", "Duplicate", undefined) as CallToolResult;
   const dupText = dupResult.content[0] && "text" in dupResult.content[0] ? dupResult.content[0].text : "";
-  console.log("  重名检测:", dupText.includes("already exists"));
+  assert(dupText.includes("already exists"), "重名检测");
 
   // --- 无效名称 ---
   const invalidResult = await createTool.handler!(adminCtx, "bad name!", "Test", undefined) as CallToolResult;
   const invalidText = invalidResult.content[0] && "text" in invalidResult.content[0] ? invalidResult.content[0].text : "";
-  console.log("  无效名称检测:", invalidText.includes("Invalid"));
+  assert(invalidText.includes("Invalid"), "无效名称检测");
 
   // --- list_subagents ---
   const listTool = createListSubAgentsTool();
@@ -1059,9 +1060,9 @@ async function testDynamicSubAgentCreate(): Promise<void> {
 
   const listResult = await listTool.handler!(adminCtx) as CallToolResult;
   const listText = listResult.content[0] && "text" in listResult.content[0] ? listResult.content[0].text : "";
-  console.log("  list 包含 2 个:", listText.includes("2"));
-  console.log("  list 包含 code-reviewer:", listText.includes("code-reviewer"));
-  console.log("  list 包含 translator:", listText.includes("translator"));
+  assert(listText.includes("2"), "list 包含 2 个");
+  assert(listText.includes("code-reviewer"), "list 包含 code-reviewer");
+  assert(listText.includes("translator"), "list 包含 translator");
 
   // --- getSubAgentManagementTools ---
   const mgmtTools = getSubAgentManagementTools();
@@ -1079,16 +1080,16 @@ async function testDynamicSubAgentCreate(): Promise<void> {
 
   const deleteResult = await deleteTool.handler!(adminCtx, "translator") as CallToolResult;
   const deleteText = deleteResult.content[0] && "text" in deleteResult.content[0] ? deleteResult.content[0].text : "";
-  console.log("  删除成功:", deleteText.includes("deleted"));
+  assert(deleteText.includes("deleted"), "删除成功");
 
   // 验证删除后
-  console.log("  删除后 registry 不含 translator:", !dynamicSubAgentRegistry.has("translator"));
-  console.log("  删除后 registry 仍含 code-reviewer:", dynamicSubAgentRegistry.has("code-reviewer"));
+  assert(!dynamicSubAgentRegistry.has("translator"), "删除后 registry 不含 translator");
+  assert(dynamicSubAgentRegistry.has("code-reviewer"), "删除后 registry 仍含 code-reviewer");
 
   // 删除不存在的
   const deleteNotFound = await deleteTool.handler!(adminCtx, "nonexistent") as CallToolResult;
   const deleteNotFoundText = deleteNotFound.content[0] && "text" in deleteNotFound.content[0] ? deleteNotFound.content[0].text : "";
-  console.log("  删除不存在返回错误:", deleteNotFoundText.includes("not found"));
+  assert(deleteNotFoundText.includes("not found"), "删除不存在返回错误");
 
   // 清理
   dynamicSubAgentRegistry.clear();
@@ -1117,7 +1118,7 @@ async function testInMemoryVectorStoreDimensionValidation(): Promise<void> {
   // 1. Same dimension query should succeed
   const results = await store.search([0.1, 0.2, 0.3], 5, "kb-1");
   console.log("  维度相同时搜索结果数量:", results.length);
-  console.log("  维度相同时得分是否非空:", results[0]?.score != null);
+  assert(results[0]?.score != null, "维度相同时得分是否非空");
 
   // 2. Mismatched dimension query should throw error
   let threwError = false;
@@ -1127,7 +1128,7 @@ async function testInMemoryVectorStoreDimensionValidation(): Promise<void> {
     threwError = true;
     console.log("  维度不同时捕获到预期错误:", (e as Error).message);
   }
-  console.log("  维度校验成功触发错误:", threwError);
+  assert(threwError, "维度校验成功触发错误");
 
   console.log("  ✅ InMemoryVectorStore 维度校验测试通过");
 }

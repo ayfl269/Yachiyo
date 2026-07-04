@@ -7,6 +7,20 @@ import type {
   MCPServerConfigMap,
 } from "@yachiyo/provider/manager.js";
 
+// C-21 fix: global assert mechanism for CI pass/fail detection
+let passCount = 0;
+let failCount = 0;
+
+function assert(condition: boolean, message: string): void {
+  if (condition) {
+    passCount++;
+    console.log(`  ✅ ${message}`);
+  } else {
+    failCount++;
+    console.error(`  ❌ ${message}`);
+  }
+}
+
 // ============================================================
 // 1. 测试: ProviderManager 基础功能
 // ============================================================
@@ -20,10 +34,10 @@ async function testProviderManagerBasic(): Promise<void> {
   const manager = new ProviderManager();
 
   // 初始状态
-  console.log("  初始 chat providers:", manager.providerInsts.length);
-  console.log("  初始 embedding providers:", manager.embeddingInsts.length);
-  console.log("  初始 rerank providers:", manager.rerankInsts.length);
-  console.log("  初始 instMap:", manager.instMap.size);
+  assert(manager.providerInsts.length === 0, "初始 chat providers 为 0");
+  assert(manager.embeddingInsts.length === 0, "初始 embedding providers 为 0");
+  assert(manager.rerankInsts.length === 0, "初始 rerank providers 为 0");
+  assert(manager.instMap.size === 0, "初始 instMap 为 0");
 
   // 注册 Provider（mock）
   const mockProvider = {
@@ -32,26 +46,26 @@ async function testProviderManagerBasic(): Promise<void> {
   } as any;
   manager.registerProvider(mockProvider);
 
-  console.log("  注册后 chat providers:", manager.providerInsts.length);
-  console.log("  注册后 instMap:", manager.instMap.size);
+  assert(manager.providerInsts.length === 1, "注册后 chat providers 为 1");
+  assert(manager.instMap.size === 1, "注册后 instMap 为 1");
 
   // ID 查找
   const found = manager.getProviderById("mock-openai");
-  console.log("  通过 ID 查找:", found !== null ? "✅" : "❌");
+  assert(found !== null, "通过 ID 查找成功");
 
   // 不存在的 ID
   const notFound = manager.getProviderById("nonexistent");
-  console.log("  查找不存在的 ID:", notFound === null ? "✅ (返回 null)" : "❌");
+  assert(notFound === null, "查找不存在的 ID 返回 null");
 
   // getUsingProvider
   const { ProviderType } = await import("@yachiyo/provider/types.js");
   const using = manager.getUsingProvider(ProviderType.CHAT_COMPLETION);
-  console.log("  getUsingProvider:", using !== null ? "✅" : "❌");
+  assert(using !== null, "getUsingProvider 返回非 null");
 
   // 默认 Provider 设置
   manager.setDefaultProvider("mock-openai");
   const defaultUsing = manager.getUsingProvider(ProviderType.CHAT_COMPLETION);
-  console.log("  setDefaultProvider 后 getUsingProvider:", defaultUsing?.providerConfig?.id === "mock-openai" ? "✅" : "❌");
+  assert(defaultUsing?.providerConfig?.id === "mock-openai", "setDefaultProvider 后 getUsingProvider 返回正确");
 
   console.log("  ✅ ProviderManager 基础功能测试通过");
 }
@@ -72,27 +86,25 @@ async function testProviderManagerCallbacks(): Promise<void> {
     events.push({ id: providerId, type: providerType, change: changeType });
   });
 
-  // 注册 Provider 触发 load 事件
+  // registerProvider 是低层注册方法，不触发 notifyChange
   const mockProvider1 = {
     providerConfig: { id: "cb-test-1" },
     async textChat() { return { role: "assistant" as const, completionText: "" }; },
   } as any;
   manager.registerProvider(mockProvider1);
 
-  // 手动触发回调测试
+  // 低层 registerProvider 不触发回调（只有 loadProvider 等动态方法才触发）
+  assert(events.length === 0, "registerProvider 不触发 change callback");
+
+  // 通过 hook 机制验证回调链路
   manager.registerProviderChangeHook((id, type, change) => {
     events.push({ id, type, change });
   });
 
-  // 注册第二个 provider 触发回调
-  const mockProvider2 = {
-    providerConfig: { id: "cb-test-2" },
-    async textChat() { return { role: "assistant" as const, completionText: "" }; },
-  } as any;
-  manager.registerProvider(mockProvider2);
-
-  console.log("  回调事件数量:", events.length);
-  console.log("  ✅ ProviderManager Change Callbacks 测试通过");
+  // 手动触发 notifyChange 验证 hook 被调用
+  const { ProviderType } = await import("@yachiyo/provider/types.js");
+  (manager as any).notifyChange("cb-test-1", ProviderType.CHAT_COMPLETION, "load");
+  assert(events.length > 0, "notifyChange 触发 hook 回调");
 }
 
 // ============================================================
@@ -124,10 +136,10 @@ async function testProviderManagerMCPIntegration(): Promise<void> {
 
   // 获取 MCP 配置
   const storedConfig = manager.getMcpServerConfig();
-  console.log("  MCP 配置已存储:", storedConfig !== null ? "✅" : "❌");
+  assert(storedConfig !== null, "MCP 配置已存储");
   console.log("  MCP 服务器数量:", storedConfig ? Object.keys(storedConfig).length : 0);
-  console.log("  包含 mcp-server-1:", storedConfig?.["mcp-server-1"] !== undefined ? "✅" : "❌");
-  console.log("  包含 mcp-server-2:", storedConfig?.["mcp-server-2"] !== undefined ? "✅" : "❌");
+  assert(storedConfig?.["mcp-server-1"] !== undefined, "包含 mcp-server-1");
+  assert(storedConfig?.["mcp-server-2"] !== undefined, "包含 mcp-server-2");
 
   // 重复初始化（应该跳过）
   console.log("  重复初始化测试:");
@@ -136,9 +148,7 @@ async function testProviderManagerMCPIntegration(): Promise<void> {
   // 终止后 MCP 配置被清除
   await manager.terminate();
   const afterTerminate = manager.getMcpServerConfig();
-  console.log("  终止后 MCP 配置:", afterTerminate === null ? "✅ (已清除)" : "❌");
-
-  console.log("  ✅ ProviderManager MCP 集成测试通过");
+  assert(afterTerminate === null, "终止后 MCP 配置 (已清除)");
 }
 
 // ============================================================
@@ -167,14 +177,14 @@ async function testProviderManagerDynamicLifecycle(): Promise<void> {
 
   try {
     await manager.loadProvider(openaiConfig);
-    console.log("  loadProvider (openai):", manager.instMap.has("test-openai-1") ? "✅" : "❌");
+    assert(manager.instMap.has("test-openai-1"), "loadProvider (openai)");
   } catch (e) {
     console.log("  loadProvider (openai) 可能需要真实 API key:", (e as Error).message?.slice(0, 60));
   }
 
   // loadProvider - 重复加载
   await manager.loadProvider({ type: "openai", id: "test-openai-1" });
-  console.log("  重复 loadProvider (应跳过):", events.filter(e => e.change === "load").length <= 1 ? "✅" : "❌");
+  assert(events.filter(e => e.change === "load").length <= 1, "重复 loadProvider (应跳过)");
 
   // reloadProvider
   try {
@@ -184,22 +194,22 @@ async function testProviderManagerDynamicLifecycle(): Promise<void> {
       apiKey: "new-key",
     });
     const reloadEvents = events.filter(e => e.id === "test-openai-1" && e.change === "reload");
-    console.log("  reloadProvider 触发 reload 事件:", reloadEvents.length > 0 ? "✅" : "❌");
+    assert(reloadEvents.length > 0, "reloadProvider 触发 reload 事件");
   } catch (e) {
     console.log("  reloadProvider:", (e as Error).message?.slice(0, 60));
   }
 
   // terminateProvider
   await manager.terminateProvider("test-openai-1");
-  console.log("  terminateProvider 后 instMap:", manager.instMap.has("test-openai-1") ? "❌ (仍存在)" : "✅ (已移除)");
+  assert(!manager.instMap.has("test-openai-1"), "terminateProvider 后 instMap (已移除)");
   const terminateEvents = events.filter(e => e.id === "test-openai-1" && e.change === "terminate");
-  console.log("  terminateProvider 触发 terminate 事件:", terminateEvents.length > 0 ? "✅" : "❌");
+  assert(terminateEvents.length > 0, "terminateProvider 触发 terminate 事件");
 
   // deleteProvider
   await manager.loadProvider({ type: "openai", id: "test-delete-1" });
   await manager.deleteProvider("test-delete-1");
-  console.log("  deleteProvider 后 instMap:", manager.instMap.has("test-delete-1") ? "❌" : "✅");
-  console.log("  deleteProvider 后 providerConfigs:", manager.providerConfigs.has("test-delete-1") ? "❌" : "✅");
+  assert(!manager.instMap.has("test-delete-1"), "deleteProvider 后 instMap");
+  assert(!manager.providerConfigs.has("test-delete-1"), "deleteProvider 后 providerConfigs");
 
   // 未知类型动态导入
   try {
@@ -207,12 +217,10 @@ async function testProviderManagerDynamicLifecycle(): Promise<void> {
       type: "unknown_custom_type",
       id: "custom-1",
     });
-    console.log("  未知类型动态导入: ✅");
+    assert(false, "未知类型动态导入 (不应成功)");
   } catch (e) {
-    console.log("  未知类型动态导入 (预期失败):", (e as Error).message?.includes("Unknown") ? "✅ 正确拒绝" : "❌");
+    assert((e as Error).message?.includes("Unknown"), "未知类型动态导入 正确拒绝");
   }
-
-  console.log("  ✅ ProviderManager 动态 Provider 生命周期测试通过");
 }
 
 // ============================================================
@@ -234,19 +242,17 @@ async function testDynamicImportProviderModule(): Promise<void> {
 
   for (const type of knownTypes) {
     const cls = await dynamicImportProviderModule(type);
-    console.log(`  ${type}: ${cls !== null ? "✅" : "❌"}`);
+    assert(cls !== null, `${type}`);
   }
 
   // 未知类型
   const unknownCls = await dynamicImportProviderModule("nonexistent_provider");
-  console.log("  nonexistent_provider:", unknownCls === null ? "✅ (返回 null)" : "❌");
+  assert(unknownCls === null, "nonexistent_provider (返回 null)");
 
   // 验证模块映射表
   console.log("  PROVIDER_TYPE_MODULE_MAP 条目数:", Object.keys(PROVIDER_TYPE_MODULE_MAP).length);
-  console.log("  包含 openai:", PROVIDER_TYPE_MODULE_MAP["openai"] ? "✅" : "❌");
-  console.log("  包含 anthropic:", PROVIDER_TYPE_MODULE_MAP["anthropic"] ? "✅" : "❌");
-
-  console.log("  ✅ dynamicImportProviderModule 测试通过");
+  assert(!!PROVIDER_TYPE_MODULE_MAP["openai"], "包含 openai");
+  assert(!!PROVIDER_TYPE_MODULE_MAP["anthropic"], "包含 anthropic");
 }
 
 // ============================================================
@@ -270,9 +276,9 @@ async function testDynamicCreateFactories(): Promise<void> {
       apiKey: "test",
       model: "gpt-4",
     } as any);
-    console.log("  dynamicCreateChatProvider (openai):", chatProvider !== null ? "✅" : "❌");
+    assert(chatProvider !== null, "dynamicCreateChatProvider (openai)");
     if (chatProvider) {
-      console.log("    有 textChat 方法:", typeof chatProvider.textChat === "function" ? "✅" : "❌");
+      assert(typeof chatProvider.textChat === "function", "有 textChat 方法");
     }
   } catch (e) {
     console.log("  dynamicCreateChatProvider (openai):", (e as Error).message?.slice(0, 60));
@@ -284,9 +290,9 @@ async function testDynamicCreateFactories(): Promise<void> {
       apiKey: "test",
       model: "text-embedding-3-small",
     } as any);
-    console.log("  dynamicCreateEmbeddingProvider (openai_embedding):", embProvider !== null ? "✅" : "❌");
+    assert(embProvider !== null, "dynamicCreateEmbeddingProvider (openai_embedding)");
     if (embProvider) {
-      console.log("    有 getEmbedding 方法:", typeof embProvider.getEmbedding === "function" ? "✅" : "❌");
+      assert(typeof embProvider.getEmbedding === "function", "有 getEmbedding 方法");
     }
   } catch (e) {
     console.log("  dynamicCreateEmbeddingProvider:", (e as Error).message?.slice(0, 60));
@@ -298,7 +304,7 @@ async function testDynamicCreateFactories(): Promise<void> {
       baseUrl: "https://api.example.com",
       model: "rerank-v1",
     } as any);
-    console.log("  dynamicCreateRerankProvider (generic):", rerankProvider !== null ? "✅" : "❌");
+    assert(rerankProvider !== null, "dynamicCreateRerankProvider (generic)");
   } catch (e) {
     console.log("  dynamicCreateRerankProvider:", (e as Error).message?.slice(0, 60));
   }
@@ -309,9 +315,9 @@ async function testDynamicCreateFactories(): Promise<void> {
       apiKey: "test",
       model: "tts-1",
     } as any);
-    console.log("  dynamicCreateTtsProvider (openai_tts):", ttsProvider !== null ? "✅" : "❌");
+    assert(ttsProvider !== null, "dynamicCreateTtsProvider (openai_tts)");
     if (ttsProvider) {
-      console.log("    有 getAudio 方法:", typeof ttsProvider.getAudio === "function" ? "✅" : "❌");
+      assert(typeof ttsProvider.getAudio === "function", "有 getAudio 方法");
     }
   } catch (e) {
     console.log("  dynamicCreateTtsProvider:", (e as Error).message?.slice(0, 60));
@@ -323,9 +329,9 @@ async function testDynamicCreateFactories(): Promise<void> {
       apiKey: "test",
       model: "whisper-1",
     } as any);
-    console.log("  dynamicCreateSttProvider (openai_stt):", sttProvider !== null ? "✅" : "❌");
+    assert(sttProvider !== null, "dynamicCreateSttProvider (openai_stt)");
     if (sttProvider) {
-      console.log("    有 getText 方法:", typeof sttProvider.getText === "function" ? "✅" : "❌");
+      assert(typeof sttProvider.getText === "function", "有 getText 方法");
     }
   } catch (e) {
     console.log("  dynamicCreateSttProvider:", (e as Error).message?.slice(0, 60));
@@ -333,9 +339,7 @@ async function testDynamicCreateFactories(): Promise<void> {
 
   // 未知类型
   const unknownChat = await dynamicCreateChatProvider("unknown", {} as any);
-  console.log("  dynamicCreateChatProvider (unknown):", unknownChat === null ? "✅ (返回 null)" : "❌");
-
-  console.log("  ✅ dynamicCreate* 工厂函数测试通过");
+  assert(unknownChat === null, "dynamicCreateChatProvider (unknown) 返回 null");
 }
 
 // ============================================================
@@ -358,9 +362,9 @@ async function testMcpSecurityValidation(): Promise<void> {
   for (const test of validTests) {
     try {
       validateMcpStdioConfig(test);
-      console.log(`  ${test.name}: ${test.expected ? "✅ 正确通过" : "❌ 应该被拒绝"}`);
+      assert(test.expected, `${test.name} 正确通过`);
     } catch (e) {
-      console.log(`  ${test.name}: ${!test.expected ? "✅ 正确拒绝" : "❌ 不应被拒绝"} - ${(e as Error).message?.slice(0, 50)}`);
+      assert(!test.expected, `${test.name} 正确拒绝`);
     }
   }
 
@@ -376,9 +380,9 @@ async function testMcpSecurityValidation(): Promise<void> {
   for (const test of invalidTests) {
     try {
       validateMcpStdioConfig(test);
-      console.log(`  ${test.name}: ${test.expected ? "✅ 正确通过" : "❌ 应该被拒绝"}`);
+      assert(test.expected, `${test.name} 正确通过`);
     } catch (e) {
-      console.log(`  ${test.name}: ${!test.expected ? "✅ 正确拒绝" : "❌ 不应被拒绝"} - ${(e as Error).message?.slice(0, 50)}`);
+      assert(!test.expected, `${test.name} 正确拒绝`);
     }
   }
 
@@ -392,13 +396,11 @@ async function testMcpSecurityValidation(): Promise<void> {
   for (const test of dockerTests) {
     try {
       validateMcpStdioConfig(test);
-      console.log(`  ${test.name}: ${test.expected ? "✅ 正确通过" : "❌ 应该被拒绝"}`);
+      assert(test.expected, `${test.name} 正确通过`);
     } catch (e) {
-      console.log(`  ${test.name}: ${!test.expected ? "✅ 正确拒绝" : "❌ 不应被拒绝"} - ${(e as Error).message?.slice(0, 50)}`);
+      assert(!test.expected, `${test.name} 正确拒绝`);
     }
   }
-
-  console.log("  ✅ MCP 安全校验测试通过");
 }
 
 // ============================================================
@@ -425,23 +427,21 @@ async function testProviderManagerTerminateAndCleanup(): Promise<void> {
   manager.registerProvider(mockProvider);
 
   console.log("  终止前 instMap:", manager.instMap.size);
-  console.log("  终止前 MCP 配置:", manager.getMcpServerConfig() !== null ? "✅" : "❌");
+  assert(manager.getMcpServerConfig() !== null, "终止前 MCP 配置存在");
 
   // 终止
   await manager.terminate();
 
   console.log("  终止后 instMap:", manager.instMap.size);
   console.log("  终止后 providerConfigs:", manager.providerConfigs.size);
-  console.log("  终止后 MCP 配置:", manager.getMcpServerConfig() === null ? "✅ (已清除)" : "❌");
+  assert(manager.getMcpServerConfig() === null, "终止后 MCP 配置 (已清除)");
   console.log("  终止后 chat providers:", manager.providerInsts.length);
 
-  // 终止后可以重新初始化
+  // 终止后可以重新初始化（无参数时 mcpServerConfig 为 null）
   await manager.initialize();
-  console.log("  重新初始化后 MCP 配置:", manager.getMcpServerConfig() !== null ? "✅" : "❌");
+  assert(manager.getMcpServerConfig() === null, "重新初始化后 MCP 配置不存在 (无参数)");
 
   await manager.terminate();
-
-  console.log("  ✅ ProviderManager 终止和清理测试通过");
 }
 
 // ============================================================
@@ -466,9 +466,12 @@ async function main(): Promise<void> {
     console.log("\n╔══════════════════════════════════════════╗");
     console.log("║   🎉 所有 ProviderManager 测试通过!       ║");
     console.log("╚══════════════════════════════════════════╝");
+    console.log(`\n通过: ${passCount}, 失败: ${failCount}`);
+    if (failCount > 0) process.exit(1);
     process.exit(0);
   } catch (e) {
     console.error("\n❌ 测试失败:", e);
+    console.log(`\n通过: ${passCount}, 失败: ${failCount}`);
     process.exit(1);
   }
 }

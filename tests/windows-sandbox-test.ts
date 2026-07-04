@@ -233,7 +233,7 @@ async function testSandboxExecution(): Promise<void> {
 // 5. 测试: 边界情况
 // ============================================================
 
-function testEdgeCases(): void {
+async function testEdgeCases(): Promise<void> {
   console.log("\n=== 测试: 边界情况 ===");
 
   if (process.platform !== "win32") {
@@ -269,7 +269,11 @@ function testEdgeCases(): void {
 
   // 重复 setup/teardown
   console.log("  重复 setup/teardown 测试:");
-  setupWindowsJobObject("test-dup", {}).then((p1) => {
+  // C-23 fix: previously this was a fire-and-forget Promise chain. Since
+  // testEdgeCases was synchronous and main() did not await it, the process
+  // could exit before the chain completed. We now return the Promise so
+  // the caller can await it.
+  await setupWindowsJobObject("test-dup", {}).then((p1) => {
     console.log("    第一次创建:", p1 !== null ? "✅" : "❌");
     return setupWindowsJobObject("test-dup", {});
   }).then((p2) => {
@@ -296,7 +300,7 @@ async function main(): Promise<void> {
     testBuildWindowsSandboxCommand();
     await testSetupAndTeardown();
     await testSandboxExecution();
-    testEdgeCases();
+    await testEdgeCases();
 
     console.log("\n╔══════════════════════════════════════════╗");
     console.log("║   🎉 所有 Windows 沙箱测试通过!           ║");

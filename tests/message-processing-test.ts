@@ -67,8 +67,22 @@ import {
 } from "../src/index.js";
 import { FunctionToolManager } from "@yachiyo/agent/func-tool-manager.js";
 
+// C-20 fix: global assert mechanism for CI pass/fail detection
+let passCount = 0;
+let failCount = 0;
+
+function assert(condition: boolean, message: string): void {
+  if (condition) {
+    passCount++;
+    console.log(`  ✅ ${message}`);
+  } else {
+    failCount++;
+    console.error(`  ❌ ${message}`);
+  }
+}
+
 // ============================================================
-// 1. 测试: 通用工具�?// ============================================================
+// 1. 测试: 通用工具层通用工具�?// ============================================================
 async function testCommonUtils(): Promise<void> {
   console.log("\n=== 测试: 通用工具�?===");
 
@@ -94,13 +108,13 @@ async function testCommonUtils(): Promise<void> {
   console.log("  Condition wait:", condResolved);
   cond.notifyAll();
   await waitPromise;
-  console.log("  Condition after notify:", condResolved);
+  assert(condResolved, "Condition after notify");
 
   // generateId
   const id1 = generateId();
   const id2 = generateId();
-  console.log("  generateId unique:", id1 !== id2);
-  console.log("  generateId format:", id1.length > 0);
+  assert(id1 !== id2, "generateId unique");
+  assert(id1.length > 0, "generateId format");
 
   // Errors
   const err1 = new AgentSystemError("test");
@@ -119,7 +133,7 @@ async function testCommonUtils(): Promise<void> {
   // TraceSpan
   const span = new TraceSpan("test-span", "umo:123");
   span.record("action-1", { key: "value" });
-  console.log("  TraceSpan:", span.name, span.spanId.length > 0);
+  assert(span.spanId.length > 0, "TraceSpan spanId");
 
   console.log("  �?通用工具层测试通过");
 }
@@ -163,16 +177,16 @@ function testMessageModel(): void {
   const result = new EventResult();
   result.plain("Hello ").plain("World");
   console.log("  EventResult plainText:", result.getPlainText());
-  console.log("  EventResult isLlmResult:", result.isLlmResult());
-  console.log("  EventResult isStopped:", result.isStopped());
+  assert(result.isLlmResult() === false, "EventResult isLlmResult (initial)");
+  assert(result.isStopped() === false, "EventResult isStopped (initial)");
 
   result.stopEvent();
-  console.log("  EventResult after stop:", result.isStopped());
+  assert(result.isStopped(), "EventResult after stop");
 
   const llmResult = new EventResult()
     .plain("LLM response")
     .setResultContentType(ResultContentType.LLM_RESULT);
-  console.log("  EventResult isLlmResult:", llmResult.isLlmResult());
+  assert(llmResult.isLlmResult(), "EventResult isLlmResult (after set)");
 
   // Serialization
   const comp = { type: ComponentType.Plain, text: "test", toDict() { return { type: "text", data: { text: "test" } }; } } as any;
@@ -237,19 +251,19 @@ async function testMessageEvent(): Promise<void> {
   console.log("  unifiedMsgOrigin:", event.unifiedMsgOrigin);
   console.log("  getSenderId:", event.getSenderId());
   console.log("  getSenderName:", event.getSenderName());
-  console.log("  isPrivateChat:", event.isPrivateChat());
-  console.log("  isWakeUp:", event.isWakeUp());
+  assert(event.isPrivateChat() === false, "isPrivateChat (group message)");
+  assert(event.isWakeUp() === false, "isWakeUp");
 
   // setResult / getResult
   event.setResult("Hello response");
   console.log("  getResult plainText:", event.getResult()?.getPlainText());
 
   // stopEvent / isStopped
-  console.log("  isStopped (before):", event.isStopped());
+  assert(event.isStopped() === false, "isStopped (before)");
   event.stopEvent();
-  console.log("  isStopped (after stop):", event.isStopped());
+  assert(event.isStopped(), "isStopped (after stop)");
   event.continueEvent();
-  console.log("  isStopped (after continue):", event.isStopped());
+  assert(event.isStopped() === false, "isStopped (after continue)");
 
   // extras
   event.setExtra("test_key", "test_value");
@@ -258,11 +272,11 @@ async function testMessageEvent(): Promise<void> {
 
   // skipLlm
   event.setSkipLlm(true);
-  console.log("  skipLlm:", event.skipLlm);
+  assert(event.skipLlm === true, "skipLlm");
 
   // send
   await event.send([{ type: ComponentType.Plain, text: "response", toDict() { return {}; } } as any]);
-  console.log("  send called:", sentMessages.length === 1);
+  assert(sentMessages.length === 1, "send called");
 
   // requestLlm
   const req = event.requestLlm("test prompt", { imageUrls: ["http://img.png"] });
@@ -354,8 +368,8 @@ async function testPipelineScheduler(): Promise<void> {
   await scheduler.execute(event);
 
   console.log("  执行顺序:", executionLog.join(" �?"));
-  console.log("  初始化顺序正�?", executionLog[0] === "init:Stage1");
-  console.log("  处理顺序正确:", executionLog[3] === "process:Stage1");
+  assert(executionLog[0] === "init:Stage1", "初始化顺序正确");
+  assert(executionLog[3] === "process:Stage1", "处理顺序正确");
 
   // Test stopEvent
   executionLog.length = 0;
@@ -386,7 +400,7 @@ async function testPipelineScheduler(): Promise<void> {
   );
 
   await stopScheduler.execute(event2);
-  console.log("  stopEvent 阻止后续阶段:", executionLog.length === 1 && executionLog[0] === "stop-stage");
+  assert(executionLog.length === 1 && executionLog[0] === "stop-stage", "stopEvent 阻止后续阶段");
 
   console.log("  �?管线调度器测试通过");
 }
@@ -466,7 +480,7 @@ async function testOnionModel(): Promise<void> {
 
   // Expected: A:pre �?B:pre �?inner �?B:post �?A:post
   console.log("  执行顺序:", log.join(" �?"));
-  console.log("  洋葱模型正确:", log.join(",") === "A:pre,B:pre,inner,B:post,A:post");
+  assert(log.join(",") === "A:pre,B:pre,inner,B:post,A:post", "洋葱模型正确");
 
   console.log("  �?洋葱模型测试通过");
 }
@@ -494,19 +508,19 @@ async function testSessionLock(): Promise<void> {
 
   // Give time for the second acquire to start waiting
   await new Promise(resolve => setTimeout(resolve, 50));
-  console.log("  第二次获取等待中:", !acquired2);
+  assert(!acquired2, "第二次获取等待中");
 
   // Release first lock
   release1();
   const release2 = await acquire2Promise;
-  console.log("  释放后第二次获取成功:", acquired2);
+  assert(acquired2, "释放后第二次获取成功");
 
   release2();
 
   // Different sessions should not block each other
   const release3 = await lockManager.acquireLock("session-2");
   const release4 = await lockManager.acquireLock("session-3");
-  console.log("  不同会话不互�?", true);
+  assert(true, "不同会话不互");
   release3();
   release4();
 
@@ -529,7 +543,7 @@ function testConfigManager(): void {
   console.log("  maxStep:", defaultConfig.maxStep);
 
   const confInfo = manager.getConfInfo("unknown:session:1");
-  console.log("  未知会话获取默认配置:", confInfo.id === "cfg-1");
+  assert(confInfo.id === "cfg-1", "未知会话获取默认配置");
 
   console.log("  �?ConfigManager 测试通过");
 }
@@ -551,7 +565,7 @@ async function testConversationManager(): Promise<void> {
     platformId: "webchat",
     title: "Test Conversation",
   });
-  console.log("  新建对话 id:", convId.length > 0);
+  assert(convId.length > 0, "新建对话 id");
 
   // Get conversation
   const conv = await manager.getConversation(umo, convId);
@@ -563,7 +577,7 @@ async function testConversationManager(): Promise<void> {
     history: JSON.stringify([{ role: "user", content: "Hello" }]),
   });
   const updated = await manager.getConversation(umo, convId);
-  console.log("  更新后历�?", updated?.history?.includes("Hello"));
+  assert(updated?.history?.includes("Hello") === true, "更新后历史包含 Hello");
 
   // Test truncation in addMessagePair
   manager.setMaxHistoryMessages(3);
@@ -572,8 +586,8 @@ async function testConversationManager(): Promise<void> {
   const truncatedConv = await manager.getConversation(umo, convId);
   const truncatedHistory = JSON.parse(truncatedConv?.history || "[]");
   console.log("  截断后历史消息数:", truncatedHistory.length);
-  console.log("  截断正确 (应该为 3):", truncatedHistory.length === 3);
-  console.log("  保留的消息包括 Hello 2:", truncatedHistory[1].content === "Hello 2");
+  assert(truncatedHistory.length === 3, "截断正确 (应该为 3)");
+  assert(truncatedHistory[1].content === "Hello 2", "保留的消息包括 Hello 2");
 
   // Get current conversation id
   console.log("  当前对话 id:", await manager.getCurrConversationId(umo));
@@ -617,7 +631,7 @@ function testPluginSystem(): void {
   };
   registry.append(handler);
   const found = registry.getHandlersByEventType(EventType.OnLLMRequestEvent, true);
-  console.log("  Registry 查找 handler:", found.length === 1);
+  assert(found.length === 1, "Registry 查找 handler");
   console.log("  Handler 名称:", found[0]?.handlerName);
 
   // HandlerFilter
@@ -643,13 +657,13 @@ function testPluginSystem(): void {
   );
 
   const cmdFilter = new CommandFilter("/hello");
-  console.log("  CommandFilter 匹配:", cmdFilter.filter(mockEvent, {}));
+  assert(cmdFilter.filter(mockEvent, {}) === true, "CommandFilter 匹配");
 
   const regexFilter = new RegexFilter(/^\/hello/);
-  console.log("  RegexFilter 匹配:", regexFilter.filter(mockEvent, {}));
+  assert(regexFilter.filter(mockEvent, {}) === true, "RegexFilter 匹配");
 
   const noMatchFilter = new CommandFilter("/goodbye");
-  console.log("  CommandFilter 不匹�?", !noMatchFilter.filter(mockEvent, {}));
+  assert(!noMatchFilter.filter(mockEvent, {}), "CommandFilter 不匹配");
 
   // PluginManager
   const pluginManager = new PluginManager();
@@ -668,7 +682,7 @@ function testPluginSystem(): void {
     logoPath: "",
     supportPlatforms: [],
   });
-  console.log("  PluginManager stars:", pluginManager.getAllStars().length);
+  assert(pluginManager.getAllStars().length === 1, "PluginManager stars");
 
   console.log("  �?插件系统测试通过");
 }
@@ -684,8 +698,8 @@ function testProviderSystem(): void {
 
   // ProviderManager
   const manager = new ProviderManager();
-  console.log("  ProviderManager 初始 provider �?", manager.providerInsts.length);
-  console.log("  ProviderManager getUsingProvider (�?:", manager.getUsingProvider(ProviderType.CHAT_COMPLETION) === null);
+  assert(manager.providerInsts.length === 0, "ProviderManager 初始 provider 数");
+  assert(manager.getUsingProvider(ProviderType.CHAT_COMPLETION) === null, "ProviderManager getUsingProvider (空)");
 
   // STTProvider stub
   class MockSTTProvider extends STTProvider {
@@ -694,7 +708,7 @@ function testProviderSystem(): void {
     }
   }
   const stt = new MockSTTProvider();
-  console.log("  STTProvider getText:", stt.getText("http://audio.mp3") instanceof Promise);
+  assert(stt.getText("http://audio.mp3") instanceof Promise, "STTProvider getText returns Promise");
 
   // TTSProvider stub
   class MockTTSProvider extends TTSProvider {
@@ -703,7 +717,7 @@ function testProviderSystem(): void {
     }
   }
   const tts = new MockTTSProvider();
-  console.log("  TTSProvider supportStream:", tts.supportStream());
+  assert(tts.supportStream() === false, "TTSProvider supportStream");
 
   console.log("  �?Provider 体系测试通过");
 }
@@ -729,12 +743,12 @@ async function testSkill(): Promise<void> {
     readonly: false,
   });
   const skills = skillManager.listSkills();
-  console.log("  SkillManager skills:", skills.length);
-  console.log("  SkillManager activeOnly:", skillManager.listSkills({ activeOnly: true }).length);
+  assert(skills.length === 1, "SkillManager skills count");
+  assert(skillManager.listSkills({ activeOnly: true }).length === 1, "SkillManager activeOnly count");
 
   // buildSkillsPrompt
   const prompt = buildSkillsPrompt(skills);
-  console.log("  buildSkillsPrompt 包含 code-review:", prompt.includes("code-review"));
+  assert(prompt.includes("code-review"), "buildSkillsPrompt 包含 code-review");
 
   console.log("  ✅ Skill 测试通过");
 }
@@ -815,9 +829,9 @@ async function testEventBusE2E(): Promise<void> {
   // Wait for processing
   await new Promise(resolve => setTimeout(resolve, 200));
 
-  console.log("  处理的事件数:", processedEvents.length);
-  console.log("  处理的消�?", processedEvents[0]);
-  console.log("  事件结果:", event.getResult()?.getPlainText());
+  assert(processedEvents.length === 1, "处理的事件数");
+  assert(processedEvents[0] === "E2E test message", "处理的消息");
+  assert(event.getResult()?.getPlainText() === "Response: E2E test message", "事件结果");
 
   // Stop bus
   eventBus.stop();
@@ -863,10 +877,13 @@ function testActiveEventRegistry(): Promise<void> {
   activeEventRegistry.register(event2);
 
   // Stop all except event1
-  const stoppedCount = activeEventRegistry.stopAll("test:FriendMessage:s1", event1);
+  // Note: MessageEvent.base unifiedMsgOrigin returns "single:user:session"
+  // so stopAll must use that key, not a constructed "test:FriendMessage:s1".
+  const stopKey = event1.unifiedMsgOrigin; // "single:user:session"
+  const stoppedCount = activeEventRegistry.stopAll(stopKey, event1);
   console.log("  stopAll 停止数:", stoppedCount);
-  console.log("  event1 未停止:", !event1.isStopped());
-  console.log("  event2 已停止:", event2.isStopped());
+  assert(!event1.isStopped(), "event1 未停止");
+  assert(event2.isStopped(), "event2 已停止");
 
   activeEventRegistry.unregister(event1);
   activeEventRegistry.unregister(event2);
@@ -881,7 +898,8 @@ function testActiveEventRegistry(): Promise<void> {
 async function testEventBusErrorProtection(): Promise<void> {
   console.log("\n=== 测试: EventBus 错误保护 ===");
 
-  const assert = (cond: boolean, msg: string) => {
+  const assertAndThrow = (cond: boolean, msg: string) => {
+    assert(cond, msg);
     if (!cond) throw new Error(msg);
   };
 
@@ -980,9 +998,9 @@ async function testEventBusErrorProtection(): Promise<void> {
   console.log("  scheduler.execute 调用次数:", schedulerExecuteCalled);
   console.log("  scheduler.execute 故意抛错次数:", schedulerExecuteThrown);
 
-  assert(configGetConfInfoCalled === 3, "Config manager should have been queried 3 times");
-  assert(schedulerExecuteCalled === 2, "Scheduler execute should have been called 2 times");
-  assert(schedulerExecuteThrown === 1, "Scheduler execute should have intentionally thrown 1 time");
+  assertAndThrow(configGetConfInfoCalled === 3, "Config manager should have been queried 3 times");
+  assertAndThrow(schedulerExecuteCalled === 2, "Scheduler execute should have been called 2 times");
+  assertAndThrow(schedulerExecuteThrown === 1, "Scheduler execute should have intentionally thrown 1 time");
 
   // Stop the event bus
   eventBus.stop();
@@ -1019,8 +1037,13 @@ async function main(): Promise<void> {
     await testActiveEventRegistry();
 
     console.log("\n╔══════════════════════════════════════════╗");
-    console.log("║  🎉 所有消息处理系统测试通过!              ║");
+    console.log(`║   通过: ${passCount}  失败: ${failCount}`.padEnd(46) + "║");
     console.log("╚══════════════════════════════════════════╝");
+    if (failCount > 0) {
+      console.error(`❌ ${failCount} 项测试失败`);
+      process.exit(1);
+    }
+    console.log("🎉 所有消息处理系统测试通过!");
   } catch (e) {
     console.error("\n❌测试失败:", e);
     process.exit(1);

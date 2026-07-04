@@ -93,7 +93,7 @@ export interface MCPClientSession {
 
 const DEFAULT_STDIO_COMMAND_ALLOWLIST = new Set([
   "python", "python3", "py", "node", "npx", "npm", "pnpm", "yarn",
-  "bun", "bunx", "deno", "uv", "uvx",
+  "bun", "bunx", "deno", "uv", "uvx", "docker",
 ]);
 
 const DENIED_STDIO_COMMANDS = new Set([

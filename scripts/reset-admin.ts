@@ -46,7 +46,12 @@ async function questionHidden(rl: any, prompt: string): Promise<string> {
         process.stdout.write("\n");
         resolve(result.trim());
       } else if (c === "\u0003") {
-        // Ctrl+C
+        // Ctrl+C — restore terminal before exiting so the user's shell
+        // doesn't get stuck in raw mode (no echo, broken Ctrl+C).
+        // C-24 fix: previously process.exit(1) was called directly without
+        // disabling raw mode, leaving the terminal in a broken state.
+        process.stdin.setRawMode(false);
+        process.stdout.write("\n");
         process.exit(1);
       } else if (c === "\u007f" || c === "\b") {
         // Backspace
