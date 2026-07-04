@@ -82,6 +82,8 @@ export interface Provider {
   providerConfig: ProviderConfig;
   textChat(params: ProviderChatParams): Promise<LLMResponse>;
   textChatStream?(params: ProviderChatParams): AsyncGenerator<LLMResponse, void, unknown>;
+  /** Release provider-held resources (server-side caches, connections, etc.). */
+  dispose?(): Promise<void>;
 }
 
 export interface ProviderChatParams {

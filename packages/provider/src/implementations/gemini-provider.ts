@@ -7,6 +7,7 @@ import { sanitizeContextsByModalities } from "../modalities.js";
 import { withRetry } from "../retry.js";
 import { ProviderAPIError, RateLimitError, safeParseJsonResponse } from "../errors.js";
 import { EstimateTokenCounter } from "@yachiyo/common/token-counter.js";
+import { safeFetch } from "@yachiyo/common/ssrf-guard.js";
 import { resolveImageToDataUrl, resolveAudioToDataUrl } from "@yachiyo/common/download-utils.js";
 
 async function resolveRemoteMediaInContexts(
@@ -113,13 +114,43 @@ export class GeminiProvider implements Provider {
     }
   }
 
+  /**
+   * Delete a server-side cachedContents object to prevent resource leakage.
+   * Best-effort: errors are logged but not thrown.
+   */
+  private async deleteContextCache(cacheName: string): Promise<void> {
+    try {
+      const url = `${this.baseUrl}/${cacheName}`;
+      const res = await safeFetch(url, {
+        method: "DELETE",
+        headers: { "x-goog-api-key": this.apiKey },
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!res.ok) {
+        console.warn(`[GeminiProvider] Failed to delete context cache ${cacheName}: ${res.status}`);
+      }
+    } catch (e) {
+      console.warn(`[GeminiProvider] Error deleting context cache ${cacheName}:`, e);
+    }
+  }
+
+  /**
+   * Release all server-side cachedContents objects held by this provider.
+   * Called by ProviderManager when terminating or deleting a provider.
+   */
+  async dispose(): Promise<void> {
+    const entries = Array.from(this.activeCaches.values());
+    this.activeCaches.clear();
+    await Promise.all(entries.map((c) => this.deleteContextCache(c.cacheName)));
+  }
+
   private async createContextCache(
     useModel: string,
     contents: any[],
     systemInstruction: any,
     tools: any[] | undefined,
     ttlStr: string
-  ): Promise<string | null> {
+  ): Promise<{ name: string; expireTime: string } | null> {
     const modelName = useModel.startsWith("models/") ? useModel : `models/${useModel}`;
     const url = `${this.baseUrl}/cachedContents`;
 
@@ -135,7 +166,7 @@ export class GeminiProvider implements Provider {
       body.tools = tools;
     }
 
-    const response = await fetch(url, {
+    const response = await safeFetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -151,8 +182,8 @@ export class GeminiProvider implements Provider {
     }
 
     const resData = (await response.json()) as { name?: string; expireTime?: string };
-    if (resData.name) {
-      return resData.name;
+    if (resData.name && resData.expireTime) {
+      return { name: resData.name, expireTime: resData.expireTime };
     }
     return null;
   }
@@ -215,12 +246,21 @@ export class GeminiProvider implements Provider {
       if (existing && Date.now() < existing.expireTime) {
         const cachedLen = existing.cachedContents.length;
         if (contents.length > cachedLen) {
-          const sysMatch = JSON.stringify(existing.cachedSystemInstruction) === JSON.stringify(systemInstruction);
-          const toolsMatch = JSON.stringify(existing.cachedTools) === JSON.stringify(tools);
+          // Fast path: reference equality for system instruction and tools
+          const sysMatch = existing.cachedSystemInstruction === systemInstruction ||
+            JSON.stringify(existing.cachedSystemInstruction) === JSON.stringify(systemInstruction);
+          const toolsMatch = existing.cachedTools === tools ||
+            JSON.stringify(existing.cachedTools) === JSON.stringify(tools);
           if (sysMatch && toolsMatch) {
-            const prefixMatch = JSON.stringify(contents.slice(0, cachedLen)) === JSON.stringify(existing.cachedContents);
-            if (prefixMatch) {
+            // Fast path: check element reference equality before expensive JSON.stringify
+            let refMatch = true;
+            for (let i = 0; i < cachedLen; i++) {
+              if (contents[i] !== existing.cachedContents[i]) { refMatch = false; break; }
+            }
+            if (refMatch) {
               canReuse = true;
+            } else {
+              canReuse = JSON.stringify(contents.slice(0, cachedLen)) === JSON.stringify(existing.cachedContents);
             }
           }
         }
@@ -242,17 +282,22 @@ export class GeminiProvider implements Provider {
           if (estimatedTokens >= cacheThreshold) {
             try {
               console.info(`[GeminiProvider] Creating context cache for session ${sessionKey} (estimated tokens: ${estimatedTokens})...`);
-              const cacheName = await this.createContextCache(useModel, prefixContents, systemInstruction, tools, ttlStr);
-              if (cacheName) {
-                const expireTime = Date.now() + ttlMs;
+              const cacheResult = await this.createContextCache(useModel, prefixContents, systemInstruction, tools, ttlStr);
+              if (cacheResult) {
+                // Delete the old server-side cache before overwriting the local entry
+                if (existing) {
+                  await this.deleteContextCache(existing.cacheName);
+                }
+                // Use server-provided expireTime for accuracy; fall back to local estimate
+                const expireTime = Date.parse(cacheResult.expireTime) || (Date.now() + ttlMs);
                 this.activeCaches.set(sessionKey, {
-                  cacheName,
+                  cacheName: cacheResult.name,
                   cachedContents: prefixContents,
                   cachedSystemInstruction: systemInstruction,
                   cachedTools: tools,
                   expireTime
                 });
-                body.cachedContent = cacheName;
+                body.cachedContent = cacheResult.name;
                 body.contents = contents.slice(cacheLimit);
               } else {
                 body.contents = contents;

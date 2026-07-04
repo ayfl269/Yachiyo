@@ -63,7 +63,12 @@ export class ContextManager {
       if (this.config.maxContextTokens > 0) {
         const totalTokens = this.tokenCounter.countTokens(result, currentTrustedTokenUsage);
         if (this.compressor.shouldCompress(result, totalTokens, this.config.maxContextTokens)) {
+          const prevLen = result.length;
           result = await this.runCompression(result, totalTokens);
+          // Compression modified the message list — trustedTokenUsage is no longer valid
+          if (result.length !== prevLen) {
+            currentTrustedTokenUsage = 0;
+          }
         }
       }
 

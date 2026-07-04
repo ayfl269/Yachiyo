@@ -31,6 +31,7 @@ async function mockFetch(url: string | URL | Request, init?: RequestInit): Promi
     content: [{ type: "text", text: "Mock Anthropic response" }],
     candidates: [{ content: { parts: [{ text: "Mock Gemini response" }] } }],
     name: "cachedContents/mock-cache-id",
+    expireTime: new Date(Date.now() + 600000).toISOString(),
     usage: {
       input_tokens: 100,
       output_tokens: 50,
@@ -107,7 +108,7 @@ async function runTests() {
     assert(cacheBody.model === "models/gemini-1.5-flash", "Gemini createContextCache body model");
     assert(Array.isArray(cacheBody.contents), "Gemini createContextCache body contents");
     assert(cacheBody.ttl === "600s", "Gemini createContextCache TTL matches config");
-    assert(cacheName === "cachedContents/mock-cache-id", "Gemini createContextCache response cachedContent name parsed");
+    assert(cacheName?.name === "cachedContents/mock-cache-id", "Gemini createContextCache response cachedContent name parsed");
 
     // 3. OpenAI Responses Provider Caching Test
     console.log("\n--- Testing OpenAI Responses Caching ---");

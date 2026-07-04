@@ -7,12 +7,16 @@ export type AnyProvider = Provider | STTProvider | TTSProvider | EmbeddingProvid
 export abstract class STTProvider {
   providerConfig: Record<string, unknown> = {};
   abstract getText(audioUrl: string): Promise<string>;
+  /** Release provider-held resources. */
+  dispose?(): Promise<void>;
 }
 
 export abstract class TTSProvider {
   providerConfig: Record<string, unknown> = {};
   supportStream(): boolean { return false; }
   abstract getAudio(text: string): Promise<string>;
+  /** Release provider-held resources. */
+  dispose?(): Promise<void>;
 }
 
 export abstract class EmbeddingProvider {
@@ -20,6 +24,8 @@ export abstract class EmbeddingProvider {
   abstract getEmbedding(text: string): Promise<number[]>;
   abstract getEmbeddings(texts: string[]): Promise<number[][]>;
   abstract getDim(): number;
+  /** Release provider-held resources. */
+  dispose?(): Promise<void>;
 }
 
 export interface RerankResult {
@@ -31,6 +37,8 @@ export interface RerankResult {
 export abstract class RerankProvider {
   providerConfig: Record<string, unknown> = {};
   abstract rerank(query: string, documents: string[], topN?: number): Promise<RerankResult[]>;
+  /** Release provider-held resources. */
+  dispose?(): Promise<void>;
 }
 
 // ── Provider Change Callback Types ──
@@ -417,6 +425,9 @@ export class ProviderManager {
    * Terminate all providers and clean up resources.
    */
   async terminate(): Promise<void> {
+    // Dispose all provider instances (release server-side resources, caches, etc.)
+    await this.disposeAllProviders();
+
     // Clear all provider instances
     this.providerInsts = [];
     this.ttsInsts = [];
@@ -516,6 +527,12 @@ export class ProviderManager {
     const config = this.providerConfigs.get(providerId);
     const type = config?.type as string ?? "unknown";
 
+    // Dispose the provider instance before removing it
+    const instance = this.instMap.get(providerId);
+    if (instance?.dispose) {
+      await instance.dispose();
+    }
+
     this.removeProviderInstance(providerId);
 
     this.notifyChange(providerId, this.guessProviderType(type), "terminate");
@@ -569,6 +586,29 @@ export class ProviderManager {
     const id = config.id;
     if (id === undefined || id === null) return null;
     return String(id);
+  }
+
+  /**
+   * Dispose all provider instances across all provider arrays.
+   * Best-effort: errors from individual dispose() calls are logged but not thrown.
+   */
+  private async disposeAllProviders(): Promise<void> {
+    const allInstances = [
+      ...this.providerInsts,
+      ...this.ttsInsts,
+      ...this.sttInsts,
+      ...this.embeddingInsts,
+      ...this.rerankInsts,
+    ];
+    await Promise.all(
+      allInstances.map(async (p) => {
+        try {
+          if (p.dispose) await p.dispose();
+        } catch (e) {
+          console.warn("[ProviderManager] Error disposing provider:", e);
+        }
+      })
+    );
   }
 
   /**
