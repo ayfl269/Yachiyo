@@ -88,6 +88,90 @@ function configToForm(name: string, config: Record<string, any>): EditForm {
   }
 }
 
+/**
+ * Split a command-line argument string respecting single and double quotes,
+ * so that inputs like `--path "/my dir"` produce ["--path", "/my dir"]
+ * instead of ["--path", "\"/my", "dir\""]. This avoids breaking MCP stdio
+ * subprocess launches when a single argument contains spaces.
+ *
+ * Rules (POSIX-like subset):
+ *  - Unquoted whitespace separates arguments.
+ *  - Single quotes preserve everything literally until the next single quote.
+ *  - Double quotes preserve everything except backslash escapes (\", \\).
+ *  - A backslash outside quotes escapes the next character.
+ */
+function shellSplitArgs(input: string): string[] {
+  const tokens: string[] = []
+  let current = ''
+  let hasToken = false
+  let i = 0
+  const n = input.length
+
+  while (i < n) {
+    const ch = input[i]
+
+    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
+      if (hasToken) {
+        tokens.push(current)
+        current = ''
+        hasToken = false
+      }
+      i++
+      continue
+    }
+
+    if (ch === '\\' && i + 1 < n) {
+      // Backslash escape (outside quotes): keep next char literally.
+      current += input[i + 1]
+      hasToken = true
+      i += 2
+      continue
+    }
+
+    if (ch === "'") {
+      // Single quote: everything literal until next single quote.
+      hasToken = true
+      i++
+      while (i < n && input[i] !== "'") {
+        current += input[i]
+        i++
+      }
+      i++ // skip closing quote (or end-of-string)
+      continue
+    }
+
+    if (ch === '"') {
+      // Double quote: support \" and \\ escapes.
+      hasToken = true
+      i++
+      while (i < n && input[i] !== '"') {
+        if (input[i] === '\\' && i + 1 < n) {
+          const next = input[i + 1]
+          if (next === '"' || next === '\\') {
+            current += next
+            i += 2
+            continue
+          }
+        }
+        current += input[i]
+        i++
+      }
+      i++ // skip closing quote (or end-of-string)
+      continue
+    }
+
+    current += ch
+    hasToken = true
+    i++
+  }
+
+  if (hasToken) {
+    tokens.push(current)
+  }
+
+  return tokens
+}
+
 function formToConfig(form: EditForm): Record<string, any> {
   // Try JSON config first if non-empty
   const jsonTrim = form.jsonConfig.trim()
@@ -102,10 +186,7 @@ function formToConfig(form: EditForm): Record<string, any> {
   const configObj: Record<string, any> = {}
   if (form.transportType === 'stdio') {
     configObj.command = form.command.trim()
-    configObj.args = form.argsStr
-      .split(' ')
-      .map(x => x.trim())
-      .filter(x => x.length > 0)
+    configObj.args = shellSplitArgs(form.argsStr)
     if (form.env.length > 0) {
       const envObj: Record<string, string> = {}
       for (const row of form.env) {

@@ -49,7 +49,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
           onClick={this.handleReset}
           style={{
             padding: '8px 20px', borderRadius: 6, border: '1px solid var(--border-color)',
-            background: 'var(--accent-color)', color: '#fff', cursor: 'pointer', fontWeight: 600,
+            background: 'var(--accent-primary)', color: '#fff', cursor: 'pointer', fontWeight: 600,
           }}
         >
           重试
