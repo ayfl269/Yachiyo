@@ -406,118 +406,124 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
     const executionDeadline = Date.now() + executionTimeoutMs;
     let timedOut = false;
 
-    // Run sub-agent to completion with loop detection and timeout
+    // Run sub-agent to completion with loop detection and timeout.
+    //
+    // C-17 fix: the entire execution + result-handling block is wrapped in
+    // try/finally so that file locks held by this sub-agent are released
+    // even when `subRunner.stepUntilDone()` (or any code below) throws.
+    // Previously, an exception in the async iterator would skip all three
+    // `releaseAll` call sites and leak the locks permanently, which could
+    // deadlock subsequent sub-agents waiting on the same files.
     let stepCount = 0;
-    for await (const response of subRunner.stepUntilDone(LOOP_DETECTION_MAX_TOTAL_STEPS)) {
-      stepCount++;
+    try {
+      for await (const response of subRunner.stepUntilDone(LOOP_DETECTION_MAX_TOTAL_STEPS)) {
+        stepCount++;
 
-      // Check execution timeout
-      if (Date.now() > executionDeadline) {
-        timedOut = true;
-        break;
-      }
+        // Check execution timeout
+        if (Date.now() > executionDeadline) {
+          timedOut = true;
+          break;
+        }
 
-      // Inspect tool_call and tool_call_result events for loop detection
-      if (response.type === "tool_call") {
-        try {
-          const data = JSON.parse(response.data?.chain?.message ?? "{}");
-          const toolName = data.name as string | undefined;
-          const toolArgs = data.args as Record<string, unknown> | undefined;
+        // Inspect tool_call and tool_call_result events for loop detection
+        if (response.type === "tool_call") {
+          try {
+            const data = JSON.parse(response.data?.chain?.message ?? "{}");
+            const toolName = data.name as string | undefined;
+            const toolArgs = data.args as Record<string, unknown> | undefined;
 
-          if (toolName) {
-            // Check 1: Same tool streak
-            if (toolName === lastToolName) {
-              sameToolStreak++;
-            } else {
-              lastToolName = toolName;
-              sameToolStreak = 1;
-            }
+            if (toolName) {
+              // Check 1: Same tool streak
+              if (toolName === lastToolName) {
+                sameToolStreak++;
+              } else {
+                lastToolName = toolName;
+                sameToolStreak = 1;
+              }
 
-            if (sameToolStreak >= LOOP_DETECTION_MAX_SAME_TOOL) {
-              loopDetected = true;
-              loopReason = `Sub-agent called tool "${toolName}" ${sameToolStreak} times consecutively without progress.`;
-              break;
-            }
-
-            // Check 2: Same tool + same args fingerprint
-            if (toolArgs) {
-              const fingerprint = `${toolName}:${stableStringify(toolArgs)}`;
-              const count = (argFingerprints.get(fingerprint) ?? 0) + 1;
-              argFingerprints.set(fingerprint, count);
-
-              if (count >= LOOP_DETECTION_MAX_SAME_ARGS) {
+              if (sameToolStreak >= LOOP_DETECTION_MAX_SAME_TOOL) {
                 loopDetected = true;
-                loopReason = `Sub-agent called tool "${toolName}" with identical arguments ${count} times.`;
+                loopReason = `Sub-agent called tool "${toolName}" ${sameToolStreak} times consecutively without progress.`;
                 break;
               }
+
+              // Check 2: Same tool + same args fingerprint
+              if (toolArgs) {
+                const fingerprint = `${toolName}:${stableStringify(toolArgs)}`;
+                const count = (argFingerprints.get(fingerprint) ?? 0) + 1;
+                argFingerprints.set(fingerprint, count);
+
+                if (count >= LOOP_DETECTION_MAX_SAME_ARGS) {
+                  loopDetected = true;
+                  loopReason = `Sub-agent called tool "${toolName}" with identical arguments ${count} times.`;
+                  break;
+                }
+              }
             }
+          } catch {
+            // Ignore parse errors in loop detection
           }
-        } catch {
-          // Ignore parse errors in loop detection
         }
       }
-    }
 
-    if (loopDetected) {
-      // Force-stop the sub-agent
-      subRunner.requestStop();
-      // Release file locks held by this sub-agent
-      fileLockManager.releaseAll(agentName);
-      console.warn(`[SubAgent Loop Detection] Agent "${agentName}" loop detected: ${loopReason}`);
+      if (loopDetected) {
+        // Force-stop the sub-agent
+        subRunner.requestStop();
+        console.warn(`[SubAgent Loop Detection] Agent "${agentName}" loop detected: ${loopReason}`);
+
+        const finalResp = subRunner.getFinalLlmResp();
+        const partialResult = finalResp?.completionText?.trim();
+
+        yield {
+          content: [{
+            type: "text" as const,
+            text:
+              `[Loop Detection] Sub-agent "${agentName}" was terminated due to a detected loop.\n` +
+              `Reason: ${loopReason}\n` +
+              `Steps taken: ${stepCount}\n` +
+              (partialResult
+                ? `Partial result before termination:\n${partialResult}`
+                : "No partial result was produced before termination."),
+          }],
+          isError: true,
+        };
+        return;
+      }
+
+      if (timedOut) {
+        // Force-stop the sub-agent
+        subRunner.requestStop();
+        console.warn(`[SubAgent Timeout] Agent "${agentName}" exceeded execution time limit of ${executionTimeoutMs / 1000}s`);
+
+        const finalResp = subRunner.getFinalLlmResp();
+        const partialResult = finalResp?.completionText?.trim();
+
+        yield {
+          content: [{
+            type: "text" as const,
+            text:
+              `[Timeout] Sub-agent "${agentName}" was terminated after exceeding the execution time limit (${executionTimeoutMs / 1000}s).\n` +
+              `Steps taken: ${stepCount}\n` +
+              (partialResult
+                ? `Partial result before termination:\n${partialResult}`
+                : "No partial result was produced before termination."),
+          }],
+          isError: true,
+        };
+        return;
+      }
 
       const finalResp = subRunner.getFinalLlmResp();
-      const partialResult = finalResp?.completionText?.trim();
+      const resultText = finalResp?.completionText ?? "Sub-agent completed with no text output.";
 
       yield {
-        content: [{
-          type: "text" as const,
-          text:
-            `[Loop Detection] Sub-agent "${agentName}" was terminated due to a detected loop.\n` +
-            `Reason: ${loopReason}\n` +
-            `Steps taken: ${stepCount}\n` +
-            (partialResult
-              ? `Partial result before termination:\n${partialResult}`
-              : "No partial result was produced before termination."),
-        }],
-        isError: true,
+        content: [{ type: "text" as const, text: resultText }],
       };
-      return;
-    }
-
-    if (timedOut) {
-      // Force-stop the sub-agent
-      subRunner.requestStop();
-      // Release file locks held by this sub-agent
+    } finally {
+      // Always release file locks held by this sub-agent, whether the run
+      // completed normally, was terminated (loop/timeout), or threw.
       fileLockManager.releaseAll(agentName);
-      console.warn(`[SubAgent Timeout] Agent "${agentName}" exceeded execution time limit of ${executionTimeoutMs / 1000}s`);
-
-      const finalResp = subRunner.getFinalLlmResp();
-      const partialResult = finalResp?.completionText?.trim();
-
-      yield {
-        content: [{
-          type: "text" as const,
-          text:
-            `[Timeout] Sub-agent "${agentName}" was terminated after exceeding the execution time limit (${executionTimeoutMs / 1000}s).\n` +
-            `Steps taken: ${stepCount}\n` +
-            (partialResult
-              ? `Partial result before termination:\n${partialResult}`
-              : "No partial result was produced before termination."),
-        }],
-        isError: true,
-      };
-      return;
     }
-
-    // Release file locks held by this sub-agent
-    fileLockManager.releaseAll(agentName);
-
-    const finalResp = subRunner.getFinalLlmResp();
-    const resultText = finalResp?.completionText ?? "Sub-agent completed with no text output.";
-
-    yield {
-      content: [{ type: "text" as const, text: resultText }],
-    };
   }
 
   protected async *executeHandoffBackground(

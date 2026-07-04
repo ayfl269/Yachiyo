@@ -491,6 +491,18 @@ export function createLocalPythonTool(workspaceRoot?: string): FunctionTool<Comp
 
       try {
         const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolvePromise) => {
+          // Guard against double-resolution: when `python3` fails to spawn on
+          // Windows, Node may still emit a `close` event on the failed child
+          // even after we've already started the `python` fallback. Without
+          // this flag, the first `close` would resolve with empty output and
+          // silently drop the real output from `child2`.
+          let resolved = false;
+          const resolveOnce = (value: { stdout: string; stderr: string; code: number }): void => {
+            if (resolved) return;
+            resolved = true;
+            resolvePromise(value);
+          };
+
           const child = execFile(
             "python3",
             ["-c", code],
@@ -501,19 +513,23 @@ export function createLocalPythonTool(workspaceRoot?: string): FunctionTool<Comp
           let stderr = "";
           child.stdout?.on("data", (data: Buffer) => { stdout += data.toString(); });
           child.stderr?.on("data", (data: Buffer) => { stderr += data.toString(); });
-          child.on("close", (code) => { resolvePromise({ stdout, stderr, code: code ?? 0 }); });
+          child.on("close", (code) => { resolveOnce({ stdout, stderr, code: code ?? 0 }); });
           child.on("error", (err) => {
-            // python3 might not exist on Windows, try python
+            // python3 might not exist on Windows, try python.
+            // Remove the close listener from the failed child so its later
+            // `close` event (Node emits one even after a spawn error) cannot
+            // race with child2's result.
+            child.removeAllListeners("close");
             if (process.platform === "win32" && err.message.includes("python3")) {
               const child2 = execFile("python", ["-c", code], { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 });
               let stdout2 = "";
               let stderr2 = "";
               child2.stdout?.on("data", (data: Buffer) => { stdout2 += data.toString(); });
               child2.stderr?.on("data", (data: Buffer) => { stderr2 += data.toString(); });
-              child2.on("close", (code2) => { resolvePromise({ stdout: stdout2, stderr: stderr2, code: code2 ?? 0 }); });
-              child2.on("error", () => { resolvePromise({ stdout: "", stderr: "Python not found", code: -1 }); });
+              child2.on("close", (code2) => { resolveOnce({ stdout: stdout2, stderr: stderr2, code: code2 ?? 0 }); });
+              child2.on("error", () => { resolveOnce({ stdout: "", stderr: "Python not found", code: -1 }); });
             } else {
-              resolvePromise({ stdout: "", stderr: err.message, code: -1 });
+              resolveOnce({ stdout: "", stderr: err.message, code: -1 });
             }
           });
         });

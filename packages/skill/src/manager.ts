@@ -179,7 +179,10 @@ export class SkillManager {
       if (value === "true") value = true;
       else if (value === "false") value = false;
       else if (/^-?\d+(\.\d+)?$/.test(value)) value = Number(value);
-      else if (value.startsWith("[") && value.endsWith("[")) {
+      else if (value.startsWith("[") && value.endsWith("]")) {
+        // C-16 fix: previous condition was `endsWith("[")` (a typo) which
+        // never matched any valid array literal, so every array-typed skill
+        // metadata field silently fell through and stayed a string.
         try { value = JSON.parse(value.replace(/'/g, '"')); } catch { /* keep as string */ }
       }
 

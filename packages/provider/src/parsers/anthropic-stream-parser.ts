@@ -18,7 +18,16 @@ export async function* parseAnthropicStream(
   response: Response,
   abortSignal?: AbortSignal,
 ): AsyncGenerator<LLMResponse, void, unknown> {
-  let currentToolCall: ToolCallAccum | null = null;
+  // Anthropic may stream multiple `tool_use` blocks concurrently within a
+  // single message (parallel function calling). Each block carries an
+  // `index` identifying which slot it belongs to. Previously we kept a single
+  // `currentToolCall` variable, which meant that when a new
+  // `content_block_start` arrived before the previous block's
+  // `content_block_stop`, the previous tool call's accumulated arguments were
+  // silently overwritten. We now key accumulators by block index so that
+  // concurrent tool_use blocks can be tracked independently.
+  const toolCallAccumByIndex = new Map<number, ToolCallAccum>();
+  let activeToolIndex: number | null = null;
 
   for await (const event of parseSSEStream(response, abortSignal)) {
     const eventType = event.event;
@@ -50,6 +59,7 @@ export async function* parseAnthropicStream(
 
       case "content_block_start": {
         const d = data as {
+          index?: number;
           content_block?: {
             type?: string;
             id?: string;
@@ -57,12 +67,15 @@ export async function* parseAnthropicStream(
             text?: string;
           };
         };
+        const blockIdx = d.index ?? 0;
         if (d.content_block?.type === "tool_use" && d.content_block.id) {
-          currentToolCall = {
+          const accum: ToolCallAccum = {
             id: d.content_block.id,
             name: d.content_block.name ?? "",
             arguments: "",
           };
+          toolCallAccumByIndex.set(blockIdx, accum);
+          activeToolIndex = blockIdx;
         }
         if (d.content_block?.type === "text" && d.content_block.text) {
           result.completionText = d.content_block.text;
@@ -72,6 +85,7 @@ export async function* parseAnthropicStream(
 
       case "content_block_delta": {
         const d = data as {
+          index?: number;
           delta?: {
             type?: string;
             text?: string;
@@ -86,23 +100,34 @@ export async function* parseAnthropicStream(
           result.reasoningContent = d.delta.thinking;
         }
         if (d.delta?.type === "input_json_delta" && d.delta.partial_json) {
-          if (currentToolCall) {
-            currentToolCall.arguments += d.delta.partial_json;
+          // Deltas carry their own `index` so we can route the partial JSON
+          // to the correct accumulator even when multiple tool_use blocks
+          // are interleaved on the wire.
+          const idx: number = d.index ?? activeToolIndex ?? 0;
+          const accum = toolCallAccumByIndex.get(idx);
+          if (accum) {
+            accum.arguments += d.delta.partial_json;
           }
         }
         break;
       }
 
       case "content_block_stop": {
-        if (currentToolCall) {
-          result.toolsCallIds = [currentToolCall.id];
-          result.toolsCallName = [currentToolCall.name];
+        const d = data as { index?: number };
+        const blockIdx: number = d.index ?? activeToolIndex ?? 0;
+        const accum = toolCallAccumByIndex.get(blockIdx);
+        if (accum) {
+          result.toolsCallIds = [accum.id];
+          result.toolsCallName = [accum.name];
           try {
-            result.toolsCallArgs = [JSON.parse(currentToolCall.arguments)];
+            result.toolsCallArgs = [JSON.parse(accum.arguments)];
           } catch {
-            result.toolsCallArgs = [{ raw: currentToolCall.arguments }];
+            result.toolsCallArgs = [{ raw: accum.arguments }];
           }
-          currentToolCall = null;
+          toolCallAccumByIndex.delete(blockIdx);
+          if (activeToolIndex === blockIdx) {
+            activeToolIndex = null;
+          }
         }
         break;
       }

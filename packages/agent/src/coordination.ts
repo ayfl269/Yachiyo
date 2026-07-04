@@ -463,7 +463,23 @@ export async function executeParallelSubAgents(
       // Wait for capacity using event-driven notification instead of
       // 50ms busy-wait polling. The manager emits "task_completed" and
       // "task_failed" when a slot frees up.
-      while (!manager.hasCapacity) {
+      //
+      // Race-condition fix: multiple waiters wake up simultaneously when a
+      // single slot is freed, but only one will succeed in startTask().
+      // Previously the losers would `return` and their tasks were silently
+      // dropped (never executed, never marked failed). We now loop back and
+      // re-wait when startTask() returns false, so every submitted task is
+      // eventually either run or explicitly failed.
+      while (!manager.startTask(taskId)) {
+        // If the task was already picked up by another path (e.g. status
+        // changed away from "pending"), startTask returns false permanently.
+        // Detect that case and bail out to avoid an infinite loop.
+        const current = manager.getTask(taskId);
+        if (!current || current.status !== "pending") return;
+
+        // Still pending but at capacity — wait for the next slot.
+        if (manager.hasCapacity) continue; // retry immediately if a slot opened
+
         await new Promise<void>((resolve) => {
           const onSlotFree = (): void => {
             manager.removeListener("task_completed", onSlotFree);
@@ -474,8 +490,6 @@ export async function executeParallelSubAgents(
           manager.addListener("task_failed", onSlotFree);
         });
       }
-
-      if (!manager.startTask(taskId)) return;
 
       try {
         const result = await executor(task.agentName, task.input);

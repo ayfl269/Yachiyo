@@ -57,20 +57,37 @@ export async function* parseGeminiStream(
     const parts = chunk.candidates?.[0]?.content?.parts;
     if (parts) {
       for (const part of parts) {
-        if (part.thought) {
-          if (typeof part.thought === "string") {
-            result.reasoningContent = part.thought;
-          } else if (part.text) {
-            result.reasoningContent = part.text;
-          }
+        // C-15 fix: Gemini's `part.thought` field has two distinct semantic
+        // shapes and the original truthy check conflated them:
+        //   1. string  → thought *itself* contains the reasoning content
+        //   2. boolean → mere flag indicating "this part is a thinking block";
+        //                it does NOT mean part.text should be treated as
+        //                reasoning. When thought===true, part.text is still
+        //                user-visible completion text.
+        // Previously `if (part.thought)` matched both shapes, so a boolean
+        // `true` flag caused part.text to be misclassified as reasoning and
+        // silently dropped from the user-visible completion. We now use
+        // strict type checks and only treat the string form as reasoning.
+        if (typeof part.thought === "string" && part.thought.length > 0) {
+          result.reasoningContent = part.thought;
           hasContent = true;
-        } else if (part.text) {
+        }
+        if (part.text) {
+          // part.text is always user-visible completion, regardless of the
+          // thought flag.
           result.completionText = part.text;
           hasContent = true;
         }
         if (part.functionCall) {
           const fc = part.functionCall;
-          const id = `gemini_fc_${fc.name}_${functionCallIndex++}`;
+          // C-14 fix: the previous ID format `gemini_fc_<name>_<idx>` could
+          // not be reversed by gemini-converter.ts, which used
+          // `slice("gemini_fc_".length)` and ended up with `<name>_<idx>`
+          // (e.g. "getWeather_0") instead of `<name>`. This broke the
+          // tool-call round-trip. We now use a `__idx_<n>` suffix that the
+          // converter strips via regex, leaving the original function name
+          // intact even when it contains underscores or trailing digits.
+          const id = `gemini_fc_${fc.name}__idx_${functionCallIndex++}`;
           result.toolsCallIds = [id];
           result.toolsCallName = [fc.name];
           result.toolsCallArgs = [fc.args ?? {}];
