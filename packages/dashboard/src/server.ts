@@ -482,6 +482,33 @@ export class DashboardServer {
       }));
   }
 
+  /**
+   * 生成缓存命中 Token 的趋势数据（按时间桶聚合所有模型的 tokenInputCached 总和）。
+   * 时间桶划分与 generateTrendSeriesFromStats 保持一致，便于在同一图表中对比。
+   */
+  private generateCachedTrendFromStats(
+    stats: Array<{ tokenInputCached: number; createdAt: Date }>,
+    days: number
+  ): Array<[number, number]> {
+    if (stats.length === 0) return [];
+
+    const intervalMs = days <= 1 ? 3600000 : (days <= 3 ? 7200000 : 86400000);
+    const now = Date.now();
+    const buckets = Math.min(days * (days <= 1 ? 24 : days <= 3 ? 12 : 7), 24);
+
+    const bucketSums = new Array<number>(buckets).fill(0);
+    for (const s of stats) {
+      const bucketIdx = Math.floor((s.createdAt.getTime() - (now - buckets * intervalMs)) / intervalMs);
+      const clampedIdx = Math.max(0, Math.min(buckets - 1, bucketIdx));
+      bucketSums[clampedIdx] += (s.tokenInputCached || 0);
+    }
+
+    return Array.from({ length: buckets }, (_, i) => {
+      const ts = now - (buckets - 1 - i) * intervalMs;
+      return [ts, bucketSums[i]] as [number, number];
+    });
+  }
+
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // CORS (allowlist-based; no longer reflects "*")
     this.applyCorsHeaders(req, res);
@@ -2524,6 +2551,11 @@ export class DashboardServer {
         const rangeMinutes = days * 24 * 60;
         const avgTpm = rangeMinutes > 0 ? Math.round(totalTokens / rangeMinutes) : 0;
 
+        // Cache hit stats: tokenInputCached is the cache-read hit tokens
+        const totalCachedTokens = stats.reduce((sum, s) => sum + (s.tokenInputCached || 0), 0);
+        const totalInputTokens = stats.reduce((sum, s) => sum + (s.tokenInputOther || 0) + (s.tokenInputCached || 0), 0);
+        const cacheHitRate = totalInputTokens > 0 ? totalCachedTokens / totalInputTokens : 0;
+
         res.writeHead(200);
         res.end(JSON.stringify({
           status: "ok",
@@ -2534,6 +2566,7 @@ export class DashboardServer {
             today_by_provider: todayByProvider,
             trend: {
               series: this.generateTrendSeriesFromStats(stats, days),
+              cached_trend: this.generateCachedTrendFromStats(stats, days),
             },
             range_by_provider: ranking,
             range_total_tokens: totalTokens,
@@ -2542,6 +2575,8 @@ export class DashboardServer {
             range_avg_duration_ms: Math.round(avgDuration),
             range_avg_tpm: avgTpm,
             range_success_rate: 1.0,
+            range_total_cached_tokens: totalCachedTokens,
+            range_cache_hit_rate: Math.round(cacheHitRate * 10000) / 10000,
           },
         }));
       } catch (err: unknown) {

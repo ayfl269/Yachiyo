@@ -45,13 +45,15 @@ interface UmoRankingItem {
 
 interface ProviderTokenStatsResponse {
   days: TokenRange
-  trend: { series: ProviderTrendItem[]; total_series: Array<[number, number]> }
+  trend: { series: ProviderTrendItem[]; total_series: Array<[number, number]>; cached_trend: Array<[number, number]> }
   range_total_tokens: number
   range_total_calls: number
   range_avg_ttft_ms: number
   range_avg_duration_ms: number
   range_avg_tpm: number
   range_success_rate: number
+  range_total_cached_tokens: number
+  range_cache_hit_rate: number
   range_by_provider: ProviderRankingItem[]
   range_by_umo: UmoRankingItem[]
   today_total_tokens: number
@@ -226,12 +228,22 @@ export default function Dashboard({ isLightMode }: { isLightMode: boolean }) {
     { label: '运行时间', value: formatRunningTime(baseStats?.running), note: `启动于 ${formatDateTime(baseStats?.start_time ?? 0)}`, icon: 'timer' as const },
   ], [baseStats, providerStats])
 
-  const providerTrendSeries = useMemo<ChartSeries>(() =>
-    aggregateOverflowSeries(providerStats?.trend.series ?? []).map((item) => ({
+  const providerTrendSeries = useMemo<ChartSeries>(() => {
+    const modelSeries = aggregateOverflowSeries(providerStats?.trend.series ?? []).map((item) => ({
       name: item.name,
       data: item.data
     }))
-  , [providerStats])
+    const cachedTrend = providerStats?.trend.cached_trend ?? []
+    if (cachedTrend.length > 0) {
+      return [
+        ...modelSeries,
+        { name: '缓存命中 Token', data: cachedTrend }
+      ]
+    }
+    return modelSeries
+  }, [providerStats])
+
+  const hasCacheLine = (providerStats?.trend.cached_trend?.length ?? 0) > 0
 
   const rangeProviderRanking = providerStats?.range_by_provider ?? []
 
@@ -243,46 +255,70 @@ export default function Dashboard({ isLightMode }: { isLightMode: boolean }) {
     const rate = providerStats?.range_success_rate ?? 0
     return `${(rate * 100).toFixed(1)}%`
   })()
+  const rangeCachedTokensLabel = formatCompactNumber(providerStats?.range_total_cached_tokens ?? 0)
+  const rangeCacheHitRateLabel = (() => {
+    const rate = providerStats?.range_cache_hit_rate ?? 0
+    if (rate <= 0) return '—'
+    return `${(rate * 100).toFixed(1)}%`
+  })()
 
+  const cacheLineColor = isDark ? '#22D3EE' : '#06B6D4'
   const chartColors = isDark
-    ? ['#6F8FAF', '#7E9A73', '#A78468', '#8A78A8', '#6B9995', '#B07A87', '#8C8F62', '#7C8798']
-    : ['#5F7E9B', '#708865', '#9A7557', '#786696', '#5D8985', '#9C6674', '#80844F', '#69788D']
+    ? ['#6F8FAF', '#7E9A73', '#A78468', '#8A78A8', '#6B9995', '#B07A87', '#8C8F62', '#7C8798', cacheLineColor]
+    : ['#5F7E9B', '#708865', '#9A7557', '#786696', '#5D8985', '#9C6674', '#80844F', '#69788D', cacheLineColor]
 
   const chartTextColor = isDark ? '#A1A1AA' : '#64748B'
   const chartBorderColor = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.08)'
 
-  const providerChartOptions: ApexOptions = useMemo(() => ({
-    chart: {
-      background: 'transparent',
-      toolbar: { show: false },
-      zoom: { enabled: false },
-      stacked: true,
-      fontFamily: 'Inter, system-ui, -apple-system, sans-serif'
-    },
-    theme: { mode: isDark ? 'dark' : 'light' },
-    plotOptions: { bar: { horizontal: false, borderRadius: 4, columnWidth: '58%' } },
-    colors: chartColors,
-    dataLabels: { enabled: false },
-    grid: { borderColor: chartBorderColor },
-    xaxis: {
-      type: 'datetime',
-      labels: { datetimeUTC: false, style: { colors: chartTextColor } },
-      axisBorder: { color: chartBorderColor },
-      axisTicks: { color: chartBorderColor }
-    },
-    yaxis: {
-      labels: {
-        formatter: (value) => formatCompactNumber(Number(value)),
-        style: { colors: chartTextColor }
+  const providerChartOptions: ApexOptions = useMemo(() => {
+    const modelCount = providerTrendSeries.length - (hasCacheLine ? 1 : 0)
+    // 模型系列用实线，缓存命中系列用虚线突出显示
+    const strokeDash = hasCacheLine
+      ? [...Array(modelCount).fill(0), 6]
+      : Array(providerTrendSeries.length).fill(0)
+    const strokeWidth = hasCacheLine
+      ? [...Array(modelCount).fill(2), 3]
+      : Array(providerTrendSeries.length).fill(2)
+    return {
+      chart: {
+        background: 'transparent',
+        toolbar: { show: false },
+        zoom: { enabled: false },
+        fontFamily: 'Inter, system-ui, -apple-system, sans-serif'
+      },
+      theme: { mode: isDark ? 'dark' : 'light' },
+      colors: chartColors,
+      stroke: {
+        curve: 'smooth',
+        width: strokeWidth,
+        dash: strokeDash
+      },
+      markers: {
+        size: 0,
+        hover: { size: 4 }
+      },
+      dataLabels: { enabled: false },
+      grid: { borderColor: chartBorderColor },
+      xaxis: {
+        type: 'datetime',
+        labels: { datetimeUTC: false, style: { colors: chartTextColor } },
+        axisBorder: { color: chartBorderColor },
+        axisTicks: { color: chartBorderColor }
+      },
+      yaxis: {
+        labels: {
+          formatter: (value) => formatCompactNumber(Number(value)),
+          style: { colors: chartTextColor }
+        }
+      },
+      tooltip: { theme: isDark ? 'dark' : 'light', x: { format: 'MM/dd HH:mm' } },
+      legend: {
+        position: 'top',
+        horizontalAlign: 'left',
+        labels: { colors: chartTextColor }
       }
-    },
-    tooltip: { theme: isDark ? 'dark' : 'light', x: { format: 'MM/dd HH:mm' } },
-    legend: {
-      position: 'top',
-      horizontalAlign: 'left',
-      labels: { colors: chartTextColor }
     }
-  }), [isDark, chartColors, chartTextColor, chartBorderColor])
+  }, [isDark, chartColors, chartTextColor, chartBorderColor, providerTrendSeries, hasCacheLine])
 
   const renderCardIcon = (icon: string) => {
     switch (icon) {
@@ -350,7 +386,7 @@ export default function Dashboard({ isLightMode }: { isLightMode: boolean }) {
             <div className="token-section-head">
               <div>
                 <div className="section-title">模型调用</div>
-                <div className="section-subtitle">模型 Token 消耗与调用指标</div>
+                <div className="section-subtitle">模型 Token 使用与缓存指标</div>
               </div>
             </div>
 
@@ -359,10 +395,10 @@ export default function Dashboard({ isLightMode }: { isLightMode: boolean }) {
                 <div className="card-head">
                   <div>
                     <div className="section-title">模型调用趋势</div>
-                    <div className="section-subtitle">各模型 Token 消耗随时间变化</div>
+                    <div className="section-subtitle">各模型 Token 消耗与缓存命中趋势（虚线为缓存命中）</div>
                   </div>
                 </div>
-                <Chart type="bar" height={420} options={providerChartOptions} series={providerTrendSeries} />
+                <Chart type="line" height={420} options={providerChartOptions} series={providerTrendSeries} />
               </section>
 
               <section className="token-side-column">
@@ -377,6 +413,8 @@ export default function Dashboard({ isLightMode }: { isLightMode: boolean }) {
                     <div className="token-meta-item"><span>平均 TTFT</span><strong>{rangeAvgTtftLabel}</strong></div>
                     <div className="token-meta-item"><span>平均响应时间</span><strong>{rangeAvgDurationLabel}</strong></div>
                     <div className="token-meta-item"><span>平均 TPM</span><strong>{rangeAvgTpmLabel}</strong></div>
+                    <div className="token-meta-item"><span>缓存命中 Token</span><strong>{rangeCachedTokensLabel}</strong></div>
+                    <div className="token-meta-item"><span>缓存命中率</span><strong>{rangeCacheHitRateLabel}</strong></div>
                     <div className="token-meta-item"><span>成功率</span><strong>{rangeSuccessRateLabel}</strong></div>
                   </div>
                 </section>
