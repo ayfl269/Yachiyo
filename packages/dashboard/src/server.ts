@@ -2031,6 +2031,9 @@ export class DashboardServer {
             custom_extra_body: (config as any).custom_extra_body || {},
             max_context_tokens: (config as any).max_context_tokens || 0,
             reasoning: (config as any).reasoning || false,
+            // Masked key — real key only returned via reveal_key endpoint
+            key: maskSecret((config as any).apiKey),
+            api_base: (config as any).baseUrl || "",
           });
         }
 
@@ -2050,6 +2053,41 @@ export class DashboardServer {
       } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ status: "error", message: safeClientMessage(err, "获取模板失败") }));
+      }
+      return;
+    }
+
+    // 21.5 GET /api/config/provider_sources/reveal_key — 获取提供商源的真实 API Key
+    if (pathname === "/api/config/provider_sources/reveal_key" && req.method === "GET") {
+      try {
+        const id = url.searchParams.get("id");
+        if (!id) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ status: "error", message: "缺少 id 参数" }));
+          return;
+        }
+        const sqliteStore = (this.ctx.providerManager as any).sqliteStore;
+        let realKey = "";
+        if (sqliteStore) {
+          try {
+            const source = sqliteStore.getProviderSource(id);
+            if (source?.key) {
+              realKey = source.key as string;
+            }
+          } catch { /* table not created yet */ }
+        }
+        // 也查找 provider config 中的 apiKey（非聊天类型可能直接存储在 config 中）
+        if (!realKey) {
+          const config = this.ctx.providerManager.providerConfigs.get(id);
+          if (config && (config as any).apiKey) {
+            realKey = (config as any).apiKey as string;
+          }
+        }
+        res.writeHead(200);
+        res.end(JSON.stringify({ status: "ok", key: realKey }));
+      } catch (err: unknown) {
+        res.writeHead(200);
+        res.end(JSON.stringify({ status: "error", message: safeClientMessage(err, "获取密钥失败") }));
       }
       return;
     }

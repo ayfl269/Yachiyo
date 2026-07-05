@@ -4,7 +4,7 @@ import {
   Plus, Save, Trash2, RefreshCw, Search, Download,
   Pencil, Power, Image as ImageIcon,
   AudioWaveform, Wrench, Brain, Globe,
-  Play, Sparkles
+  Play, Sparkles, Eye, EyeOff
 } from 'lucide-react'
 import { useToast, ToastPortal, Modal } from './shared'
 
@@ -381,6 +381,27 @@ export default function ProviderManager() {
   const [nonChatConfigData, setNonChatConfigData] = useState<Record<string, any> | null>(null)
   const [nonChatConfigMode, setNonChatConfigMode] = useState<'add' | 'edit'>('edit')
   const [nonChatConfigSaving, setNonChatConfigSaving] = useState(false)
+
+  // API Key visibility toggles
+  const [showSourceApiKey, setShowSourceApiKey] = useState(false)
+  const [showNonChatPassword, setShowNonChatPassword] = useState<Record<string, boolean>>({})
+  const [revealedCardKeys, setRevealedCardKeys] = useState<Set<string>>(new Set())
+  // Cache of revealed real API keys (source/provider id -> real key)
+  const [revealedKeys, setRevealedKeys] = useState<Record<string, string>>({})
+
+  /** Fetch the real API key from backend for a given source/provider id. */
+  async function fetchRealKey(id: string): Promise<string> {
+    if (revealedKeys[id]) return revealedKeys[id]
+    try {
+      const res = await fetch(`/api/config/provider_sources/reveal_key?id=${encodeURIComponent(id)}`)
+      const data = await res.json()
+      if (data.status === 'ok' && data.key) {
+        setRevealedKeys(prev => ({ ...prev, [id]: data.key }))
+        return data.key as string
+      }
+    } catch { /* ignore */ }
+    return ''
+  }
 
   // Toast
   const { toast, showMessage } = useToast()
@@ -1126,7 +1147,30 @@ export default function ProviderManager() {
                       </div>
                       <div className="form-group">
                         <label>API Key</label>
-                        <input type="password" value={editableProviderSource.key ?? ''} onChange={e => setSourceField('key', e.target.value)} className="form-control font-mono" placeholder="鉴权密钥" />
+                        <div className="input-with-toggle">
+                          <input
+                            type={showSourceApiKey ? 'text' : 'password'}
+                            value={showSourceApiKey && revealedKeys[editableProviderSource.id] ? revealedKeys[editableProviderSource.id] : (editableProviderSource.key ?? '')}
+                            onChange={e => setSourceField('key', e.target.value)}
+                            className="form-control font-mono"
+                            placeholder="鉴权密钥"
+                          />
+                          <button
+                            type="button"
+                            className="toggle-visibility"
+                            onClick={async () => {
+                              const next = !showSourceApiKey
+                              setShowSourceApiKey(next)
+                              if (next && editableProviderSource.id) {
+                                const realKey = await fetchRealKey(editableProviderSource.id)
+                                if (realKey) setSourceField('key', realKey)
+                              }
+                            }}
+                            title={showSourceApiKey ? '隐藏' : '显示'}
+                          >
+                            {showSourceApiKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                          </button>
+                        </div>
                       </div>
                       <div className="form-group span-2">
                         <label>API Base URL</label>
@@ -1349,7 +1393,28 @@ export default function ProviderManager() {
                   {provider.key && (
                     <div className="info-row">
                       <span className="label">API Key:</span>
-                      <span className="value font-mono text-truncate">••••••••</span>
+                      <span className="value font-mono text-truncate">
+                        {revealedCardKeys.has(provider.id) ? (revealedKeys[provider.provider_source_id || provider.id] || '••••••••') : '••••••••'}
+                      </span>
+                      <button
+                        type="button"
+                        className="toggle-visibility inline"
+                        onClick={async () => {
+                          const isRevealed = revealedCardKeys.has(provider.id)
+                          if (!isRevealed) {
+                            await fetchRealKey(provider.provider_source_id || provider.id)
+                          }
+                          setRevealedCardKeys(prev => {
+                            const next = new Set(prev)
+                            if (next.has(provider.id)) next.delete(provider.id)
+                            else next.add(provider.id)
+                            return next
+                          })
+                        }}
+                        title={revealedCardKeys.has(provider.id) ? '隐藏' : '显示'}
+                      >
+                        {revealedCardKeys.has(provider.id) ? <EyeOff size={13} /> : <Eye size={13} />}
+                      </button>
                     </div>
                   )}
                   {provider.modalities?.length ? (
@@ -1565,13 +1630,33 @@ export default function ProviderManager() {
                       />
                     )}
                     {field.type === 'string' && field.password && (
-                      <input
-                        type="password"
-                        value={nonChatConfigData[field.key] ?? ''}
-                        onChange={e => setNonChatField(field.key, e.target.value)}
-                        className="form-control font-mono"
-                        placeholder={field.placeholder}
-                      />
+                      <div className="input-with-toggle">
+                        <input
+                          type={showNonChatPassword[field.key] ? 'text' : 'password'}
+                          value={showNonChatPassword[field.key] && revealedKeys[nonChatConfigData.provider_source_id || nonChatConfigData.id]
+                            ? revealedKeys[nonChatConfigData.provider_source_id || nonChatConfigData.id]
+                            : (nonChatConfigData[field.key] ?? '')}
+                          onChange={e => setNonChatField(field.key, e.target.value)}
+                          className="form-control font-mono"
+                          placeholder={field.placeholder}
+                        />
+                        <button
+                          type="button"
+                          className="toggle-visibility"
+                          onClick={async () => {
+                            const next = !showNonChatPassword[field.key]
+                            setShowNonChatPassword(prev => ({ ...prev, [field.key]: next }))
+                            if (next && nonChatConfigData.id) {
+                              const lookupId = nonChatConfigData.provider_source_id || nonChatConfigData.id
+                              const realKey = await fetchRealKey(lookupId)
+                              if (realKey) setNonChatField(field.key, realKey)
+                            }
+                          }}
+                          title={showNonChatPassword[field.key] ? '隐藏' : '显示'}
+                        >
+                          {showNonChatPassword[field.key] ? <EyeOff size={14} /> : <Eye size={14} />}
+                        </button>
+                      </div>
                     )}
                     {field.type === 'number' && (
                       <input

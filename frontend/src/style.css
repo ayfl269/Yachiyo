@@ -226,6 +226,41 @@ body.light-theme textarea::placeholder {
   cursor: not-allowed;
 }
 
+/* API Key show/hide toggle */
+.input-with-toggle {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.input-with-toggle .form-control {
+  padding-right: 2.2rem;
+}
+
+.toggle-visibility {
+  position: absolute;
+  right: 0.5rem;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 0.2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s ease;
+}
+
+.toggle-visibility:hover {
+  color: var(--text-primary);
+}
+
+.toggle-visibility.inline {
+  position: static;
+  flex-shrink: 0;
+  margin-left: 0.4rem;
+}
+
 .form-group {
   display: flex;
   flex-direction: column;
