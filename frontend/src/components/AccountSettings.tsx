@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Save, KeyRound } from 'lucide-react'
+import { Save, KeyRound, Eye, EyeOff } from 'lucide-react'
 import { useToast, ToastPortal } from './shared'
 
 const DASHBOARD_TOKEN_KEY = 'dashboardAuthToken'
@@ -16,6 +16,9 @@ export default function AccountSettings({ onSuccess }: AccountSettingsProps) {
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [loading, setLoading] = useState(false)
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false)
+  const [showNewPassword, setShowNewPassword] = useState(false)
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false)
 
   useEffect(() => {
     fetch('/api/auth/status')
@@ -107,15 +110,26 @@ export default function AccountSettings({ onSuccess }: AccountSettingsProps) {
       <form onSubmit={handleSubmit}>
         <div style={{ marginBottom: 14 }}>
           <label htmlFor="current-password" style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>当前密码</label>
-          <input
-            id="current-password"
-            type="password"
-            value={currentPassword}
-            onChange={(e) => setCurrentPassword(e.target.value)}
-            placeholder="输入当前密码以验证身份"
-            autoComplete="current-password"
-            style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 14 }}
-          />
+          <div className="input-with-toggle">
+            <input
+              id="current-password"
+              type={showCurrentPassword ? 'text' : 'password'}
+              value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)}
+              placeholder="输入当前密码以验证身份"
+              autoComplete="current-password"
+              style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', paddingRight: '2.4rem', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 14 }}
+            />
+            <button
+              type="button"
+              className="toggle-visibility"
+              onClick={() => setShowCurrentPassword(!showCurrentPassword)}
+              title={showCurrentPassword ? '隐藏密码' : '显示密码'}
+              tabIndex={-1}
+            >
+              {showCurrentPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+            </button>
+          </div>
         </div>
 
         <div style={{ marginBottom: 14 }}>
@@ -133,28 +147,50 @@ export default function AccountSettings({ onSuccess }: AccountSettingsProps) {
 
         <div style={{ marginBottom: 14 }}>
           <label htmlFor="update-password" style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>新密码</label>
-          <input
-            id="update-password"
-            type="password"
-            value={newPassword}
-            onChange={(e) => setNewPassword(e.target.value)}
-            placeholder="至少8个字符"
-            autoComplete="new-password"
-            style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 14 }}
-          />
+          <div className="input-with-toggle">
+            <input
+              id="update-password"
+              type={showNewPassword ? 'text' : 'password'}
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              placeholder="至少8个字符"
+              autoComplete="new-password"
+              style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', paddingRight: '2.4rem', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 14 }}
+            />
+            <button
+              type="button"
+              className="toggle-visibility"
+              onClick={() => setShowNewPassword(!showNewPassword)}
+              title={showNewPassword ? '隐藏密码' : '显示密码'}
+              tabIndex={-1}
+            >
+              {showNewPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+            </button>
+          </div>
         </div>
 
         <div style={{ marginBottom: 20 }}>
           <label htmlFor="update-confirm-password" style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>确认新密码</label>
-          <input
-            id="update-confirm-password"
-            type="password"
-            value={confirmPassword}
-            onChange={(e) => setConfirmPassword(e.target.value)}
-            placeholder="再次输入新密码以确认"
-            autoComplete="new-password"
-            style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 14 }}
-          />
+          <div className="input-with-toggle">
+            <input
+              id="update-confirm-password"
+              type={showConfirmPassword ? 'text' : 'password'}
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              placeholder="再次输入新密码以确认"
+              autoComplete="new-password"
+              style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', paddingRight: '2.4rem', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 14 }}
+            />
+            <button
+              type="button"
+              className="toggle-visibility"
+              onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+              title={showConfirmPassword ? '隐藏密码' : '显示密码'}
+              tabIndex={-1}
+            >
+              {showConfirmPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+            </button>
+          </div>
         </div>
 
         <button type="submit" className="btn btn-primary" disabled={loading} style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%', justifyContent: 'center' }}>

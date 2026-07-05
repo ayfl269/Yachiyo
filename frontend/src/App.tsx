@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import {
   LayoutDashboard, Settings, HardDrive, Terminal, Sun, Moon,
   Users, FileCode, BookOpen, Sparkles, Menu, MessageSquare,
-  Database, Puzzle, Brain, Lock, LogOut, UserCircle, KeyRound
+  Database, Puzzle, Brain, Lock, LogOut, UserCircle, KeyRound,
+  Eye, EyeOff
 } from 'lucide-react'
 import Dashboard from './components/Dashboard'
 import ConfigManager from './components/ConfigManager'
@@ -67,6 +68,9 @@ function App() {
   const [newPasswordInput, setNewPasswordInput] = useState('')
   const [confirmPasswordInput, setConfirmPasswordInput] = useState('')
   const [authError, setAuthError] = useState('')
+  const [showLoginPassword, setShowLoginPassword] = useState(false)
+  const [showNewPassword, setShowNewPassword] = useState(false)
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false)
   const [showUserMenu, setShowUserMenu] = useState(false)
   const [showAccountModal, setShowAccountModal] = useState(false)
   const userMenuRef = useRef<HTMLDivElement>(null)
@@ -250,15 +254,26 @@ function App() {
             </div>
             <div style={{ marginBottom: 16 }}>
               <label htmlFor="login-password" style={{ position: 'absolute', left: -9999, width: 1, height: 1, overflow: 'hidden' }}>密码</label>
-              <input
-                id="login-password"
-                type="password"
-                value={passwordInput}
-                onChange={(e) => setPasswordInput(e.target.value)}
-                placeholder="密码"
-                autoComplete="current-password"
-                style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 14 }}
-              />
+              <div className="input-with-toggle">
+                <input
+                  id="login-password"
+                  type={showLoginPassword ? 'text' : 'password'}
+                  value={passwordInput}
+                  onChange={(e) => setPasswordInput(e.target.value)}
+                  placeholder="密码"
+                  autoComplete="current-password"
+                  style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', paddingRight: '2.4rem', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 14 }}
+                />
+                <button
+                  type="button"
+                  className="toggle-visibility"
+                  onClick={() => setShowLoginPassword(!showLoginPassword)}
+                  title={showLoginPassword ? '隐藏密码' : '显示密码'}
+                  tabIndex={-1}
+                >
+                  {showLoginPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                </button>
+              </div>
             </div>
 
             {authError && <div style={{ color: '#e5484d', fontSize: 12, marginBottom: 14, background: 'rgba(229, 72, 77, 0.1)', padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(229, 72, 77, 0.2)' }}>{authError}</div>}
@@ -299,24 +314,46 @@ function App() {
             
             <div style={{ marginBottom: 12 }}>
               <label style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>新密码</label>
-              <input
-                type="password"
-                value={newPasswordInput}
-                onChange={(e) => setNewPasswordInput(e.target.value)}
-                placeholder="至少5个字符"
-                style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 14 }}
-              />
+              <div className="input-with-toggle">
+                <input
+                  type={showNewPassword ? 'text' : 'password'}
+                  value={newPasswordInput}
+                  onChange={(e) => setNewPasswordInput(e.target.value)}
+                  placeholder="至少5个字符"
+                  style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', paddingRight: '2.4rem', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 14 }}
+                />
+                <button
+                  type="button"
+                  className="toggle-visibility"
+                  onClick={() => setShowNewPassword(!showNewPassword)}
+                  title={showNewPassword ? '隐藏密码' : '显示密码'}
+                  tabIndex={-1}
+                >
+                  {showNewPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                </button>
+              </div>
             </div>
 
             <div style={{ marginBottom: 16 }}>
               <label style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>确认新密码</label>
-              <input
-                type="password"
-                value={confirmPasswordInput}
-                onChange={(e) => setConfirmPasswordInput(e.target.value)}
-                placeholder="再次输入以确认"
-                style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 14 }}
-              />
+              <div className="input-with-toggle">
+                <input
+                  type={showConfirmPassword ? 'text' : 'password'}
+                  value={confirmPasswordInput}
+                  onChange={(e) => setConfirmPasswordInput(e.target.value)}
+                  placeholder="再次输入以确认"
+                  style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', paddingRight: '2.4rem', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 14 }}
+                />
+                <button
+                  type="button"
+                  className="toggle-visibility"
+                  onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                  title={showConfirmPassword ? '隐藏密码' : '显示密码'}
+                  tabIndex={-1}
+                >
+                  {showConfirmPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                </button>
+              </div>
             </div>
 
             {authError && <div style={{ color: '#e5484d', fontSize: 12, marginBottom: 14, background: 'rgba(229, 72, 77, 0.1)', padding: '8px 12px', borderRadius: 6, border: '1px solid rgba(229, 72, 77, 0.2)' }}>{authError}</div>}
