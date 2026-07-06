@@ -295,6 +295,11 @@ async function main(): Promise<void> {
   console.log("║   Windows 进程级沙箱测试                  ║");
   console.log("╚══════════════════════════════════════════╝");
 
+  if (process.platform !== "win32") {
+    console.error("❌ 错误: 此测试只能在 Windows 平台运行!");
+    process.exit(1);
+  }
+
   try {
     testBuildWindowsSandboxScript();
     testBuildWindowsSandboxCommand();

@@ -40,8 +40,12 @@ jobs:
       - name: Run typecheck
         run: pnpm run typecheck
 
-      - name: Run tests
+      - name: Run core tests
         run: pnpm run test
+
+      - name: Run Windows sandbox tests
+        if: matrix.os == 'windows-latest'
+        run: pnpm run test:windows
 
   security-audit:
     runs-on: ubuntu-latest

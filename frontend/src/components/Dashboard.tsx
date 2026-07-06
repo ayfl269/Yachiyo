@@ -399,13 +399,7 @@ export default function Dashboard({ isLightMode }: { isLightMode: boolean }) {
                     <div className="section-subtitle">各模型 Token 消耗与缓存命中趋势（虚线为缓存命中）</div>
                   </div>
                 </div>
-                {providerTrendSeries.length > 0 && providerTrendSeries.some((s) => Array.isArray(s.data) && s.data.length > 0) ? (
-                  <Chart type="line" height={420} options={providerChartOptions} series={providerTrendSeries} />
-                ) : (
-                  <div className="chart-empty-placeholder" style={{ height: 420, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)', fontSize: 14 }}>
-                    暂无模型调用数据
-                  </div>
-                )}
+                <Chart type="line" height={420} options={providerChartOptions} series={providerTrendSeries} />
               </section>
 
               <section className="token-side-column">
