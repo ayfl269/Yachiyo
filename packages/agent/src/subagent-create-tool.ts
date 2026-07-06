@@ -161,16 +161,16 @@ export function createSubAgentCreateTool(_workspaceRoot?: string): FunctionTool<
       dynamicSubAgentRegistry.register(agent, handoff);
 
       // Also register with the FunctionToolManager and ToolSet if available.
-      // Use addFunc when available (goes through validation) instead of
-      // directly mutating the funcList array.
+      // `handoff` is an already-built FunctionTool instance; addFunc() is
+      // for building a new tool from (name, args, desc, handler) primitives
+      // and would create an invalid tool (handler=undefined) when passed an
+      // instance. Push directly, deduping by name first so re-creating a
+      // same-named sub-agent replaces the old handoff instead of stacking.
       const wrapper = _ctx as ContextWrapper<SubAgentCreateToolContext> | undefined;
       const toolMgr = wrapper?._toolMgr;
       if (toolMgr) {
-        if (typeof toolMgr.addFunc === "function") {
-          toolMgr.addFunc(handoff);
-        } else {
-          toolMgr.funcList.push(handoff);
-        }
+        toolMgr.removeFunc(handoff.name);
+        toolMgr.funcList.push(handoff);
       }
       const funcToolSet = wrapper?._funcToolSet;
       if (funcToolSet) {
