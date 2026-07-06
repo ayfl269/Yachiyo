@@ -11,6 +11,7 @@ import { createWriteStream, existsSync } from "fs";
 import { join, resolve, normalize, dirname, sep } from "path";
 import { execFile, type ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
+import { isPathAllowed, type SandboxPolicy } from "./sandbox.js";
 
 // ── Permission helpers ──
 
@@ -21,6 +22,8 @@ export interface ComputerToolContext {
   providerSettings?: {
     computer_use_runtime?: "local" | "sandbox";
   };
+  /** Optional sandbox policy. When present, path/domain restrictions are enforced. */
+  sandboxPolicy?: SandboxPolicy;
 }
 
 function isLocalRuntime(context: ComputerToolContext): boolean {
@@ -56,7 +59,7 @@ export function getAbortSignal(_ctx: unknown): AbortSignal | undefined {
  */
 export function normalizeRwPath(
   rawPath: string,
-  options: { localEnv: boolean; workspaceRoot?: string }
+  options: { localEnv: boolean; workspaceRoot?: string; sandboxPolicy?: SandboxPolicy }
 ): string {
   let p = normalize(rawPath);
   const root = resolve(options.workspaceRoot ?? process.cwd());
@@ -71,6 +74,15 @@ export function normalizeRwPath(
   // live inside it. This blocks absolute paths and `../` escape attempts.
   if (p !== root && !p.startsWith(root + sep)) {
     throw new Error(`Path '${p}' is outside the workspace root '${root}'`);
+  }
+
+  // Apply sandbox policy path restrictions (allowedPaths / deniedPaths).
+  // This enforces the SandboxPolicy that was previously defined but never
+  // checked at the tool execution layer.
+  if (options.sandboxPolicy) {
+    if (!isPathAllowed(p, options.sandboxPolicy)) {
+      throw new Error(`Path '${p}' is denied by sandbox policy`);
+    }
   }
 
   return p;
@@ -118,7 +130,7 @@ export function createFileReadTool(workspaceRoot?: string): FunctionTool<Compute
       const limit = args[2] != null ? Number(args[2]) : undefined;
       const context = getToolContext(_ctx);
       const localEnv = isLocalRuntime(context);
-      const normalizedPath = normalizeRwPath(path, { localEnv, workspaceRoot });
+      const normalizedPath = normalizeRwPath(path, { localEnv, workspaceRoot, sandboxPolicy: context.sandboxPolicy });
 
       try {
         if (!existsSync(normalizedPath)) {
@@ -164,7 +176,7 @@ export function createFileWriteTool(workspaceRoot?: string): FunctionTool<Comput
       const context = getToolContext(_ctx);
 
       const localEnv = isLocalRuntime(context);
-      const normalizedPath = normalizeRwPath(path, { localEnv, workspaceRoot });
+      const normalizedPath = normalizeRwPath(path, { localEnv, workspaceRoot, sandboxPolicy: context.sandboxPolicy });
 
       try {
         await mkdir(dirname(normalizedPath), { recursive: true });
@@ -202,7 +214,7 @@ export function createFileEditTool(workspaceRoot?: string): FunctionTool<Compute
       const context = getToolContext(_ctx);
 
       const localEnv = isLocalRuntime(context);
-      const normalizedPath = normalizeRwPath(path, { localEnv, workspaceRoot });
+      const normalizedPath = normalizeRwPath(path, { localEnv, workspaceRoot, sandboxPolicy: context.sandboxPolicy });
 
       try {
         if (!existsSync(normalizedPath)) {
@@ -266,7 +278,7 @@ export function createGrepTool(workspaceRoot?: string): FunctionTool<ComputerToo
       const abortSignal = getAbortSignal(_ctx);
       const localEnv = isLocalRuntime(context);
       const root = workspaceRoot ?? process.cwd();
-      const normalizedPath = searchPath ? normalizeRwPath(searchPath, { localEnv, workspaceRoot: root }) : root;
+      const normalizedPath = searchPath ? normalizeRwPath(searchPath, { localEnv, workspaceRoot: root, sandboxPolicy: context.sandboxPolicy }) : root;
 
       try {
         const results = await grepSearch(pattern, normalizedPath, {
@@ -336,6 +348,39 @@ function isDestructiveCommand(command: string): boolean {
  */
 const backgroundProcesses = new Map<string, ChildProcess>();
 
+/** Maximum number of concurrent background processes to prevent unbounded growth. */
+const MAX_BACKGROUND_PROCESSES = 50;
+
+/**
+ * Remove entries for child processes that have already exited. Returns the
+ * number of entries removed. Useful before starting a new background process
+ * to reclaim slots held by dead entries whose `close`/`error` events have
+ * already fired but were not yet cleaned up.
+ */
+export function cleanupDeadBackgroundProcesses(): number {
+  let cleaned = 0;
+  for (const [id, child] of backgroundProcesses) {
+    if (child.killed || child.exitCode !== null || child.signalCode !== null) {
+      backgroundProcesses.delete(id);
+      cleaned++;
+    }
+  }
+  return cleaned;
+}
+
+/**
+ * List all currently registered background processes. Useful for diagnostics
+ * and cleanup. Does NOT include processes whose entries have already been
+ * removed by the `close`/`error` listeners.
+ */
+export function listBackgroundProcesses(): { id: string; pid: number | undefined; killed: boolean }[] {
+  const result: { id: string; pid: number | undefined; killed: boolean }[] = [];
+  for (const [id, child] of backgroundProcesses) {
+    result.push({ id, pid: child.pid, killed: child.killed });
+  }
+  return result;
+}
+
 /**
  * Kill a background shell process by id. Returns true if a process was found
  * and signalled, false otherwise. The caller may follow up with a SIGKILL if
@@ -385,6 +430,17 @@ export function createShellTool(workspaceRoot?: string): FunctionTool<ComputerTo
 
       try {
         if (background) {
+          // Enforce a maximum number of concurrent background processes to
+          // prevent unbounded Map growth and resource exhaustion.
+          if (backgroundProcesses.size >= MAX_BACKGROUND_PROCESSES) {
+            cleanupDeadBackgroundProcesses();
+            if (backgroundProcesses.size >= MAX_BACKGROUND_PROCESSES) {
+              return {
+                content: [{ type: "text", text: `error: Maximum number of background processes (${MAX_BACKGROUND_PROCESSES}) reached. Use killBackgroundShell to terminate unused processes, or listBackgroundProcesses to inspect.` }],
+                isError: true,
+              };
+            }
+          }
           const id = crypto.randomUUID().slice(0, 8);
           // Write logs inside the workspace so file_read_tool can access them
           // (normalizeRwPath rejects paths outside workspaceRoot).
@@ -574,7 +630,7 @@ export function createListDirTool(workspaceRoot?: string): FunctionTool<Computer
       const context = getToolContext(_ctx);
       const localEnv = isLocalRuntime(context);
       const root = workspaceRoot ?? process.cwd();
-      const normalizedPath = dirPath ? normalizeRwPath(dirPath, { localEnv, workspaceRoot: root }) : root;
+      const normalizedPath = dirPath ? normalizeRwPath(dirPath, { localEnv, workspaceRoot: root, sandboxPolicy: context.sandboxPolicy }) : root;
 
       try {
         if (!existsSync(normalizedPath)) {
@@ -662,7 +718,7 @@ export function createFileDeleteTool(workspaceRoot?: string): FunctionTool<Compu
       const context = getToolContext(_ctx);
 
       const localEnv = isLocalRuntime(context);
-      const normalizedPath = normalizeRwPath(path, { localEnv, workspaceRoot });
+      const normalizedPath = normalizeRwPath(path, { localEnv, workspaceRoot, sandboxPolicy: context.sandboxPolicy });
 
       try {
         if (!existsSync(normalizedPath)) {
@@ -704,8 +760,8 @@ export function createFileMoveTool(workspaceRoot?: string): FunctionTool<Compute
       const context = getToolContext(_ctx);
 
       const localEnv = isLocalRuntime(context);
-      const normalizedSource = normalizeRwPath(source, { localEnv, workspaceRoot });
-      const normalizedDest = normalizeRwPath(destination, { localEnv, workspaceRoot });
+      const normalizedSource = normalizeRwPath(source, { localEnv, workspaceRoot, sandboxPolicy: context.sandboxPolicy });
+      const normalizedDest = normalizeRwPath(destination, { localEnv, workspaceRoot, sandboxPolicy: context.sandboxPolicy });
 
       try {
         if (!existsSync(normalizedSource)) {

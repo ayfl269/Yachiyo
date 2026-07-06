@@ -653,9 +653,15 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
     // Create a shallow copy of the runContext with the extended timeout so
     // the shared context is NOT mutated — otherwise a concurrent foreground
     // tool could inherit the extended timeout.
+    // CRITICAL: _toolAbortController must be reset to undefined so the
+    // background task is NOT killed when the foreground tool aborts (timeout
+    // or cancellation). The shallow copy above would otherwise share the
+    // same AbortController reference, causing the foreground abort to kill
+    // the background task.
     const backgroundContext: ContextWrapper<TContext> = {
       ...runContext,
       toolCallTimeout: BACKGROUND_TASK_TIMEOUT_SECONDS,
+      _toolAbortController: undefined,
     };
     let resultText = "";
     try {

@@ -70,6 +70,12 @@ export class DynamicSubAgentRegistry {
 /** Global singleton registry. */
 export const dynamicSubAgentRegistry = new DynamicSubAgentRegistry();
 
+/** Maximum number of dynamic sub-agents to prevent resource exhaustion. */
+const MAX_DYNAMIC_SUBAGENTS = 50;
+
+/** Maximum length of sub-agent instructions to prevent prompt bloat. */
+const MAX_INSTRUCTIONS_LENGTH = 16 * 1024; // 16KB
+
 // ── Create Sub-Agent Tool ──
 
 export function createSubAgentCreateTool(_workspaceRoot?: string): FunctionTool<SubAgentCreateToolContext> {
@@ -123,6 +129,16 @@ export function createSubAgentCreateTool(_workspaceRoot?: string): FunctionTool<
         return { content: [{ type: "text", text: "error: Sub-agent instructions are required." }], isError: true };
       }
 
+      // Enforce instructions length limit to prevent prompt bloat / resource exhaustion
+      if (instructions.length > MAX_INSTRUCTIONS_LENGTH) {
+        return { content: [{ type: "text", text: `error: Sub-agent instructions too long (${instructions.length} chars, max ${MAX_INSTRUCTIONS_LENGTH}).` }], isError: true };
+      }
+
+      // Enforce maximum sub-agent count to prevent resource exhaustion
+      if (dynamicSubAgentRegistry.getAll().length >= MAX_DYNAMIC_SUBAGENTS) {
+        return { content: [{ type: "text", text: `error: Maximum number of dynamic sub-agents (${MAX_DYNAMIC_SUBAGENTS}) reached. Delete unused sub-agents before creating new ones.` }], isError: true };
+      }
+
       // Check for name conflicts
       if (dynamicSubAgentRegistry.has(name)) {
         return { content: [{ type: "text", text: `error: A sub-agent named "${name}" already exists. Use a different name or delegate to the existing one via transfer_to_${name}.` }], isError: true };
@@ -144,11 +160,17 @@ export function createSubAgentCreateTool(_workspaceRoot?: string): FunctionTool<
       // Register in the global registry
       dynamicSubAgentRegistry.register(agent, handoff);
 
-      // Also register with the FunctionToolManager and ToolSet if available
+      // Also register with the FunctionToolManager and ToolSet if available.
+      // Use addFunc when available (goes through validation) instead of
+      // directly mutating the funcList array.
       const wrapper = _ctx as ContextWrapper<SubAgentCreateToolContext> | undefined;
       const toolMgr = wrapper?._toolMgr;
       if (toolMgr) {
-        toolMgr.funcList.push(handoff);
+        if (typeof toolMgr.addFunc === "function") {
+          toolMgr.addFunc(handoff);
+        } else {
+          toolMgr.funcList.push(handoff);
+        }
       }
       const funcToolSet = wrapper?._funcToolSet;
       if (funcToolSet) {

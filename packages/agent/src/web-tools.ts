@@ -7,6 +7,7 @@ import type { CallToolResult, ImageContent } from "./types.js";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import TurndownService from "turndown";
 import { safeFetch, assertSafeUrl } from "@yachiyo/common/ssrf-guard.js";
+import { isDomainAllowed, type SandboxPolicy } from "./sandbox.js";
 
 // ── Shared Chromium browser instance ──
 //
@@ -21,15 +22,22 @@ async function getSharedBrowser(): Promise<Browser> {
   if (sharedBrowser && sharedBrowser.isConnected()) return sharedBrowser;
   if (browserLaunchPromise) return browserLaunchPromise;
   browserLaunchPromise = (async () => {
-    const browser = await chromium.launch({
-      headless: true,
-      args: ["--disable-blink-features=AutomationControlled", "--no-sandbox"],
-    });
-    sharedBrowser = browser;
-    browserLaunchPromise = null;
-    // Auto-cleanup on process exit.
-    process.once("exit", () => { try { browser.close(); } catch { /* ignore */ } });
-    return browser;
+    try {
+      const browser = await chromium.launch({
+        headless: true,
+        args: ["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+      });
+      sharedBrowser = browser;
+      browserLaunchPromise = null;
+      // Auto-cleanup on process exit.
+      process.once("exit", () => { try { browser.close(); } catch { /* ignore */ } });
+      return browser;
+    } catch (e) {
+      // Reset the promise on failure so subsequent calls can retry instead
+      // of caching the rejected promise forever.
+      browserLaunchPromise = null;
+      throw e;
+    }
   })();
   return browserLaunchPromise;
 }
@@ -58,6 +66,8 @@ export interface WebToolContext {
     web_search_api_url?: string;
     web_search_api_key?: string;
   };
+  /** Optional sandbox policy. When present, domain restrictions are enforced. */
+  sandboxPolicy?: SandboxPolicy;
 }
 
 // ── HTML → Markdown conversion (using turndown) ──
@@ -118,6 +128,12 @@ export function createWebFetchTool(): FunctionTool<WebToolContext> {
       const maxLength = args[5] != null ? Number(args[5]) : 50000;
       const format = (args[6] as string) ?? "markdown";
       const screenshot = args[7] === true;
+
+      // Enforce sandbox domain restrictions.
+      const webCtx = (_ctx as { context?: WebToolContext } | undefined)?.context;
+      if (webCtx?.sandboxPolicy && !isDomainAllowed(url, webCtx.sandboxPolicy)) {
+        return { content: [{ type: "text", text: `error: Domain not allowed by sandbox policy for URL: ${url}` }], isError: true };
+      }
 
       try {
         const controller = new AbortController();
@@ -355,19 +371,24 @@ class PlaywrightSearchProviderBase implements WebSearchProvider {
     if (this._launchPromise) return this._launchPromise;
 
     this._launchPromise = (async () => {
-      const browser = await chromium.launch({
-        headless: true,
-        args: [
-          "--disable-blink-features=AutomationControlled",
-          "--disable-features=IsolateOrigins,site-per-process",
-          "--disable-infobars",
-          "--no-sandbox",
-          "--disable-dev-shm-usage",
-        ],
-      });
-      this._browser = browser;
-      this._launchPromise = null;
-      return browser;
+      try {
+        const browser = await chromium.launch({
+          headless: true,
+          args: [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-features=IsolateOrigins,site-per-process",
+            "--disable-infobars",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+          ],
+        });
+        this._browser = browser;
+        this._launchPromise = null;
+        return browser;
+      } catch (e) {
+        this._launchPromise = null;
+        throw e;
+      }
     })();
 
     return this._launchPromise;
@@ -655,6 +676,10 @@ export function createWebSearchTool(customProvider?: WebSearchProvider, engine: 
       const maxResults = args[1] != null ? Number(args[1]) : 5;
       const fetchContent = args[2] === true;
 
+      // Enforce sandbox domain restrictions on fetched result URLs.
+      const webCtx = (_ctx as { context?: WebToolContext } | undefined)?.context;
+      const domainPolicy = webCtx?.sandboxPolicy;
+
       try {
         const rawResults = await provider.search(query, maxResults);
 
@@ -678,6 +703,10 @@ export function createWebSearchTool(customProvider?: WebSearchProvider, engine: 
           const enrichedResults = await Promise.all(
             results.map(async (r) => {
               try {
+                // Enforce sandbox domain restrictions on each result URL.
+                if (domainPolicy && !isDomainAllowed(r.url, domainPolicy)) {
+                  return { ...r, content: "[Domain not allowed by sandbox policy]" };
+                }
                 // safeFetch re-validates each result URL (and redirect hop)
                 // against private/reserved IP ranges. Search result URLs are
                 // attacker-influencable and could otherwise be used for SSRF.
@@ -751,6 +780,12 @@ export function createHttpRequestTool(): FunctionTool<WebToolContext> {
       const contentType = (args[4] as string) ?? "application/json";
       const timeout = args[5] != null ? Number(args[5]) : 30;
       const followRedirects = args[6] !== false;
+
+      // Enforce sandbox domain restrictions.
+      const webCtx = (_ctx as { context?: WebToolContext } | undefined)?.context;
+      if (webCtx?.sandboxPolicy && !isDomainAllowed(url, webCtx.sandboxPolicy)) {
+        return { content: [{ type: "text", text: `error: Domain not allowed by sandbox policy for URL: ${url}` }], isError: true };
+      }
 
       try {
         const controller = new AbortController();
