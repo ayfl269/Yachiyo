@@ -2085,6 +2085,14 @@ export class DashboardServer {
     }
 
     // 21.5 GET /api/config/provider_sources/reveal_key — 获取提供商源的真实 API Key
+    //
+    // Security notes:
+    // - This endpoint returns the API key in plain text. It is protected by
+    //   the global /api/ auth middleware (Bearer token session).
+    // - Responses carry `Cache-Control: no-store` to prevent browsers/proxies
+    //   from caching the key in disk or memory.
+    // - A per-session rate limiter caps reveal requests to mitigate ID
+    //   enumeration and reduce exposure window.
     if (pathname === "/api/config/provider_sources/reveal_key" && req.method === "GET") {
       try {
         const id = url.searchParams.get("id");
@@ -2093,6 +2101,28 @@ export class DashboardServer {
           res.end(JSON.stringify({ status: "error", message: "缺少 id 参数" }));
           return;
         }
+
+        // Per-session rate limiting: max 30 reveals per 5 minutes. This
+        // prevents scripted ID enumeration while remaining generous enough
+        // for normal dashboard use.
+        const authToken = (req.headers["authorization"] ?? "").slice(7).trim();
+        const rlKey = `reveal:${authToken}`;
+        const now = Date.now();
+        const rlEntry = this.loginAttempts.get(rlKey);
+        const REVEAL_WINDOW_MS = 5 * 60 * 1000;
+        const REVEAL_MAX = 30;
+        if (rlEntry && now - rlEntry.firstAttemptAt <= REVEAL_WINDOW_MS) {
+          rlEntry.count++;
+          if (rlEntry.count > REVEAL_MAX) {
+            const retryAfterSec = Math.ceil((REVEAL_WINDOW_MS - (now - rlEntry.firstAttemptAt)) / 1000);
+            res.writeHead(429, { "Content-Type": "application/json", "Retry-After": String(retryAfterSec) });
+            res.end(JSON.stringify({ status: "error", message: `密钥查看过于频繁，请 ${retryAfterSec} 秒后重试` }));
+            return;
+          }
+        } else {
+          this.loginAttempts.set(rlKey, { count: 1, firstAttemptAt: now });
+        }
+
         const sqliteStore = (this.ctx.providerManager as any).sqliteStore;
         let realKey = "";
         if (sqliteStore) {
@@ -2110,10 +2140,16 @@ export class DashboardServer {
             realKey = (config as any).apiKey as string;
           }
         }
-        res.writeHead(200);
+        // no-store prevents browsers/proxies from caching the key response.
+        res.writeHead(200, {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+          "Pragma": "no-cache",
+          "Expires": "0",
+        });
         res.end(JSON.stringify({ status: "ok", key: realKey }));
       } catch (err: unknown) {
-        res.writeHead(200);
+        res.writeHead(200, { "Cache-Control": "no-store" });
         res.end(JSON.stringify({ status: "error", message: safeClientMessage(err, "获取密钥失败") }));
       }
       return;
@@ -3692,23 +3728,79 @@ export class DashboardServer {
 
     const files: Array<{ originalName: string; tempPath: string; size: number }> = [];
 
-    const parts = body.toString("binary").split("--" + boundary);
+    // Parse multipart using Buffer.indexOf() on the raw binary buffer.
+    //
+    // The previous implementation converted the entire body to a "binary"
+    // string via `body.toString("binary")` and used `String.split()` +
+    // `String.substring()`. This is fragile because:
+    //   1. The boundary delimiter bytes could legitimately appear inside a
+    //      binary file (e.g., a ZIP archive), causing false splits.
+    //      (Mitigated here by searching for `--boundary\r\n` / `--boundary--`
+    //      with proper CRLF framing, but Buffer-level search is still safer.)
+    //   2. String operations on large bodies create extra copies, doubling
+    //      memory usage.
+    //   3. `Buffer.from(fileData, "binary")` is lossy for some edge cases.
+    //
+    // The Buffer-based approach below operates entirely on raw bytes,
+    // avoiding encoding issues and keeping memory usage to a single copy.
 
-    for (const part of parts) {
-      if (!part.includes("filename=")) continue;
+    const dashBoundary = Buffer.from("--" + boundary);
+    const CRLFCRLF = Buffer.from("\r\n\r\n");
 
-      const headerEnd = part.indexOf("\r\n\r\n");
-      if (headerEnd < 0) continue;
-      const header = part.substring(0, headerEnd);
-      const fileData = part.substring(headerEnd + 4);
+    let pos = 0;
+    while (pos < body.length) {
+      // Find the next boundary marker.
+      const partStart = body.indexOf(dashBoundary, pos);
+      if (partStart < 0) break;
 
-      const filenameMatch = header.match(/filename="(.+?)"/);
-      if (!filenameMatch) continue;
+      // Skip past the boundary + CRLF (or detect closing boundary `--`)
+      let headerStart = partStart + dashBoundary.length;
+      // Check for closing boundary: `--boundary--`
+      if (body[headerStart] === 0x2d /* '-' */ && body[headerStart + 1] === 0x2d /* '-' */) {
+        break; // end of multipart
+      }
+      // Skip CRLF after boundary (normal case)
+      if (body[headerStart] === 0x0d /* \r */ && body[headerStart + 1] === 0x0a /* \n */) {
+        headerStart += 2;
+      }
+
+      // Find the end of headers (\r\n\r\n)
+      const headerEnd = body.indexOf(CRLFCRLF, headerStart);
+      if (headerEnd < 0) break;
+
+      const headerBuf = body.subarray(headerStart, headerEnd);
+      const headerStr = headerBuf.toString("utf8");
+
+      // Find the next boundary (start of next part or closing)
+      const nextBoundary = body.indexOf(dashBoundary, headerEnd + 4);
+      if (nextBoundary < 0) break;
+
+      // File data is between headerEnd+4 and nextBoundary, minus the trailing CRLF.
+      let dataStart = headerEnd + 4;
+      let dataEnd = nextBoundary;
+      // The part data is followed by \r\n before the next boundary
+      if (dataEnd >= 2 && body[dataEnd - 2] === 0x0d && body[dataEnd - 1] === 0x0a) {
+        dataEnd -= 2;
+      }
+
+      const dataBuffer = body.subarray(dataStart, dataEnd);
+
+      // Only process parts with a filename header.
+      if (!/filename=/i.test(headerStr)) {
+        pos = nextBoundary;
+        continue;
+      }
+
+      const filenameMatch = headerStr.match(/filename="(.+?)"/i);
+      if (!filenameMatch) {
+        pos = nextBoundary;
+        continue;
+      }
       const originalName = decodeURIComponent(filenameMatch[1]);
 
-      const dataBuffer = Buffer.from(fileData, "binary");
       if (dataBuffer.length === 0) {
         files.push({ originalName, tempPath: "", size: 0 });
+        pos = nextBoundary;
         continue;
       }
 
@@ -3717,6 +3809,8 @@ export class DashboardServer {
       const tempPath = join(tmpDir, originalName.replace(/[^a-zA-Z0-9._-]/g, "_"));
       await writeFile(tempPath, dataBuffer);
       files.push({ originalName, tempPath, size: dataBuffer.length });
+
+      pos = nextBoundary;
     }
 
     return { files };

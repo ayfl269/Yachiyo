@@ -48,7 +48,50 @@ export class KBHelper {
           details: { status: response.status, statusText: response.statusText },
         });
       }
+
+      // Content-Type allowlist: only accept text-based content that the
+      // chunker can meaningfully process. Binary files (executables, images,
+      // archives) would produce garbage chunks and waste embedding tokens.
+      const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
+      const isAllowedType =
+        contentType.startsWith("text/") ||
+        contentType.includes("json") ||
+        contentType.includes("xml") ||
+        contentType.includes("markdown") ||
+        contentType.includes("plain") ||
+        contentType.includes("html") ||
+        contentType.includes("application/pdf") ||
+        contentType === ""; // some servers omit Content-Type; allow and let text() decide
+      if (!isAllowedType) {
+        throw new KnowledgeBaseUploadError({
+          stage: "download",
+          userMessage: `Unsupported Content-Type "${contentType}". Only text-based content (text/*, JSON, XML, HTML, PDF) is accepted.`,
+          details: { contentType, url: finalUrl },
+        });
+      }
+
+      // Cap the downloaded text size to prevent memory exhaustion from
+      // oversized documents. safeFetch already caps the stream at 10 MB,
+      // but we enforce a tighter limit here since the text is held in memory
+      // for chunking + embedding.
+      const MAX_TEXT_BYTES = 5 * 1024 * 1024; // 5 MB
+      const contentLength = parseInt(response.headers.get("content-length") ?? "0", 10);
+      if (contentLength > MAX_TEXT_BYTES) {
+        throw new KnowledgeBaseUploadError({
+          stage: "download",
+          userMessage: `Document too large (${contentLength} bytes, max ${MAX_TEXT_BYTES} bytes).`,
+          details: { contentLength, maxBytes: MAX_TEXT_BYTES, url: finalUrl },
+        });
+      }
+
       text = await response.text();
+      if (text.length > MAX_TEXT_BYTES) {
+        throw new KnowledgeBaseUploadError({
+          stage: "download",
+          userMessage: `Document too large after decode (${text.length} chars, max ${MAX_TEXT_BYTES} chars).`,
+          details: { textLength: text.length, maxBytes: MAX_TEXT_BYTES, url: finalUrl },
+        });
+      }
     } catch (error) {
       if (error instanceof KnowledgeBaseUploadError) throw error;
       throw new KnowledgeBaseUploadError({
