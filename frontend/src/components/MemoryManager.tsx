@@ -5,6 +5,7 @@ import {
   FileText, Hash, RefreshCw, Layers, Zap, Settings, BarChart3
 } from 'lucide-react'
 import { useToast, ToastPortal, Modal } from './shared'
+import { apiFetch } from '../lib/api'
 
 // ===== Types =====
 type MemoryType = 'short_term' | 'long_term' | 'persona' | 'user_profile'
@@ -152,7 +153,7 @@ export default function MemoryManager() {
       params.set('limit', '200')
       if (search.trim()) params.set('search', search.trim())
       if (type) params.set('memory_type', type)
-      const res = await fetch(`/api/memories?${params}`)
+      const res = await apiFetch(`/api/memories?${params}`)
       if (res.ok) {
         const data = await res.json()
         setMemories(data.memories || [])
@@ -168,7 +169,7 @@ export default function MemoryManager() {
 
   const fetchStats = async () => {
     try {
-      const res = await fetch('/api/memories/stats')
+      const res = await apiFetch('/api/memories/stats')
       if (res.ok) {
         setStats(await res.json())
       }
@@ -179,7 +180,7 @@ export default function MemoryManager() {
 
   const fetchConsolidationConfig = async () => {
     try {
-      const res = await fetch('/api/memories/consolidation-config')
+      const res = await apiFetch('/api/memories/consolidation-config')
       if (res.ok) {
         setConsolidationConfig(await res.json())
       }
@@ -195,7 +196,7 @@ export default function MemoryManager() {
       const params = new URLSearchParams()
       params.set('limit', '100')
       if (q.trim()) params.set('search', q.trim())
-      const res = await fetch(`/api/conversation-indices?${params}`)
+      const res = await apiFetch(`/api/conversation-indices?${params}`)
       if (res.ok) {
         const data = await res.json()
         setIndices(data.indices || [])
@@ -210,7 +211,7 @@ export default function MemoryManager() {
 
   const handleDeleteIndex = async (id: number) => {
     try {
-      const res = await fetch(`/api/conversation-indices/${id}`, { method: 'DELETE' })
+      const res = await apiFetch(`/api/conversation-indices/${id}`, { method: 'DELETE' })
       if (res.ok) {
         const data = await res.json()
         if (data.success) {
@@ -228,7 +229,7 @@ export default function MemoryManager() {
 
   const handleClearIndices = async () => {
     try {
-      const res = await fetch('/api/conversation-indices/clear', { method: 'POST' })
+      const res = await apiFetch('/api/conversation-indices/clear', { method: 'POST' })
       if (res.ok) {
         const data = await res.json()
         if (data.success) {
@@ -302,7 +303,7 @@ export default function MemoryManager() {
         .map(t => t.trim())
         .filter(Boolean)
 
-      const res = await fetch('/api/memories', {
+      const res = await apiFetch('/api/memories', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -346,7 +347,7 @@ export default function MemoryManager() {
     if (!deleteTarget) return
     const targetKey = deleteTarget.key
     try {
-      const res = await fetch(`/api/memories/${encodeURIComponent(targetKey)}`, { method: 'DELETE' })
+      const res = await apiFetch(`/api/memories/${encodeURIComponent(targetKey)}`, { method: 'DELETE' })
       if (res.ok) {
         const data = await res.json()
         if (data.success) {
@@ -374,7 +375,7 @@ export default function MemoryManager() {
   const handleClear = async () => {
     setClearing(true)
     try {
-      const res = await fetch('/api/memories/clear', { method: 'POST' })
+      const res = await apiFetch('/api/memories/clear', { method: 'POST' })
       if (res.ok) {
         const data = await res.json()
         if (data.success) {
@@ -398,7 +399,7 @@ export default function MemoryManager() {
   const handleConsolidate = async () => {
     setConsolidating(true)
     try {
-      const res = await fetch('/api/memories/consolidate', { method: 'POST' })
+      const res = await apiFetch('/api/memories/consolidate', { method: 'POST' })
       if (res.ok) {
         const data = await res.json()
         if (data.success) {

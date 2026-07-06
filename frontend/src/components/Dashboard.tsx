@@ -5,6 +5,7 @@ import {
   Activity, MessageSquare, Cpu, HardDrive, Timer,
   RefreshCw, Bot, Sparkles, AlertCircle
 } from 'lucide-react'
+import { apiFetch } from '../lib/api'
 
 type TokenRange = 1 | 3 | 7
 type ChartSeries = ApexAxisChartSeries
@@ -153,7 +154,7 @@ export default function Dashboard({ isLightMode }: { isLightMode: boolean }) {
 
   async function fetchBaseStats(): Promise<void> {
     const range = selectedRangeRef.current
-    const res = await fetch(`/api/stat/get?offset_sec=${range * 24 * 60 * 60}`)
+    const res = await apiFetch(`/api/stat/get?offset_sec=${range * 24 * 60 * 60}`)
     if (!res.ok) throw new Error('Failed to fetch base stats')
     const json = await res.json()
     setBaseStats(json.data)
@@ -161,7 +162,7 @@ export default function Dashboard({ isLightMode }: { isLightMode: boolean }) {
 
   async function fetchProviderStats(): Promise<void> {
     const range = selectedRangeRef.current
-    const res = await fetch(`/api/stat/provider-tokens?days=${range}`)
+    const res = await apiFetch(`/api/stat/provider-tokens?days=${range}`)
     if (!res.ok) throw new Error('Failed to fetch provider stats')
     const json = await res.json()
     setProviderStats(json.data)
@@ -398,7 +399,13 @@ export default function Dashboard({ isLightMode }: { isLightMode: boolean }) {
                     <div className="section-subtitle">各模型 Token 消耗与缓存命中趋势（虚线为缓存命中）</div>
                   </div>
                 </div>
-                <Chart type="line" height={420} options={providerChartOptions} series={providerTrendSeries} />
+                {providerTrendSeries.length > 0 && providerTrendSeries.some((s) => Array.isArray(s.data) && s.data.length > 0) ? (
+                  <Chart type="line" height={420} options={providerChartOptions} series={providerTrendSeries} />
+                ) : (
+                  <div className="chart-empty-placeholder" style={{ height: 420, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)', fontSize: 14 }}>
+                    暂无模型调用数据
+                  </div>
+                )}
               </section>
 
               <section className="token-side-column">

@@ -5,6 +5,7 @@ import {
   User, FileText, Zap
 } from 'lucide-react'
 import { useToast, ToastPortal, Modal } from './shared'
+import { apiFetch } from '../lib/api'
 
 // ===== Types =====
 interface Persona {
@@ -165,7 +166,7 @@ export default function PersonaManager() {
   const fetchPersonas = async () => {
     setLoading(true)
     try {
-      const res = await fetch('/api/personas')
+      const res = await apiFetch('/api/personas')
       if (res.ok) {
         setPersonas(await res.json())
       }
@@ -179,7 +180,7 @@ export default function PersonaManager() {
 
   const fetchTools = async () => {
     try {
-      const res = await fetch('/api/tools/list')
+      const res = await apiFetch('/api/tools/list')
       if (res.ok) {
         const data = await res.json()
         setAvailableTools(normalizeItems(data))
@@ -193,7 +194,7 @@ export default function PersonaManager() {
 
   const fetchSkills = async () => {
     try {
-      const res = await fetch('/api/skills')
+      const res = await apiFetch('/api/skills')
       if (res.ok) {
         const data = await res.json()
         setAvailableSkills(normalizeItems(data))
@@ -259,7 +260,7 @@ export default function PersonaManager() {
   const executeDelete = async () => {
     if (!deleteTarget) return
     try {
-      const res = await fetch(`/api/personas/${deleteTarget.id}`, { method: 'DELETE' })
+      const res = await apiFetch(`/api/personas/${deleteTarget.id}`, { method: 'DELETE' })
       if (res.ok) {
         showMessage(`角色 "${deleteTarget.name}" 已删除`)
         setShowDeleteModal(false)

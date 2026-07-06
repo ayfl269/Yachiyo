@@ -14,6 +14,7 @@ import {
   AlertTriangle,
 } from 'lucide-react'
 import { useToast, ToastPortal } from './shared'
+import { apiFetch } from '../lib/api'
 
 interface Conversation {
   id: string
@@ -78,7 +79,7 @@ export default function ChatDataManager() {
         pageSize: String(pageSize),
         searchQuery,
       })
-      const res = await fetch(`/api/conversations?${query}`)
+      const res = await apiFetch(`/api/conversations?${query}`)
       if (!res.ok) throw new Error('获取会话列表失败')
       const data = await res.json()
       setConversations(data.list)
@@ -99,7 +100,7 @@ export default function ChatDataManager() {
     setEditingIndex(null)
     setHasUnsavedChanges(false)
     try {
-      const res = await fetch(`/api/conversations/${encodeURIComponent(id)}`)
+      const res = await apiFetch(`/api/conversations/${encodeURIComponent(id)}`)
       if (!res.ok) throw new Error('获取会话详情失败')
       const data = await res.json()
       setSelectedConv(data)
@@ -123,7 +124,7 @@ export default function ChatDataManager() {
   const deleteConversation = async (id: string) => {
     if (!confirm('确定要永久删除此对话历史记录吗？')) return
     try {
-      const res = await fetch(`/api/conversations/${encodeURIComponent(id)}`, {
+      const res = await apiFetch(`/api/conversations/${encodeURIComponent(id)}`, {
         method: 'DELETE',
       })
       if (!res.ok) throw new Error('删除会话失败')
@@ -200,7 +201,7 @@ export default function ChatDataManager() {
     if (!selectedConvId) return
     setIsSaving(true)
     try {
-      const res = await fetch(`/api/conversations/${encodeURIComponent(selectedConvId)}`, {
+      const res = await apiFetch(`/api/conversations/${encodeURIComponent(selectedConvId)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

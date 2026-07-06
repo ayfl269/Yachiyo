@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Plus, Trash2, X, Users } from 'lucide-react'
 import { useToast, ToastPortal } from './shared'
+import { apiFetch } from '../lib/api'
 
 interface SubAgent {
   name: string
@@ -29,7 +30,7 @@ export default function SubAgentManager() {
   const fetchSubAgents = async () => {
     setLoading(true)
     try {
-      const res = await fetch('/api/subagents')
+      const res = await apiFetch('/api/subagents')
       if (res.ok) {
         setSubAgents(await res.json())
       }
@@ -78,7 +79,7 @@ export default function SubAgentManager() {
   const handleDelete = async (name: string) => {
     if (!window.confirm(`确定要注销并删除子 Agent "${name}" 吗？`)) return
     try {
-      const res = await fetch(`/api/subagents/${encodeURIComponent(name)}`, { method: 'DELETE' })
+      const res = await apiFetch(`/api/subagents/${encodeURIComponent(name)}`, { method: 'DELETE' })
       if (res.ok) {
         await fetchSubAgents()
       } else {
@@ -101,7 +102,7 @@ export default function SubAgentManager() {
     }
 
     try {
-      const res = await fetch('/api/subagents', {
+      const res = await apiFetch('/api/subagents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

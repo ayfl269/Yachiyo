@@ -8,6 +8,7 @@ import {
 } from 'lucide-react'
 import QRCode from 'qrcode'
 import { useToast, ToastPortal, Modal } from './shared'
+import { apiFetch } from '../lib/api'
 
 // ===== Types =====
 interface AdapterMeta {
@@ -123,7 +124,7 @@ export default function MessagePlatformManager() {
     setIsLoading(true)
     setErrorMsg('')
     try {
-      const res = await fetch('/api/adapters')
+      const res = await apiFetch('/api/adapters')
       if (!res.ok) throw new Error('获取平台列表失败')
       setAdapters(await res.json())
     } catch (err: any) {
@@ -146,7 +147,7 @@ export default function MessagePlatformManager() {
 
   const fetchQrLoginStatus = useCallback(async (adapterId: string): Promise<QRLoginStatus | null> => {
     try {
-      const res = await fetch(`/api/adapters/${encodeURIComponent(adapterId)}/qrcode`)
+      const res = await apiFetch(`/api/adapters/${encodeURIComponent(adapterId)}/qrcode`)
       if (res.ok) {
         const data: QRLoginStatus = await res.json()
         return data
@@ -167,7 +168,7 @@ export default function MessagePlatformManager() {
     const poll = async () => {
       pollCount++
       try {
-        const res = await fetch(`/api/adapters/${encodeURIComponent(adapterId)}/qrcode`)
+        const res = await apiFetch(`/api/adapters/${encodeURIComponent(adapterId)}/qrcode`)
         if (!res.ok) {
           console.warn(`[WxOC] qrcode API returned ${res.status}`)
           if (pollCount > 3) {
@@ -234,7 +235,7 @@ export default function MessagePlatformManager() {
       const scanningId = wxScanningAdapterId
       ;(async () => {
         try {
-          const res = await fetch(`/api/adapters/${encodeURIComponent(scanningId)}/qrcode`)
+          const res = await apiFetch(`/api/adapters/${encodeURIComponent(scanningId)}/qrcode`)
           if (res.ok) {
             const data = await res.json()
             const url = data.qrImgContent || ''
@@ -249,7 +250,7 @@ export default function MessagePlatformManager() {
         } catch { /* ignore */ }
         wxPostCreatePollTimer.current = setInterval(async () => {
           try {
-            const res = await fetch(`/api/adapters/${encodeURIComponent(scanningId)}/qrcode`)
+            const res = await apiFetch(`/api/adapters/${encodeURIComponent(scanningId)}/qrcode`)
             if (res.ok) {
               const data = await res.json()
               if (data.loggedIn) {
@@ -365,7 +366,7 @@ export default function MessagePlatformManager() {
 
     try {
       if (isEditMode) {
-        const res = await fetch(`/api/adapters/${encodeURIComponent(editingAdapterId)}`, {
+        const res = await apiFetch(`/api/adapters/${encodeURIComponent(editingAdapterId)}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ type: modalAdapterType, config })
@@ -377,7 +378,7 @@ export default function MessagePlatformManager() {
         resetForm()
         await fetchAdapters()
       } else {
-        const res = await fetch('/api/adapters', {
+        const res = await apiFetch('/api/adapters', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -408,7 +409,7 @@ export default function MessagePlatformManager() {
     const confirmMessage = `确定要移除平台适配器 "${id}" 吗？`
     if (!confirm(confirmMessage)) return
     try {
-      const res = await fetch(`/api/adapters/${encodeURIComponent(id)}`, {
+      const res = await apiFetch(`/api/adapters/${encodeURIComponent(id)}`, {
         method: 'DELETE'
       })
       if (!res.ok) {
@@ -423,7 +424,7 @@ export default function MessagePlatformManager() {
 
   const toggleAdapter = async (id: string) => {
     try {
-      const res = await fetch(`/api/adapters/${encodeURIComponent(id)}/toggle`, { method: 'PATCH' })
+      const res = await apiFetch(`/api/adapters/${encodeURIComponent(id)}/toggle`, { method: 'PATCH' })
       if (!res.ok) throw new Error('切换状态失败')
       await fetchAdapters()
     } catch (err: any) {

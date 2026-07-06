@@ -3,45 +3,10 @@ import { createRoot } from 'react-dom/client'
 import './style.css'
 import App from './App'
 
-// ── Global auth header injection ──────────────────────────────────────────
-// The Dashboard API requires `Authorization: Bearer <token>` when the server
-// is configured with an authToken. We wrap window.fetch so every same-origin
-// /api/ request automatically carries the token stored in localStorage by the
-// login screen (see App.tsx). This avoids editing fetch calls in every
-// component. The token is only sent to same-origin /api/ paths, never to
-// cross-origin URLs or static assets.
-//
-// CSRF note: This design is inherently immune to CSRF. CSRF attacks exploit
-// the browser's automatic cookie-sending behaviour — since we use localStorage
-// + an explicit Authorization header (not cookies), cross-origin requests
-// from malicious pages cannot authenticate. No CSRF token is needed.
-const DASHBOARD_TOKEN_KEY = 'dashboardAuthToken'
-const originalFetch = window.fetch.bind(window)
-window.fetch = (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-  let url: string
-  if (input instanceof Request) {
-    url = input.url
-  } else if (input instanceof URL) {
-    url = input.toString()
-  } else {
-    url = input
-  }
-  // Only inject auth for same-origin API calls.
-  const isSameOriginApi =
-    url.startsWith('/api/') || url.startsWith(`${window.location.origin}/api/`)
-  if (isSameOriginApi) {
-    const token = localStorage.getItem(DASHBOARD_TOKEN_KEY)
-    if (token) {
-      const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined))
-      // Don't overwrite an explicitly-provided Authorization header.
-      if (!headers.has('Authorization')) {
-        headers.set('Authorization', `Bearer ${token}`)
-      }
-      init = { ...init, headers }
-    }
-  }
-  return originalFetch(input, init)
-}
+// 鉴权头注入逻辑已迁移至 src/lib/api.ts 的 apiFetch 函数。
+// 此前对 window.fetch 的全局 monkey-patch 会影响所有第三方库
+// （apexcharts、qrcode 等）的请求，现已被移除。业务代码应使用
+// apiFetch('/api/...') 替代原生 fetch('/api/...')。
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

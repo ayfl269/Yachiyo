@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Save, KeyRound, Eye, EyeOff } from 'lucide-react'
 import { useToast, ToastPortal } from './shared'
-
-const DASHBOARD_TOKEN_KEY = 'dashboardAuthToken'
+import { authStore, apiFetch } from '../lib/api'
 
 interface AccountSettingsProps {
   onSuccess?: () => void
@@ -21,7 +20,7 @@ export default function AccountSettings({ onSuccess }: AccountSettingsProps) {
   const [showConfirmPassword, setShowConfirmPassword] = useState(false)
 
   useEffect(() => {
-    fetch('/api/auth/status')
+    apiFetch('/api/auth/status')
       .then((res) => res.json())
       .then((data) => {
         if (data.authenticated && data.username) {
@@ -58,7 +57,7 @@ export default function AccountSettings({ onSuccess }: AccountSettingsProps) {
 
     setLoading(true)
     try {
-      const res = await fetch('/api/auth/update-credentials', {
+      const res = await apiFetch('/api/auth/update-credentials', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -70,7 +69,7 @@ export default function AccountSettings({ onSuccess }: AccountSettingsProps) {
       })
       const data = await res.json()
       if (res.ok) {
-        localStorage.setItem(DASHBOARD_TOKEN_KEY, data.token)
+        authStore.setToken(data.token)
         setCurrentUsername(data.username)
         setNewUsername(data.username)
         setCurrentPassword('')

@@ -8,6 +8,7 @@ import {
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useToast, ToastPortal, Modal } from './shared'
+import { apiFetch } from '../lib/api'
 
 // ===== Types =====
 interface Skill {
@@ -139,7 +140,7 @@ export default function SkillManager() {
   async function fetchSkills() {
     setLoading(true)
     try {
-      const res = await fetch('/api/skills')
+      const res = await apiFetch('/api/skills')
       if (res.ok) setSkills(await res.json())
     } catch (error) {
       console.error('Error fetching skills:', error)
@@ -152,7 +153,7 @@ export default function SkillManager() {
   async function handleToggleActive(skill: Skill) {
     const newStatus = !skill.active
     try {
-      const res = await fetch(`/api/skills/${encodeURIComponent(skill.name)}/toggle`, {
+      const res = await apiFetch(`/api/skills/${encodeURIComponent(skill.name)}/toggle`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ active: newStatus })
@@ -182,7 +183,7 @@ export default function SkillManager() {
     const form = registerForm
     if (!form.name.trim()) { showMessage('技能名称不能为空', 'error'); return }
     try {
-      const res = await fetch('/api/skills', {
+      const res = await apiFetch('/api/skills', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -218,7 +219,7 @@ export default function SkillManager() {
   async function handleDelete() {
     if (!deleteTarget) return
     try {
-      const res = await fetch(`/api/skills/${encodeURIComponent(deleteTarget.name)}`, { method: 'DELETE' })
+      const res = await apiFetch(`/api/skills/${encodeURIComponent(deleteTarget.name)}`, { method: 'DELETE' })
       if (res.ok) {
         showMessage(`技能 "${deleteTarget.name}" 已删除`)
         setShowDeleteDialog(false)
@@ -236,7 +237,7 @@ export default function SkillManager() {
   // Download
   async function handleDownload(skill: Skill) {
     try {
-      const res = await fetch(`/api/skills/download?name=${encodeURIComponent(skill.name)}`)
+      const res = await apiFetch(`/api/skills/download?name=${encodeURIComponent(skill.name)}`)
       if (!res.ok) { showMessage('下载失败', 'error'); return }
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)
@@ -289,7 +290,7 @@ export default function SkillManager() {
     try {
       const formData = new FormData()
       for (const f of selectedFiles) formData.append('files', f)
-      const res = await fetch('/api/skills/upload-zip', { method: 'POST', body: formData })
+      const res = await apiFetch('/api/skills/upload-zip', { method: 'POST', body: formData })
       if (!res.ok) {
         const data = await res.json().catch(() => ({ error: '上传失败' }))
         throw new Error(data.error || `HTTP ${res.status}`)
@@ -322,7 +323,7 @@ export default function SkillManager() {
     setBrowserLoading(true)
     try {
       const params = new URLSearchParams({ name: skillName, path: dirPath })
-      const res = await fetch(`/api/skills/files?${params}`)
+      const res = await apiFetch(`/api/skills/files?${params}`)
       if (res.ok) {
         setBrowserFiles(await res.json())
       } else {
@@ -361,7 +362,7 @@ export default function SkillManager() {
     setShowFileViewer(true)
     try {
       const params = new URLSearchParams({ name: browserSkillName, path: entry.path })
-      const res = await fetch(`/api/skills/file?${params}`)
+      const res = await apiFetch(`/api/skills/file?${params}`)
       if (res.ok) {
         setViewerContent(await res.text())
       } else {
@@ -378,7 +379,7 @@ export default function SkillManager() {
   async function saveFileContent() {
     setViewerSaving(true)
     try {
-      const res = await fetch('/api/skills/file', {
+      const res = await apiFetch('/api/skills/file', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

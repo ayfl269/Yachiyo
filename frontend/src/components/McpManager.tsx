@@ -6,6 +6,7 @@ import {
   ChevronRight, Loader2, Server
 } from 'lucide-react'
 import { useToast, ToastPortal } from './shared'
+import { apiFetch } from '../lib/api'
 
 // ===== Types =====
 interface McpServer {
@@ -289,7 +290,7 @@ export default function McpManager() {
   // ===== API =====
   async function fetchServers() {
     try {
-      const res = await fetch('/api/tools/mcp/servers')
+      const res = await apiFetch('/api/tools/mcp/servers')
       if (res.ok) {
         setServers(await res.json())
       }
@@ -303,7 +304,7 @@ export default function McpManager() {
   async function toggleActive(server: McpServer) {
     const newActive = !server.active
     try {
-      const res = await fetch('/api/tools/mcp/update', {
+      const res = await apiFetch('/api/tools/mcp/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ serverName: server.name, config: server.config, active: newActive })
@@ -324,7 +325,7 @@ export default function McpManager() {
     setTestResult(null)
     try {
       const config = formToConfig(editForm)
-      const res = await fetch('/api/tools/mcp/test', {
+      const res = await apiFetch('/api/tools/mcp/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ config })
@@ -412,7 +413,7 @@ export default function McpManager() {
 
   async function deleteServer() {
     try {
-      const res = await fetch('/api/tools/mcp/delete', {
+      const res = await apiFetch('/api/tools/mcp/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ serverName: deletingServerName })

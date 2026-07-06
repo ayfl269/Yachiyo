@@ -20,13 +20,13 @@ import MemoryManager from './components/MemoryManager'
 import AccountSettings from './components/AccountSettings'
 import { Modal } from './components/shared'
 import { ErrorBoundary } from './components/ErrorBoundary'
+import { authStore, apiFetch } from './lib/api'
 
 type TabType =
   | 'dashboard' | 'configs' | 'providers' | 'mcp' | 'subagents'
   | 'skills' | 'kbs' | 'personas' | 'platforms' | 'chatdata'
   | 'plugins' | 'memory'
 
-const DASHBOARD_TOKEN_KEY = 'dashboardAuthToken'
 type AuthStatus = 'checking' | 'unauthenticated' | 'authenticated' | 'must_change_credentials'
 
 const NAV_ITEMS: Array<{ key: TabType; label: string; icon: typeof LayoutDashboard }> = [
@@ -59,8 +59,8 @@ function App() {
 
   // ── Auth gate ───────────────────────────────────────────────────────────
   // Probe the API to determine authentication status. The session token
-  // returned after login is stored in localStorage and injected by the
-  // global fetch wrapper in main.tsx.
+  // returned after login is stored via authStore (memory + sessionStorage)
+  // and injected by apiFetch for /api/ requests.
   const [authStatus, setAuthStatus] = useState<AuthStatus>('checking')
   const [usernameInput, setUsernameInput] = useState('')
   const [passwordInput, setPasswordInput] = useState('')
@@ -77,7 +77,7 @@ function App() {
 
   const probeAuth = async () => {
     try {
-      const res = await fetch('/api/auth/status')
+      const res = await apiFetch('/api/auth/status')
       if (res.ok) {
         const data = await res.json()
         if (data.authenticated) {
@@ -122,14 +122,14 @@ function App() {
     const password = passwordInput.trim()
     if (!username || !password) return
     try {
-      const res = await fetch('/api/auth/login', {
+      const res = await apiFetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })
       })
       const data = await res.json()
       if (res.ok) {
-        localStorage.setItem(DASHBOARD_TOKEN_KEY, data.token)
+        authStore.setToken(data.token)
         if (data.status === 'must_change') {
           setAuthStatus('must_change_credentials')
         } else {
@@ -170,14 +170,14 @@ function App() {
     }
 
     try {
-      const res = await fetch('/api/auth/change-credentials', {
+      const res = await apiFetch('/api/auth/change-credentials', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ newUsername, newPassword, confirmPassword })
       })
       const data = await res.json()
       if (res.ok) {
-        localStorage.setItem(DASHBOARD_TOKEN_KEY, data.token)
+        authStore.setToken(data.token)
         setAuthStatus('authenticated')
         setNewUsernameInput('')
         setNewPasswordInput('')
@@ -192,11 +192,11 @@ function App() {
 
   const handleLogout = async () => {
     try {
-      await fetch('/api/auth/logout', { method: 'POST' })
+      await apiFetch('/api/auth/logout', { method: 'POST' })
     } catch {
       // Ignore
     }
-    localStorage.removeItem(DASHBOARD_TOKEN_KEY)
+    authStore.clearToken()
     setAuthStatus('unauthenticated')
   }
 

@@ -7,6 +7,7 @@ import {
   Play, Sparkles, Eye, EyeOff
 } from 'lucide-react'
 import { useToast, ToastPortal, Modal } from './shared'
+import { apiFetch } from '../lib/api'
 
 // ===== Types =====
 interface ProviderSource {
@@ -393,7 +394,7 @@ export default function ProviderManager() {
   async function fetchRealKey(id: string): Promise<string> {
     if (revealedKeys[id]) return revealedKeys[id]
     try {
-      const res = await fetch(`/api/config/provider_sources/reveal_key?id=${encodeURIComponent(id)}`)
+      const res = await apiFetch(`/api/config/provider_sources/reveal_key?id=${encodeURIComponent(id)}`)
       const data = await res.json()
       if (data.status === 'ok' && data.key) {
         setRevealedKeys(prev => ({ ...prev, [id]: data.key }))
@@ -537,7 +538,7 @@ export default function ProviderManager() {
   // ===== API Methods =====
   async function loadConfig() {
     try {
-      const res = await fetch('/api/config/provider/template')
+      const res = await apiFetch('/api/config/provider/template')
       const json = await parseResponseJson(res)
       if (json.status === 'ok') {
         const schema = json.data.config_schema || {}
@@ -593,7 +594,7 @@ export default function ProviderManager() {
   async function deleteProviderSource(source: ProviderSource) {
     if (!window.confirm(`确定要删除提供商源 "${source.id}" 吗？`)) return
     try {
-      const res = await fetch('/api/config/provider_sources/delete', {
+      const res = await apiFetch('/api/config/provider_sources/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: source.id })
@@ -619,7 +620,7 @@ export default function ProviderManager() {
     setEditableProviderSource(prev => (prev && prev.id === source.id) ? { ...prev, enable: value } : prev)
     setSelectedProviderSource(prev => (prev && prev.id === source.id) ? { ...prev, enable: value } : prev)
     try {
-      const res = await fetch('/api/config/provider_sources/update', {
+      const res = await apiFetch('/api/config/provider_sources/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ config: nextSource, original_id: source.id })
@@ -657,7 +658,7 @@ export default function ProviderManager() {
     setSavingSource(true)
     const originalId = selectedProviderSourceOriginalId || editableProviderSource.id
     try {
-      const res = await fetch('/api/config/provider_sources/update', {
+      const res = await apiFetch('/api/config/provider_sources/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ config: editableProviderSource, original_id: originalId })
@@ -710,7 +711,7 @@ export default function ProviderManager() {
     setLoadingModels(true)
     try {
       const sourceId = editableProviderSource?.id || selectedProviderSource.id
-      const res = await fetch(`/api/config/provider_sources/models?source_id=${encodeURIComponent(sourceId)}`)
+      const res = await apiFetch(`/api/config/provider_sources/models?source_id=${encodeURIComponent(sourceId)}`)
       const json = await parseResponseJson(res)
       if (json.status === 'ok') {
         const meta = json.data.model_metadata || {}
@@ -771,7 +772,7 @@ export default function ProviderManager() {
   async function deleteProvider(provider: Provider) {
     if (!window.confirm(`确定要删除 "${provider.id}" 吗？`)) return
     try {
-      const res = await fetch('/api/config/provider/delete', {
+      const res = await apiFetch('/api/config/provider/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: provider.id })
@@ -788,7 +789,7 @@ export default function ProviderManager() {
   async function toggleProviderEnable(provider: Provider, value: boolean) {
     try {
       const nextConfig = { ...provider, enable: value }
-      const res = await fetch('/api/config/provider/update', {
+      const res = await apiFetch('/api/config/provider/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: provider.id, config: nextConfig })
@@ -807,7 +808,7 @@ export default function ProviderManager() {
     setTestingProviders(prev => [...prev, provider.id])
     try {
       const startTime = performance.now()
-      const res = await fetch(`/api/config/provider/check_one?id=${encodeURIComponent(provider.id)}`)
+      const res = await apiFetch(`/api/config/provider/check_one?id=${encodeURIComponent(provider.id)}`)
       const json = await parseResponseJson(res)
       if (json.status === 'ok' && json.data?.error === null) {
         const latency = Math.max(0, Math.round(performance.now() - startTime))
@@ -852,12 +853,12 @@ export default function ProviderManager() {
     try {
       const isAdding = providerEditMode === 'add'
       const res = isAdding
-        ? await fetch('/api/config/provider/new', {
+        ? await apiFetch('/api/config/provider/new', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(providerEditData)
           })
-        : await fetch('/api/config/provider/update', {
+        : await apiFetch('/api/config/provider/update', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -924,7 +925,7 @@ export default function ProviderManager() {
     try {
       const isEditing = nonChatConfigMode === 'edit'
       const res = isEditing
-        ? await fetch('/api/config/provider/update', {
+        ? await apiFetch('/api/config/provider/update', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -932,7 +933,7 @@ export default function ProviderManager() {
               config: nonChatConfigData
             })
           })
-        : await fetch('/api/config/provider/new', {
+        : await apiFetch('/api/config/provider/new', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(nonChatConfigData)

@@ -9,6 +9,7 @@ import {
   Activity
 } from 'lucide-react'
 import { useToast, ToastPortal } from './shared'
+import { apiFetch } from '../lib/api'
 
 interface Plugin {
   name: string
@@ -37,7 +38,7 @@ export default function PluginManager() {
     setIsLoading(true)
     setErrorMsg('')
     try {
-      const res = await fetch('/api/plugins')
+      const res = await apiFetch('/api/plugins')
       if (!res.ok) throw new Error('获取插件列表失败')
       const data: Plugin[] = await res.json()
       setPlugins(data)
@@ -51,7 +52,7 @@ export default function PluginManager() {
   const togglePlugin = async (plugin: Plugin) => {
     const targetState = !plugin.activated
     try {
-      const res = await fetch('/api/plugins/toggle', {
+      const res = await apiFetch('/api/plugins/toggle', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

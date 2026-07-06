@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Save, Settings, ShieldAlert, Cpu, Share2, Info, Brain, Plus, Trash2 } from 'lucide-react'
 import { useToast, ToastPortal } from './shared'
+import { apiFetch } from '../lib/api'
 
 interface AgentConfig {
   id: string
@@ -119,9 +120,9 @@ export default function ConfigManager() {
     setFetchError('')
     try {
       const [cfgRes, provRes, personaRes] = await Promise.all([
-        fetch('/api/config'),
-        fetch('/api/providers'),
-        fetch('/api/personas'),
+        apiFetch('/api/config'),
+        apiFetch('/api/providers'),
+        apiFetch('/api/personas'),
       ])
       if (cfgRes.ok) {
         const data = await cfgRes.json()
@@ -150,8 +151,8 @@ export default function ConfigManager() {
   const fetchWhitelist = async () => {
     try {
       const [wlRes, candRes] = await Promise.all([
-        fetch('/api/session-whitelist'),
-        fetch('/api/session-whitelist/candidates'),
+        apiFetch('/api/session-whitelist'),
+        apiFetch('/api/session-whitelist/candidates'),
       ])
       if (wlRes.ok) {
         const data = await wlRes.json()
@@ -167,7 +168,7 @@ export default function ConfigManager() {
   const handleWhitelistAdd = async (umo: string) => {
     if (!umo.trim()) return
     try {
-      const res = await fetch('/api/session-whitelist', {
+      const res = await apiFetch('/api/session-whitelist', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ umo: umo.trim() }),
@@ -182,7 +183,7 @@ export default function ConfigManager() {
 
   const handleWhitelistRemove = async (umo: string) => {
     try {
-      const res = await fetch('/api/session-whitelist', {
+      const res = await apiFetch('/api/session-whitelist', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ umo }),
@@ -208,7 +209,7 @@ export default function ConfigManager() {
     setSaving(true)
     setSaveSuccess(false)
     try {
-      const res = await fetch('/api/config', {
+      const res = await apiFetch('/api/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(configToSave),

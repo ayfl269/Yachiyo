@@ -5,6 +5,7 @@ import {
   Save, Hash, SlidersHorizontal, AlertCircle
 } from 'lucide-react'
 import { useToast, ToastPortal, Modal } from './shared'
+import { apiFetch } from '../lib/api'
 
 // ===== Types =====
 interface KnowledgeBase {
@@ -125,7 +126,7 @@ export default function KnowledgeManager() {
   async function fetchKbs() {
     setLoading(true)
     try {
-      const res = await fetch('/api/kb/list')
+      const res = await apiFetch('/api/kb/list')
       if (res.ok) {
         setKbs(await res.json())
       }
@@ -139,7 +140,7 @@ export default function KnowledgeManager() {
 
   async function fetchProviders() {
     try {
-      const res = await fetch('/api/config/provider/list?provider_type=embedding,rerank')
+      const res = await apiFetch('/api/config/provider/list?provider_type=embedding,rerank')
       if (res.ok) {
         const data = await res.json()
         setProvidersList(Array.isArray(data) ? data : (data.providers || []))
@@ -151,7 +152,7 @@ export default function KnowledgeManager() {
 
   async function fetchKbDetail(kbId: string): Promise<KnowledgeBase | null> {
     try {
-      const res = await fetch(`/api/kb/get?kb_id=${encodeURIComponent(kbId)}`)
+      const res = await apiFetch(`/api/kb/get?kb_id=${encodeURIComponent(kbId)}`)
       if (res.ok) {
         const data = await res.json()
         setSelectedKbDetail(data)
@@ -168,7 +169,7 @@ export default function KnowledgeManager() {
     if (!id) return
     setLoadingDocs(true)
     try {
-      const res = await fetch(`/api/kb/document/list?kb_id=${encodeURIComponent(id)}`)
+      const res = await apiFetch(`/api/kb/document/list?kb_id=${encodeURIComponent(id)}`)
       if (res.ok) {
         setDocuments(await res.json())
       }
@@ -237,14 +238,14 @@ export default function KnowledgeManager() {
 
       let res: Response
       if (wasNewKb) {
-        res = await fetch('/api/kb/create', {
+        res = await apiFetch('/api/kb/create', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         })
       } else {
         payload.kb_id = selectedKb!.id
-        res = await fetch('/api/kb/update', {
+        res = await apiFetch('/api/kb/update', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
@@ -280,7 +281,7 @@ export default function KnowledgeManager() {
   async function handleDeleteKb() {
     if (!deleteTarget) return
     try {
-      const res = await fetch('/api/kb/delete', {
+      const res = await apiFetch('/api/kb/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ kb_id: deleteTarget.id })
@@ -332,7 +333,7 @@ export default function KnowledgeManager() {
 
     setUploadingDoc(true)
     try {
-      const res = await fetch('/api/kb/document/upload', {
+      const res = await apiFetch('/api/kb/document/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -361,7 +362,7 @@ export default function KnowledgeManager() {
   async function handleDeleteDoc(docId: string, docName: string) {
     if (!window.confirm(`确定要删除文档 "${docName}" 吗？`)) return
     try {
-      const res = await fetch('/api/kb/document/delete', {
+      const res = await apiFetch('/api/kb/document/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ doc_id: docId })
@@ -389,7 +390,7 @@ export default function KnowledgeManager() {
     setRetrieving(true)
     setRetrieveResults([])
     try {
-      const res = await fetch('/api/kb/retrieve', {
+      const res = await apiFetch('/api/kb/retrieve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -420,7 +421,7 @@ export default function KnowledgeManager() {
     if (!selectedKbDetail) return
     setSavingSettings(true)
     try {
-      const res = await fetch('/api/kb/update', {
+      const res = await apiFetch('/api/kb/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
