@@ -72,7 +72,11 @@ export function normalizeRwPath(
 
   // Enforce workspace boundary: resolved path must be the root itself or
   // live inside it. This blocks absolute paths and `../` escape attempts.
-  if (p !== root && !p.startsWith(root + sep)) {
+  // On Windows (case-insensitive FS), compare lowercased paths so that
+  // varying case cannot bypass the workspace boundary.
+  const pCmp = process.platform === "win32" ? p.toLowerCase() : p;
+  const rootCmp = process.platform === "win32" ? root.toLowerCase() : root;
+  if (pCmp !== rootCmp && !pCmp.startsWith(rootCmp + sep)) {
     throw new Error(`Path '${p}' is outside the workspace root '${root}'`);
   }
 

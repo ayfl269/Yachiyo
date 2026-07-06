@@ -228,7 +228,11 @@ export interface WebSearchProvider {
 class BingSearchProvider implements WebSearchProvider {
   async search(query: string, maxResults: number): Promise<{ title: string; url: string; snippet: string }[]> {
     const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${maxResults}`;
-    const response = await fetch(url, {
+    // Use safeFetch (already imported at module top) instead of native fetch
+    // so that the search request is subject to the same SSRF protections
+    // (scheme validation, response-size cap, redirect limits, Content-Type
+    // checks) as the web_fetch_tool. Native fetch would bypass all of these.
+    const response = await safeFetch(url, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
@@ -311,7 +315,8 @@ class BingSearchProvider implements WebSearchProvider {
 class GoogleSearchProvider implements WebSearchProvider {
   async search(query: string, maxResults: number): Promise<{ title: string; url: string; snippet: string }[]> {
     const url = `https://www.google.com/search?q=${encodeURIComponent(query)}&num=${maxResults}`;
-    const response = await fetch(url, {
+    // Use safeFetch for the same SSRF-protection reasons as BingSearchProvider.
+    const response = await safeFetch(url, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",

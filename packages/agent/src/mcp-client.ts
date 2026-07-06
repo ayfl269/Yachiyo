@@ -143,7 +143,23 @@ function getStdioCommandAllowlist(): Set<string> {
 function prepareConfig(config: Record<string, unknown>): Record<string, unknown> {
   const mcpServers = config.mcpServers as Record<string, Record<string, unknown>> | undefined;
   if (mcpServers) {
-    const firstKey = Object.keys(mcpServers)[0];
+    const keys = Object.keys(mcpServers);
+    if (keys.length === 0) {
+      throw new Error("MCP config `mcpServers` is empty; cannot select a server to connect to.");
+    }
+    // Warn when multiple servers are provided: connectToServer only handles one
+    // server per MCPClient instance. Silently picking the first would hide a
+    // likely configuration mistake (e.g. passing the entire MCP config file
+    // instead of a single server entry).
+    if (keys.length > 1) {
+      console.warn(
+        `[MCP] config.mcpServers contains ${keys.length} entries ` +
+        `(${keys.join(", ")}), but only one MCPClient can be connected at a time. ` +
+        `Using the first entry "${keys[0]}". ` +
+        `If you intended to connect to multiple servers, create a separate MCPClient for each.`
+      );
+    }
+    const firstKey = keys[0];
     config = { ...mcpServers[firstKey] };
   } else {
     config = { ...config };
@@ -304,6 +320,13 @@ export class MCPClient {
   private serverName: string | null = null;
   private reconnectLock = false;
   private reconnecting = false;
+  /**
+   * Promise of the in-flight reconnection. Concurrent callers await this
+   * single promise instead of polling `reconnecting` on a timer, which
+   * eliminates the 50ms setTimeout race and wakes up immediately when
+   * reconnection completes (or fails).
+   */
+  private reconnectPromise: Promise<void> | null = null;
 
   /**
    * Connect to an MCP server.
@@ -470,42 +493,41 @@ export class MCPClient {
   }
 
   private async reconnect(): Promise<void> {
-    if (this.reconnectLock) {
-      // Wait for the ongoing reconnection to complete
-      await new Promise<void>((resolve) => {
-        const check = () => {
-          if (!this.reconnecting) {
-            resolve();
-          } else {
-            setTimeout(check, 50);
-          }
-        };
-        check();
-      });
+    // Coalesce concurrent reconnect attempts onto a single in-flight promise.
+    // Previously this used a 50ms setTimeout polling loop, which (a) wasted
+    // CPU, (b) added up to 50ms latency after reconnection finished before
+    // callers noticed, and (c) could race if `reconnecting` was cleared
+    // between checks. Awaiting the same promise resolves all three issues.
+    if (this.reconnectPromise) {
+      await this.reconnectPromise;
       return;
     }
 
-    this.reconnectLock = true;
-    this.reconnecting = true;
+    this.reconnectPromise = (async () => {
+      this.reconnectLock = true;
+      this.reconnecting = true;
+      try {
+        // Save old session for later cleanup
+        if (this.session) {
+          const oldSession = this.session;
+          // Close the old session asynchronously to prevent oldSessions from growing unboundedly
+          oldSession.close().catch(() => { /* ignore errors during close */ });
+        }
 
-    try {
-      // Save old session for later cleanup
-      if (this.session) {
-        const oldSession = this.session;
-        // Close the old session asynchronously to prevent oldSessions from growing unboundedly
-        oldSession.close().catch(() => { /* ignore errors during close */ });
+        this.session = null;
+
+        if (this.mcpServerConfig && this.serverName) {
+          await this.connectToServer(this.mcpServerConfig, this.serverName);
+          await this.listToolsAndSave();
+        }
+      } finally {
+        this.reconnectLock = false;
+        this.reconnecting = false;
+        this.reconnectPromise = null;
       }
+    })();
 
-      this.session = null;
-
-      if (this.mcpServerConfig && this.serverName) {
-        await this.connectToServer(this.mcpServerConfig, this.serverName);
-        await this.listToolsAndSave();
-      }
-    } finally {
-      this.reconnectLock = false;
-      this.reconnecting = false;
-    }
+    await this.reconnectPromise;
   }
 
   async close(): Promise<void> {

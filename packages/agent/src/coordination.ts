@@ -139,10 +139,29 @@ export class FileLockManager {
   }
 
   private processQueue(): void {
+    // Per-path FIFO fairness.
+    //
+    // Previously this method iterated the entire waitQueue and granted any
+    // request whose lock could be granted, regardless of position. That meant
+    // a later-arriving reader for path A could jump ahead of an earlier
+    // blocked writer for the same path A, potentially starving the writer
+    // indefinitely under heavy read traffic.
+    //
+    // Now we track paths that have already been "blocked" earlier in the
+    // queue: once a waiter for path P cannot be granted, no later waiter
+    // for the same path P is granted in this pass either. This guarantees
+    // strict per-path FIFO ordering while still allowing unrelated paths to
+    // proceed independently.
     const granted: number[] = [];
+    const blockedPaths = new Set<string>();
 
     for (let i = 0; i < this.waitQueue.length; i++) {
       const waiter = this.waitQueue[i];
+      if (blockedPaths.has(waiter.path)) {
+        // An earlier waiter for this same path is still blocked; do not
+        // jump ahead of it.
+        continue;
+      }
       if (this.canGrant(waiter.path, waiter.mode, waiter.holderId)) {
         this.locks.push({
           path: waiter.path,
@@ -153,6 +172,9 @@ export class FileLockManager {
         clearTimeout(waiter.timeout);
         waiter.resolve(true);
         granted.push(i);
+      } else {
+        // Block all later waiters on the same path from jumping ahead.
+        blockedPaths.add(waiter.path);
       }
     }
 

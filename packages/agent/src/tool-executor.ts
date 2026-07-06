@@ -217,6 +217,14 @@ export abstract class BaseFunctionToolExecutor<TContext = unknown> {
  * Extract tool arguments in the order defined by the tool's parameter schema.
  * This preserves parameter-name mapping instead of using Object.values()
  * which can produce misordered arguments.
+ *
+ * When the tool has no parameter schema (a rare, deprecated pattern), we
+ * intentionally pass the entire `toolArgs` object as a single positional
+ * argument rather than spreading `Object.values(toolArgs)`. The previous
+ * `Object.values()` fallback relied on JS object key insertion order,
+ * which is not guaranteed for integer-like keys (e.g. "0", "1") and can
+ * silently misorder arguments. Passing the object lets the handler
+ * destructure named fields explicitly and predictably.
  */
 function extractOrderedArgs(
   tool: FunctionTool,
@@ -224,8 +232,14 @@ function extractOrderedArgs(
 ): unknown[] {
   const params = tool.parameters as Record<string, unknown> | undefined;
   if (!params?.properties || typeof params.properties !== "object") {
-    // No schema to order by; fall back to values in declaration order
-    return Object.values(toolArgs);
+    // No schema to order by — pass the whole args object as a single
+    // positional argument and warn so the missing schema is noticed.
+    console.warn(
+      `[ToolExecutor] Tool "${tool.name}" has no parameter schema; ` +
+      `passing toolArgs as a single object. Define \`parameters.properties\` ` +
+      `to enable positional argument dispatch.`
+    );
+    return [toolArgs];
   }
   const propOrder = Object.keys(params.properties as Record<string, unknown>);
   const result: unknown[] = [];

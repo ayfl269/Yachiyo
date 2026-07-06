@@ -108,8 +108,13 @@ export function applySandboxPolicyToToolSet(
 function isPathInside(filePath: string, dir: string): boolean {
   const resolvedFile = resolve(filePath);
   const resolvedDir = resolve(dir);
-  if (resolvedFile === resolvedDir) return true;
-  return resolvedFile.startsWith(resolvedDir + sep);
+  // On Windows (case-insensitive FS), compare lowercased paths so that
+  // C:\Users and c:\users are treated as the same directory. Without this,
+  // an attacker could bypass workspace boundaries by varying case.
+  const fileCmp = process.platform === "win32" ? resolvedFile.toLowerCase() : resolvedFile;
+  const dirCmp = process.platform === "win32" ? resolvedDir.toLowerCase() : resolvedDir;
+  if (fileCmp === dirCmp) return true;
+  return fileCmp.startsWith(dirCmp + sep);
 }
 
 /**
@@ -540,6 +545,36 @@ try {
 }
 
 /**
+ * Split a command line string into tokens, respecting double-quoted segments.
+ * Unlike `split(/\s+/)`, this correctly handles arguments containing spaces
+ * enclosed in double quotes, e.g. `cmd "arg with spaces"` → ["cmd", "arg with spaces"].
+ */
+function splitCommandLine(input: string): string[] {
+  const result: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (ch === " " && !inQuotes) {
+      if (current.length > 0) {
+        result.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += ch;
+  }
+  if (current.length > 0) {
+    result.push(current);
+  }
+  return result;
+}
+
+/**
  * Build a Windows sandbox command that wraps the target command in a Job Object.
  *
  * Returns null if not on Windows.
@@ -552,8 +587,9 @@ export function buildWindowsSandboxCommand(
     return null;
   }
 
-  // For a simple command string, split into command + args
-  const parts = command.trim().split(/\s+/);
+  // Split command line respecting double-quoted arguments. A naive
+  // split(/\s+/) would break commands like: cmd "arg with spaces"
+  const parts = splitCommandLine(command.trim());
   const exe = parts[0];
   const args = parts.slice(1);
   const script = buildWindowsSandboxScript(exe, args, config);

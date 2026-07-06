@@ -296,8 +296,10 @@ async function main(): Promise<void> {
   console.log("╚══════════════════════════════════════════╝");
 
   if (process.platform !== "win32") {
-    console.error("❌ 错误: 此测试只能在 Windows 平台运行!");
-    process.exit(1);
+    console.log("⏭️  SKIPPED: Windows sandbox tests can only run on win32.");
+    console.log("   This is an explicit skip, not a pass — 0 test cases were executed.");
+    console.log("   CI runs this job exclusively on windows-latest (see .github/workflows/ci.yml).");
+    process.exit(0);
   }
 
   try {

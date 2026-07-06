@@ -618,7 +618,10 @@ ${bufferTexts.join("\n")}
 
   /**
    * 解析间隔字符串或数字为毫秒数。
-   * 支持格式: "12h"、"30m"、"1d6h30m"、"2h30m15s" 以及纯数字或纯数字字符串（代表秒数）
+   * 支持格式: "12h"、"30m"、"1d6h30m"、"2h30m15s"、"1mo"、"2w"、"1y" 以及纯数字或纯数字字符串（代表秒数）
+   *
+   * 注意: "mo" (月) 必须在 "m" (分钟) 之前匹配，否则 "1month" 会被错误地
+   * 解析为 1 分钟。正则交替中靠前的分支优先匹配。
    */
   static parseInterval(interval: string | number): number {
     const defaultMs = 12 * 60 * 60 * 1000; // 12 hours default
@@ -645,13 +648,19 @@ ${bufferTexts.join("\n")}
       return val * 1000;
     }
 
-    const regex = /(\d+)\s*(d|h|m|s)/gi;
+    // "mo" (month) MUST appear before "m" (minute) in the alternation, otherwise
+    // "1month" would match as "1m" (= 1 minute) due to leftmost-first matching.
+    // Approximate units: 1mo = 30 days, 1y = 365 days, 1w = 7 days.
+    const regex = /(\d+)\s*(mo|y|w|d|h|m|s)/gi;
     let totalMs = 0;
     let match: RegExpExecArray | null;
     while ((match = regex.exec(trimmed)) !== null) {
       const value = parseInt(match[1], 10);
       const unit = match[2].toLowerCase();
       switch (unit) {
+        case "y": totalMs += value * 365 * 24 * 60 * 60 * 1000; break;
+        case "mo": totalMs += value * 30 * 24 * 60 * 60 * 1000; break;
+        case "w": totalMs += value * 7 * 24 * 60 * 60 * 1000; break;
         case "d": totalMs += value * 24 * 60 * 60 * 1000; break;
         case "h": totalMs += value * 60 * 60 * 1000; break;
         case "m": totalMs += value * 60 * 1000; break;
@@ -660,7 +669,7 @@ ${bufferTexts.join("\n")}
     }
 
     if (totalMs <= 0) {
-      console.warn(`[MemoryConsolidator] 无效的间隔格式: "${interval}"，使用默认间隔 12h。示例: "12h", "30m", "1d6h"`);
+      console.warn(`[MemoryConsolidator] 无效的间隔格式: "${interval}"，使用默认间隔 12h。示例: "12h", "30m", "1d6h", "1mo", "2w"`);
       return defaultMs;
     }
     return totalMs;

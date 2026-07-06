@@ -1615,10 +1615,29 @@ function coerceToolValue(
     case "boolean":
       if (typeof value === "boolean") return value;
       if (typeof value === "string") {
-        if (value === "true") return true;
-        if (value === "false") return false;
+        // Explicit truthy strings.
+        if (value === "true" || value === "1" || value === "yes" || value === "on") {
+          return true;
+        }
+        // Explicit falsy strings. Without this, `Boolean("0")` / `Boolean("false")`
+        // would return true (non-empty string is truthy), silently flipping the
+        // intended flag. LLMs frequently emit "0"/"false"/"no"/"off"/"null" to
+        // mean false.
+        if (
+          value === "false" ||
+          value === "0" ||
+          value === "no" ||
+          value === "off" ||
+          value === "null" ||
+          value === "undefined" ||
+          value === ""
+        ) {
+          return false;
+        }
       }
       if (typeof value === "number") return value !== 0;
+      // Fallback for unexpected types (object, null, undefined).
+      // null/undefined → false; objects → true (matches Boolean() semantics).
       console.warn(`[ToolParam] Coercing "${paramName}" from ${typeof value} to boolean`);
       return Boolean(value);
 
