@@ -1,7 +1,6 @@
-import { useEffect, useState } from 'react'
-import { createPortal } from 'react-dom'
+import { useState } from 'react'
 import { Plus, Trash2, X, Users } from 'lucide-react'
-import { useToast, ToastPortal } from './shared'
+import { useToast, ToastPortal, Modal, useAsyncEffect } from './shared'
 import { apiFetch } from '../lib/api'
 
 interface SubAgent {
@@ -128,9 +127,9 @@ export default function SubAgentManager() {
     setEditingSubAgent(prev => (prev ? { ...prev, ...patch } : prev))
   }
 
-  useEffect(() => {
-    void fetchSubAgents()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  useAsyncEffect(async (signal) => {
+    await fetchSubAgents()
+    if (signal.aborted) return
   }, [])
 
   return (
@@ -218,111 +217,104 @@ export default function SubAgentManager() {
         </div>
       )}
 
-      {showModal &&
-        editingSubAgent &&
-        createPortal(
-          <div className="modal-backdrop" onClick={() => setShowModal(false)}>
-            <div className="modal-content" onClick={e => e.stopPropagation()}>
-              <div className="modal-header">
-                <h3>{isNew ? '创建新子 Agent' : '编辑子 Agent'}</h3>
-                <button className="close-btn" onClick={() => setShowModal(false)}>
-                  <X size={20} className="close-icon" />
-                </button>
-              </div>
-              <div className="modal-body">
-                <div className="form-group">
-                  <label>
-                    Agent 名称 <span className="required">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={editingSubAgent.name}
-                    onChange={e => updateEditing({ name: e.target.value })}
-                    placeholder="例如: CodeAnalyzer, WebSearcher"
-                    disabled={!isNew}
-                    className="form-control"
-                  />
-                  <p className="help-text">
-                    用于主 Agent 识别并派发任务的唯一名称，建议仅使用字母和数字。
-                  </p>
-                </div>
+      {showModal && editingSubAgent && (
+        <Modal
+          open={showModal}
+          onClose={() => setShowModal(false)}
+          title={isNew ? '创建新子 Agent' : '编辑子 Agent'}
+          footer={
+            <>
+              <button className="btn btn-secondary" onClick={() => setShowModal(false)}>
+                取消
+              </button>
+              <button className="btn btn-primary" onClick={handleSave}>
+                保存并注册
+              </button>
+            </>
+          }
+        >
+          <div className="form-group">
+            <label>
+              Agent 名称 <span className="required">*</span>
+            </label>
+            <input
+              type="text"
+              value={editingSubAgent.name}
+              onChange={e => updateEditing({ name: e.target.value })}
+              placeholder="例如: CodeAnalyzer, WebSearcher"
+              disabled={!isNew}
+              className="form-control"
+            />
+            <p className="help-text">
+              用于主 Agent 识别并派发任务的唯一名称，建议仅使用字母和数字。
+            </p>
+          </div>
 
-                <div className="form-group">
-                  <label>意图描述 (Description)</label>
-                  <textarea
-                    value={editingSubAgent.description}
-                    onChange={e => updateEditing({ description: e.target.value })}
-                    placeholder="例如: 负责深度解析代码，并在项目结构中查找问题"
-                    rows={2}
-                    className="form-control"
-                  />
-                  <p className="help-text">
-                    在分派工具描述中显示，模型将根据此描述评估何时调用该子 Agent。
-                  </p>
-                </div>
+          <div className="form-group">
+            <label>意图描述 (Description)</label>
+            <textarea
+              value={editingSubAgent.description}
+              onChange={e => updateEditing({ description: e.target.value })}
+              placeholder="例如: 负责深度解析代码，并在项目结构中查找问题"
+              rows={2}
+              className="form-control"
+            />
+            <p className="help-text">
+              在分派工具描述中显示，模型将根据此描述评估何时调用该子 Agent。
+            </p>
+          </div>
 
-                <div className="form-group">
-                  <label>
-                    系统提示词 (System Prompt) <span className="required">*</span>
-                  </label>
-                  <textarea
-                    value={editingSubAgent.instructions}
-                    onChange={e => updateEditing({ instructions: e.target.value })}
-                    placeholder="请详细描述此子 Agent 的角色设定、回答风格和执行逻辑..."
-                    rows={6}
-                    className="form-control font-mono"
-                  />
-                  <p className="help-text">子 Agent 在独立运行时接收的专属系统级别提示指令。</p>
-                </div>
+          <div className="form-group">
+            <label>
+              系统提示词 (System Prompt) <span className="required">*</span>
+            </label>
+            <textarea
+              value={editingSubAgent.instructions}
+              onChange={e => updateEditing({ instructions: e.target.value })}
+              placeholder="请详细描述此子 Agent 的角色设定、回答风格和执行逻辑..."
+              rows={6}
+              className="form-control font-mono"
+            />
+            <p className="help-text">子 Agent 在独立运行时接收的专属系统级别提示指令。</p>
+          </div>
 
-                <div className="form-group">
-                  <label>关联的工具列表 (Tools)</label>
-                  <div className="tool-input-row">
-                    <input
-                      type="text"
-                      value={newToolName}
-                      onChange={e => setNewToolName(e.target.value)}
-                      placeholder="输入工具名称，按回车或点添加"
-                      onKeyUp={e => {
-                        if (e.key === 'Enter') handleAddTool()
-                      }}
-                      className="form-control"
-                    />
-                    <button className="btn secondary" onClick={handleAddTool}>
-                      添加
-                    </button>
-                  </div>
-                  {editingSubAgent.tools.length > 0 && (
-                    <div className="tools-tags-edit">
-                      {editingSubAgent.tools.map((tool, index) => (
-                        <span key={tool} className="tool-tag-edit">
-                          {tool}
-                          <X
-                            size={12}
-                            className="tag-close-icon"
-                            onClick={() => handleRemoveTool(index)}
-                          />
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  <p className="help-text">
-                    指定该子 Agent 可以调用的工具（如 webSearch, read_file 等）。不填则为默认全量工具。
-                  </p>
-                </div>
-              </div>
-              <div className="modal-footer">
-                <button className="btn btn-secondary" onClick={() => setShowModal(false)}>
-                  取消
-                </button>
-                <button className="btn btn-primary" onClick={handleSave}>
-                  保存并注册
-                </button>
-              </div>
+          <div className="form-group">
+            <label>关联的工具列表 (Tools)</label>
+            <div className="tool-input-row">
+              <input
+                type="text"
+                value={newToolName}
+                onChange={e => setNewToolName(e.target.value)}
+                placeholder="输入工具名称，按回车或点添加"
+                onKeyUp={e => {
+                  if (e.key === 'Enter') handleAddTool()
+                }}
+                className="form-control"
+              />
+              <button className="btn secondary" onClick={handleAddTool}>
+                添加
+              </button>
             </div>
-          </div>,
-          document.body
-        )}
+            {editingSubAgent.tools.length > 0 && (
+              <div className="tools-tags-edit">
+                {editingSubAgent.tools.map((tool, index) => (
+                  <span key={tool} className="tool-tag-edit">
+                    {tool}
+                    <X
+                      size={12}
+                      className="tag-close-icon"
+                      onClick={() => handleRemoveTool(index)}
+                    />
+                  </span>
+                ))}
+              </div>
+            )}
+            <p className="help-text">
+              指定该子 Agent 可以调用的工具（如 webSearch, read_file 等）。不填则为默认全量工具。
+            </p>
+          </div>
+        </Modal>
+      )}
 
       <ToastPortal toast={toast} />
     </div>

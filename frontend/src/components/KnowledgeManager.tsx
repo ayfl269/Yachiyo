@@ -4,7 +4,7 @@ import {
   Upload, Clock, Layers, Search, Settings, Info, Database,
   Save, Hash, SlidersHorizontal, AlertCircle
 } from 'lucide-react'
-import { useToast, ToastPortal, Modal } from './shared'
+import { useToast, ToastPortal, Modal, useAsyncEffect } from './shared'
 import { apiFetch } from '../lib/api'
 
 // ===== Types =====
@@ -468,8 +468,9 @@ export default function KnowledgeManager() {
   }
 
   // ===== Lifecycle =====
-  useEffect(() => {
-    Promise.all([fetchKbs(), fetchProviders()])
+  useAsyncEffect(async (signal) => {
+    await Promise.all([fetchKbs(), fetchProviders()])
+    if (signal.aborted) return
   }, [])
 
   // ===== Render =====

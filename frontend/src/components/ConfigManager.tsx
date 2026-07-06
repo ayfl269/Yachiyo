@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Save, Settings, ShieldAlert, Cpu, Share2, Info, Brain, Plus, Trash2 } from 'lucide-react'
-import { useToast, ToastPortal } from './shared'
+import { useToast, ToastPortal, useAsyncEffect } from './shared'
 import { apiFetch } from '../lib/api'
 
 interface AgentConfig {
@@ -236,9 +236,9 @@ export default function ConfigManager() {
     }
   }
 
-  useEffect(() => {
-    fetchConfig()
-    fetchWhitelist()
+  useAsyncEffect(async (signal) => {
+    await Promise.all([fetchConfig(), fetchWhitelist()])
+    if (signal.aborted) return
   }, [])
 
   useEffect(() => {

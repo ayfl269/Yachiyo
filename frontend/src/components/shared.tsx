@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
-/** Generate a unique-ish id for aria-labelledby, stable across renders. */
+/**
+ * Generate a unique-ish id for aria-labelledby, stable across renders.
+ */
 let modalTitleIdCounter = 0
 function useModalTitleId(): string {
   const ref = useRef<number>(0)
@@ -10,6 +12,43 @@ function useModalTitleId(): string {
     ref.current = modalTitleIdCounter
   }
   return `modal-title-${ref.current}`
+}
+
+/**
+ * Run an async effect with automatic AbortController cleanup.
+ *
+ * The effect receives an `AbortSignal` that is aborted when the component
+ * unmounts or deps change. Pass this signal to `apiFetch(url, { signal })`
+ * so in-flight requests are cancelled, preventing:
+ *   - State updates on unmounted components ("Can't perform a React state
+ *     update on an unmounted component" warnings)
+ *   - Wasted bandwidth / API quota on requests whose results are no longer
+ *     needed
+ *
+ * Usage:
+ *   useAsyncEffect(async (signal) => {
+ *     const res = await apiFetch('/api/data', { signal })
+ *     if (signal.aborted) return
+ *     const data = await res.json()
+ *     setData(data)
+ *   }, [])
+ */
+export function useAsyncEffect(
+  effect: (signal: AbortSignal) => Promise<void> | void,
+  deps: React.DependencyList,
+): void {
+  useEffect(() => {
+    const controller = new AbortController()
+    const promise = effect(controller.signal)
+    if (promise) {
+      promise.catch(() => {
+        // AbortError is expected when the component unmounts; swallow it
+        // so it doesn't surface as an unhandled rejection.
+      })
+    }
+    return () => controller.abort()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps)
 }
 
 export type ToastColor = 'success' | 'error' | 'info'

@@ -6,7 +6,7 @@ import {
   AudioWaveform, Wrench, Brain, Globe,
   Play, Sparkles, Eye, EyeOff
 } from 'lucide-react'
-import { useToast, ToastPortal, Modal } from './shared'
+import { useToast, ToastPortal, Modal, useAsyncEffect } from './shared'
 import { apiFetch } from '../lib/api'
 
 // ===== Types =====
@@ -651,6 +651,10 @@ export default function ProviderManager() {
     setShowSourceDrawer(false)
     selectProviderSource(null)
     setIsNewProviderSource(false)
+    // Clear cached real API keys so plaintext secrets don't persist in
+    // component state after the drawer closes. Keys are re-fetched via
+    // reveal_key only when the user explicitly clicks the eye icon again.
+    setRevealedKeys({})
   }
 
   async function saveProviderSource(): Promise<boolean> {
@@ -998,8 +1002,9 @@ export default function ProviderManager() {
   }
 
   // ===== Lifecycle =====
-  useEffect(() => {
-    void loadConfig()
+  useAsyncEffect(async (signal) => {
+    await loadConfig()
+    if (signal.aborted) return
   }, [])
 
   // Watch tab changes to deselect source if needed
@@ -1011,6 +1016,11 @@ export default function ProviderManager() {
     setModelMetadata({})
     setIsSourceModified(false)
     setShowSourceDrawer(false)
+    // Clear cached real API keys when switching tabs or closing the drawer
+    // so plaintext secrets don't persist in component state longer than
+    // necessary. Keys are re-fetched via reveal_key only when explicitly
+    // requested by the user (eye icon click).
+    setRevealedKeys({})
   }, [selectedProviderType])
 
   // ===== Render helpers =====
@@ -1598,7 +1608,7 @@ export default function ProviderManager() {
       {/* Non-Chat Provider Full Config Dialog */}
       <Modal
         open={showNonChatConfigDialog}
-        onClose={() => setShowNonChatConfigDialog(false)}
+        onClose={() => { setShowNonChatConfigDialog(false); setRevealedKeys({}) }}
         title={`${nonChatConfigMode === 'add' ? '添加' : '编辑'} ${nonChatProviderLabel} 提供商`}
         size="lg"
         footer={

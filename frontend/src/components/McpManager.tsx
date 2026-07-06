@@ -1,11 +1,10 @@
 import { useEffect, useState } from 'react'
-import { createPortal } from 'react-dom'
 import {
   Plus, X, Trash2, Pencil, RefreshCw,
   Wrench, AlertTriangle, CheckCircle2, XCircle,
   ChevronRight, Loader2, Server
 } from 'lucide-react'
-import { useToast, ToastPortal } from './shared'
+import { useToast, ToastPortal, Modal } from './shared'
 import { apiFetch } from '../lib/api'
 
 // ===== Types =====
@@ -628,15 +627,23 @@ export default function McpManager() {
       )}
 
       {/* Add/Edit Dialog */}
-      {showDialog && createPortal(
-        <div className="modal-backdrop" onClick={closeDialog}>
-          <div className="modal-content modal-lg" onClick={e => e.stopPropagation()}>
-            <div className="modal-header">
-              <h3>{isAdding ? '添加 MCP 服务器' : `编辑: ${editForm.serverName}`}</h3>
-              <button className="close-btn" onClick={closeDialog}><X size={20} /></button>
-            </div>
-            <div className="modal-body">
-              <div className="form-grid">
+      {showDialog && (
+        <Modal
+          open={showDialog}
+          onClose={closeDialog}
+          title={isAdding ? '添加 MCP 服务器' : `编辑: ${editForm.serverName}`}
+          size="lg"
+          footer={
+            <>
+              <button className="btn" onClick={closeDialog}>取消</button>
+              <button className="btn primary" disabled={saving} onClick={saveServer}>
+                {saving ? <Loader2 size={14} className="animate-spin" /> : null}
+                {saving ? '保存中...' : '保存'}
+              </button>
+            </>
+          }
+        >
+          <div className="form-grid">
                 {/* Server Name */}
                 <div className="form-group">
                   <label>服务器名称 *</label>
@@ -884,74 +891,53 @@ export default function McpManager() {
                   </div>
                 ) : null}
               </div>
-            </div>
-            <div className="modal-footer">
-              <button className="btn" onClick={closeDialog}>取消</button>
-              <button className="btn primary" disabled={saving} onClick={saveServer}>
-                {saving ? <Loader2 size={14} className="animate-spin" /> : null}
-                {saving ? '保存中...' : '保存'}
-              </button>
-            </div>
-          </div>
-        </div>,
-        document.body
+        </Modal>
       )}
 
       {/* Delete Confirm Dialog */}
-      {showDeleteDialog && createPortal(
-        <div className="modal-backdrop" onClick={() => setShowDeleteDialog(false)}>
-          <div className="modal-content modal-sm" onClick={e => e.stopPropagation()}>
-            <div className="modal-header">
-              <h3>确认删除</h3>
-              <button className="close-btn" onClick={() => setShowDeleteDialog(false)}><X size={20} /></button>
-            </div>
-            <div className="modal-body">
-              <div className="confirm-text">
-                <AlertTriangle size={20} className="confirm-icon" />
-                <p>确定要删除 MCP 服务器 <strong>{deletingServerName}</strong> 吗？此操作不可撤销。</p>
-              </div>
-            </div>
-            <div className="modal-footer">
-              <button className="btn" onClick={() => setShowDeleteDialog(false)}>取消</button>
-              <button className="btn danger" onClick={deleteServer}>确认删除</button>
-            </div>
-          </div>
-        </div>,
-        document.body
-      )}
+      <Modal
+        open={showDeleteDialog}
+        onClose={() => setShowDeleteDialog(false)}
+        title="确认删除"
+        size="sm"
+        footer={
+          <>
+            <button className="btn" onClick={() => setShowDeleteDialog(false)}>取消</button>
+            <button className="btn danger" onClick={deleteServer}>确认删除</button>
+          </>
+        }
+      >
+        <div className="confirm-text">
+          <AlertTriangle size={20} className="confirm-icon" />
+          <p>确定要删除 MCP 服务器 <strong>{deletingServerName}</strong> 吗？此操作不可撤销。</p>
+        </div>
+      </Modal>
 
       {/* Tools List Dialog */}
-      {showToolsDialog && createPortal(
-        <div className="modal-backdrop" onClick={() => setShowToolsDialog(false)}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
-            <div className="modal-header">
-              <h3>工具列表 - {viewingToolsServerName}</h3>
-              <button className="close-btn" onClick={() => setShowToolsDialog(false)}><X size={20} /></button>
-            </div>
-            <div className="modal-body">
-              {viewingTools.length ? (
-                <div className="tools-list">
-                  {viewingTools.map(tool => (
-                    <div key={tool} className="tool-item">
-                      <Wrench size={14} className="tool-icon" />
-                      <span className="font-mono">{tool}</span>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="tools-empty">
-                  <Wrench size={32} className="empty-icon" />
-                  <p>暂无可用工具</p>
-                </div>
-              )}
-            </div>
-            <div className="modal-footer">
-              <button className="btn" onClick={() => setShowToolsDialog(false)}>关闭</button>
-            </div>
+      <Modal
+        open={showToolsDialog}
+        onClose={() => setShowToolsDialog(false)}
+        title={`工具列表 - ${viewingToolsServerName}`}
+        footer={
+          <button className="btn" onClick={() => setShowToolsDialog(false)}>关闭</button>
+        }
+      >
+        {viewingTools.length ? (
+          <div className="tools-list">
+            {viewingTools.map(tool => (
+              <div key={tool} className="tool-item">
+                <Wrench size={14} className="tool-icon" />
+                <span className="font-mono">{tool}</span>
+              </div>
+            ))}
           </div>
-        </div>,
-        document.body
-      )}
+        ) : (
+          <div className="tools-empty">
+            <Wrench size={32} className="empty-icon" />
+            <p>暂无可用工具</p>
+          </div>
+        )}
+      </Modal>
 
       {/* Toast */}
       <ToastPortal toast={toast} />
