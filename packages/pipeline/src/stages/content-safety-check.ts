@@ -77,11 +77,25 @@ export class ContentSafetyCheckStage extends PipelineStage {
     yield; // Let subsequent stages execute
 
     // Post-check: response safety
-    const result = event.getResult();
-    if (result && this.strategySelector.checkResponse) {
-      const outputCheck = this.strategySelector.check(result.getPlainText());
-      if (!outputCheck.passed) {
-        event.setResult(new EventResult().plain("回复内容未通过安全检查"));
+    // For non-streaming: result.getPlainText() holds the response text.
+    // For streaming: result may be cleared by RespondStage; fall back to
+    // the cached assistant text. The streaming filter in RespondStage
+    // provides real-time interception; this post-check is a second line
+    // of defense for non-streaming responses and edge cases.
+    if (this.strategySelector.checkResponse) {
+      const result = event.getResult();
+      const outputText = result?.getPlainText()?.trim()
+        || event.getExtra<string>("_cachedAssistantText")?.trim()
+        || "";
+      if (outputText) {
+        const outputCheck = this.strategySelector.check(outputText);
+        if (!outputCheck.passed) {
+          if (result) {
+            event.setResult(new EventResult().plain("回复内容未通过安全检查"));
+          }
+          // If result is null (streaming path already cleared it), the
+          // streaming filter in RespondStage should have handled it.
+        }
       }
     }
   }

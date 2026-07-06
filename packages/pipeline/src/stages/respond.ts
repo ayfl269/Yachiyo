@@ -5,6 +5,7 @@ import { ComponentType, type MessageComponent, type PlainComponent, type RecordC
 import { ResultContentType } from "@yachiyo/message/event-result.js";
 import { EventType } from "@yachiyo/plugin/event-type.js";
 import type { MessageChain } from "@yachiyo/agent/types.js";
+import { ContentSafetyStrategySelector } from "./content-safety-check.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -26,6 +27,10 @@ export class RespondStage extends PipelineStage {
   private enableSegmentedReply: boolean = false;
   private onlyLlmResultSegmented: boolean = false;
   private ctx!: PipelineContext;
+  /** Safety selector reused from ContentSafetyCheckStage config so that
+   * streaming responses are filtered in real time. Built from the same
+   * config so the two stages stay consistent without coupling. */
+  private safetySelector!: ContentSafetyStrategySelector;
 
   async initialize(ctx: PipelineContext): Promise<void> {
     this.ctx = ctx;
@@ -33,6 +38,7 @@ export class RespondStage extends PipelineStage {
     this.replyWithQuote = ctx.config.replyWithQuote ?? false;
     this.enableSegmentedReply = ctx.config.segmentedReply ?? false;
     this.onlyLlmResultSegmented = ctx.config.onlyLlmResultSegmented ?? false;
+    this.safetySelector = new ContentSafetyStrategySelector(ctx.config as unknown as Record<string, unknown>);
   }
 
   async process(event: MessageEvent): Promise<void> {
@@ -150,6 +156,10 @@ export class RespondStage extends PipelineStage {
     generator: AsyncGenerator<MessageChain, void>
   ): Promise<string> {
     const parts: string[] = [];
+    const checkResponse = this.safetySelector.checkResponse;
+    const safetySelector = this.safetySelector;
+    let safetyBlocked = false;
+
     async function* teeGenerator(): AsyncGenerator<MessageChain, void> {
       for await (const chunk of generator) {
         // Skip reasoning/thinking chunks — only send text content to user
@@ -159,10 +169,33 @@ export class RespondStage extends PipelineStage {
           continue;
         }
         if (chunk.message) parts.push(chunk.message);
+
+        // Streaming content safety check: inspect accumulated text on each
+        // chunk. If a violation is detected, stop forwarding subsequent
+        // chunks and emit a placeholder notice. Already-sent chunks cannot
+        // be recalled, but this prevents the rest of the unsafe content
+        // from reaching the user.
+        if (checkResponse && chunk.message) {
+          const accumulated = parts.join("");
+          const check = safetySelector.check(accumulated);
+          if (!check.passed) {
+            safetyBlocked = true;
+            yield { type: "text", message: "\n\n⚠️ 内容未通过安全检查，已停止生成" };
+            return; // Stop forwarding remaining chunks
+          }
+        }
+
         yield chunk;
       }
     }
     await event.sendStreaming(teeGenerator());
+
+    // If the safety check blocked the stream, return a safe placeholder so
+    // the history record (and memory consolidation) doesn't persist the
+    // blocked content.
+    if (safetyBlocked) {
+      return "[回复内容未通过安全检查]";
+    }
     return parts.join("");
   }
 
