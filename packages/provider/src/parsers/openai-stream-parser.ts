@@ -120,7 +120,19 @@ export async function* parseOpenAIStream(
       result.toolsCallName !== undefined ||
       result.usage !== undefined;
 
-    const isFinalChunk = choice.finish_reason === "stop" || choice.finish_reason === "end_turn";
+    // OpenAI finish_reason values: "stop", "length", "tool_calls",
+    // "content_filter", "function_call" (legacy). `end_turn` is Anthropic's
+    // finish reason and must NOT be treated as an OpenAI final-chunk marker —
+    // doing so could cause the parser to yield a spurious empty non-chunk
+    // when an OpenAI-compatible proxy leaks Anthropic-style values.
+    // `length` (max tokens reached) and `content_filter` (safety filter
+    // triggered) are both terminal states that must be emitted as final
+    // chunks so downstream consumers know generation stopped.
+    const isFinalChunk =
+      choice.finish_reason === "stop" ||
+      choice.finish_reason === "length" ||
+      choice.finish_reason === "content_filter" ||
+      choice.finish_reason === "function_call";
 
     if (hasContent) {
       yield result;

@@ -84,7 +84,11 @@ export async function withRetry<T>(
 
       let waitMs = delay;
       if (statusCode === 429 && err.retryAfterMs) {
-        waitMs = err.retryAfterMs;
+        // Cap Retry-After to maxDelayMs. A malicious or misconfigured server
+        // could otherwise send `Retry-After: 86400` (24 hours) and stall the
+        // caller indefinitely. Capping to maxDelayMs (default 30s) keeps
+        // backoff responsive while still honoring reasonable rate-limit hints.
+        waitMs = Math.min(err.retryAfterMs, config.maxDelayMs);
       }
 
       // Abortable sleep: reject immediately if the caller signals abort

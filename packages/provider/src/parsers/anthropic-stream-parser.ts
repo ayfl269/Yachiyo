@@ -29,6 +29,16 @@ export async function* parseAnthropicStream(
   const toolCallAccumByIndex = new Map<number, ToolCallAccum>();
   let activeToolIndex: number | null = null;
 
+  // `message_start` reports the prompt (input) token count; `message_delta`
+  // reports the completion (output) token count. Previously `message_delta`
+  // overwrote the entire usage object with promptTokens: 0, discarding the
+  // real prompt token count. We now cache the promptTokens from
+  // `message_start` and re-emit it alongside the completion tokens in
+  // `message_delta`, so downstream token accounting stays correct.
+  let cachedPromptTokens = 0;
+  let cachedCacheCreationInputTokens: number | undefined;
+  let cachedCacheReadInputTokens: number | undefined;
+
   for await (const event of parseSSEStream(response, abortSignal)) {
     const eventType = event.event;
     if (!eventType) continue;
@@ -46,12 +56,15 @@ export async function* parseAnthropicStream(
       case "message_start": {
         const d = data as { message?: { usage?: AnthropicUsage } };
         if (d.message?.usage) {
+          cachedPromptTokens = d.message.usage.input_tokens ?? 0;
+          cachedCacheCreationInputTokens = d.message.usage.cache_creation_input_tokens;
+          cachedCacheReadInputTokens = d.message.usage.cache_read_input_tokens;
           result.usage = {
-            promptTokens: d.message.usage.input_tokens ?? 0,
+            promptTokens: cachedPromptTokens,
             completionTokens: 0,
-            total: d.message.usage.input_tokens ?? 0,
-            cacheCreationInputTokens: d.message.usage.cache_creation_input_tokens,
-            cacheReadInputTokens: d.message.usage.cache_read_input_tokens,
+            total: cachedPromptTokens,
+            cacheCreationInputTokens: cachedCacheCreationInputTokens,
+            cacheReadInputTokens: cachedCacheReadInputTokens,
           };
         }
         break;
@@ -135,10 +148,17 @@ export async function* parseAnthropicStream(
       case "message_delta": {
         const d = data as { usage?: { output_tokens?: number } };
         if (d.usage) {
+          const completionTokens = d.usage.output_tokens ?? 0;
+          // Preserve the promptTokens from `message_start` instead of
+          // overwriting with 0. `total` is the sum of the two so that
+          // downstream consumers tracking cumulative token usage see the
+          // correct totals.
           result.usage = {
-            promptTokens: 0,
-            completionTokens: d.usage.output_tokens ?? 0,
-            total: d.usage.output_tokens ?? 0,
+            promptTokens: cachedPromptTokens,
+            completionTokens,
+            total: cachedPromptTokens + completionTokens,
+            cacheCreationInputTokens: cachedCacheCreationInputTokens,
+            cacheReadInputTokens: cachedCacheReadInputTokens,
           };
         }
         break;

@@ -469,30 +469,49 @@ export class ProviderManager {
       return;
     }
 
-    // Store configuration
+    // Create the provider instance FIRST. If this throws (bad config,
+    // missing dependency, network error during initialization), we leave
+    // no orphan config behind in `providerConfigs` or `sqliteStore`.
+    // Previously config was persisted before instance creation, so a failed
+    // load left a dangling config entry pointing at a non-existent instance.
+    await this.createAndRegisterProvider(type, id, providerConfig);
+
+    // Only persist config after the instance is successfully registered.
     this.providerConfigs.set(id, { ...providerConfig });
 
     if (this.sqliteStore) {
-      this.sqliteStore.saveProviderConfig({
-        id,
-        type,
-        config: { ...providerConfig },
-        isDefault: this.defaultProviderId === id,
-        isFallback: this.fallbackProviderIds.includes(id),
-        sortOrder: this.providerConfigs.size - 1,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      });
+      try {
+        this.sqliteStore.saveProviderConfig({
+          id,
+          type,
+          config: { ...providerConfig },
+          isDefault: this.defaultProviderId === id,
+          isFallback: this.fallbackProviderIds.includes(id),
+          sortOrder: this.providerConfigs.size - 1,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+      } catch (e) {
+        // If persistence fails, roll back the in-memory state so the
+        // instance and config stay consistent. The instance was already
+        // registered successfully, so we just need to remove it.
+        console.warn(`[ProviderManager] Failed to persist config for ${id}, rolling back: ${e}`);
+        this.removeProviderInstance(id);
+        throw e;
+      }
     }
-
-    // Determine provider category and create instance
-    await this.createAndRegisterProvider(type, id, providerConfig);
 
     console.info(`[ProviderManager] Loaded provider ${id} (type: ${type}).`);
   }
 
   /**
    * Reload (hot-swap) a provider by terminating the old one and loading the new config.
+   *
+   * Implementation note: the new provider is created BEFORE the old one is
+   * disposed. If creation fails, the old provider is left intact so the
+   * system keeps running with the previous (working) configuration. This is
+   * the opposite of the original order, which destroyed the old instance
+   * first — leaving no fallback if the new config was broken.
    */
   async reloadProvider(providerConfig: ProviderLoadConfig): Promise<void> {
     const { type, id } = providerConfig;
@@ -500,19 +519,74 @@ export class ProviderManager {
       throw new Error("[ProviderManager] reloadProvider requires 'type' and 'id' in config.");
     }
 
-    // Terminate existing if present
-    if (this.instMap.has(id)) {
+    // Snapshot the old instance for rollback. We keep it alive until the
+    // new instance is confirmed working.
+    const oldInstance = this.instMap.get(id);
+    const oldConfig = this.providerConfigs.get(id);
+
+    // Temporarily remove the old instance from the registry so
+    // createAndRegisterProvider doesn't hit the "already loaded" guard.
+    // We do NOT dispose it yet — that only happens after the new one is
+    // registered successfully.
+    if (oldInstance) {
       this.removeProviderInstance(id);
     }
 
-    // Store new configuration
-    this.providerConfigs.set(id, { ...providerConfig });
+    try {
+      // Create and register the new instance.
+      await this.createAndRegisterProvider(type, id, providerConfig);
 
-    // Create and register new instance
-    await this.createAndRegisterProvider(type, id, providerConfig);
+      // Persist the new config.
+      this.providerConfigs.set(id, { ...providerConfig });
+      if (this.sqliteStore) {
+        this.sqliteStore.saveProviderConfig({
+          id,
+          type,
+          config: { ...providerConfig },
+          isDefault: this.defaultProviderId === id,
+          isFallback: this.fallbackProviderIds.includes(id),
+          sortOrder: this.providerConfigs.size - 1,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+      }
 
-    this.notifyChange(id, this.guessProviderType(type), "reload");
-    console.info(`[ProviderManager] Reloaded provider ${id} (type: ${type}).`);
+      // New instance is live — now it's safe to dispose the old one.
+      if (oldInstance?.dispose) {
+        try {
+          await oldInstance.dispose();
+        } catch (e) {
+          console.warn(`[ProviderManager] Failed to dispose old instance of ${id} after reload: ${e}`);
+        }
+      }
+
+      this.notifyChange(id, this.guessProviderType(type), "reload");
+      console.info(`[ProviderManager] Reloaded provider ${id} (type: ${type}).`);
+    } catch (e) {
+      // Rollback: restore the old instance and config.
+      if (oldInstance && oldConfig) {
+        // Re-register the old instance. removeProviderInstance cleared it
+        // from instMap and all typed arrays; we restore it directly since
+        // the instance is already constructed. The category must match the
+        // logic in createAndRegisterProvider so the instance lands in the
+        // correct typed array.
+        this.instMap.set(id, oldInstance);
+        this.providerConfigs.set(id, oldConfig);
+        const chatTypes = new Set(["openai", "openai_responses", "gemini", "anthropic"]);
+        const embeddingTypes = new Set(["openai_embedding", "gemini_embedding"]);
+        const rerankTypes = new Set(["cohere", "jina", "voyage", "generic"]);
+        const ttsTypes = new Set(["openai_tts"]);
+        const sttTypes = new Set(["openai_stt"]);
+        // The typed arrays hold the provider instances directly (not wrapped),
+        // so we push `oldInstance` cast to the matching interface.
+        if (chatTypes.has(type)) this.providerInsts.push(oldInstance as Provider);
+        else if (embeddingTypes.has(type)) this.embeddingInsts.push(oldInstance as EmbeddingProvider);
+        else if (rerankTypes.has(type)) this.rerankInsts.push(oldInstance as RerankProvider);
+        else if (ttsTypes.has(type)) this.ttsInsts.push(oldInstance as TTSProvider);
+        else if (sttTypes.has(type)) this.sttInsts.push(oldInstance as STTProvider);
+      }
+      throw e;
+    }
   }
 
   /**
@@ -541,20 +615,58 @@ export class ProviderManager {
 
   /**
    * Delete a provider: terminate it and remove its configuration.
+   *
+   * Also cleans up default/fallback references: if the deleted provider was
+   * the default or in the fallback list, those references are cleared so
+   * they don't dangle and point at a non-existent instance. Previously,
+   * `defaultProviderId` could keep pointing at the deleted ID, causing
+   * `getProvider()` to silently fall through to the auto-select path even
+   * though the user explicitly set a default.
    */
   async deleteProvider(providerId: string, _providerSourceId?: string): Promise<void> {
     await this.terminateProvider(providerId);
     this.providerConfigs.delete(providerId);
     this.sqliteStore?.deleteProviderConfig(providerId);
 
+    // Clean up default reference if the deleted provider was the default.
+    if (this.defaultProviderId === providerId) {
+      this.defaultProviderId = null;
+      this.sqliteStore?.setDefaultProvider("");
+      console.info(`[ProviderManager] Cleared default provider reference (was ${providerId}).`);
+    }
+
+    // Clean up fallback references if the deleted provider was in the list.
+    if (this.fallbackProviderIds.includes(providerId)) {
+      this.fallbackProviderIds = this.fallbackProviderIds.filter((id) => id !== providerId);
+      this.sqliteStore?.setFallbackProviders(this.fallbackProviderIds);
+      console.info(`[ProviderManager] Removed ${providerId} from fallback providers.`);
+    }
+
     console.info(`[ProviderManager] Deleted provider ${providerId} and its configuration.`);
   }
 
   /**
    * Update an existing provider's config and recreate it.
+   *
+   * If `newConfig.id` differs from `originProviderId` and the new ID already
+   * exists as a *different* provider, the update is rejected before any
+   * mutation. Without this check, the old provider would be removed and the
+   * existing provider with the target ID would be silently shadowed (or
+   * `loadProvider` would warn "already loaded" and return, leaving the old
+   * provider gone with no replacement).
    */
   async updateProvider(originProviderId: string, newConfig: ProviderLoadConfig): Promise<void> {
     const newId = newConfig.id ?? originProviderId;
+
+    // Validate ID conflict: if the new ID differs from the origin and
+    // already exists, refuse to proceed — otherwise we'd silently overwrite
+    // or shadow an unrelated provider.
+    if (newId !== originProviderId && this.instMap.has(newId)) {
+      throw new Error(
+        `[ProviderManager] updateProvider: new ID "${newId}" already exists. ` +
+        `Refusing to overwrite a different provider. Use a unique ID or delete "${newId}" first.`
+      );
+    }
 
     // Remove old provider
     if (this.instMap.has(originProviderId)) {
