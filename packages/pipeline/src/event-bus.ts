@@ -33,6 +33,15 @@ export class EventBus {
    * event floods.
    */
   private readonly maxPendingPerConfig: number;
+  /**
+   * Resolved when `stop()` is called. The dispatch loop races against this
+   * so it can exit immediately even when blocked on `eventQueue.get()` or
+   * on the backpressure `Promise.race(...)`. Without this signal, `stop()`
+   * would only take effect on the next loop iteration — potentially never
+   * if no new events arrive to unblock `eventQueue.get()`.
+   */
+  private stopResolver: (() => void) | null = null;
+  private stopPromise: Promise<void> = Promise.resolve();
 
   constructor(
     eventQueue: AsyncQueue<MessageEvent>,
@@ -48,6 +57,11 @@ export class EventBus {
 
   async dispatch(): Promise<void> {
     this.running = true;
+    // Create a fresh stop promise for this dispatch cycle. If the bus is
+    // stopped and later restarted, a new promise ensures the new cycle
+    // isn't born already "stopped".
+    this.stopPromise = new Promise<void>((resolve) => { this.stopResolver = resolve; });
+
     while (this.running) {
       try {
         // Backpressure: if any single config has too many events queued
@@ -55,11 +69,21 @@ export class EventBus {
         // This prevents unbounded Promise growth under event floods while
         // still allowing idle configs to accept new events immediately.
         if (this.tooManyPending()) {
-          await Promise.race(this.confChains.values()).catch(() => {});
+          // Race the backpressure wait against the stop signal so stop()
+          // can break out immediately instead of waiting for a chain to settle.
+          await Promise.race([
+            Promise.race(this.confChains.values()).catch(() => {}),
+            this.stopPromise,
+          ]);
+          if (!this.running) break;
           continue;
         }
 
-        const event = await this.eventQueue.get();
+        // Race the event queue read against the stop signal. Without this,
+        // `eventQueue.get()` would block indefinitely when no events arrive,
+        // and stop() could not take effect until an event arrives.
+        const event = await Promise.race([this.eventQueue.get(), this.stopPromise]);
+        if (!this.running) break;
         if (!event) {
           continue;
         }
@@ -120,5 +144,10 @@ export class EventBus {
 
   stop(): void {
     this.running = false;
+    // Resolve the stop promise to unblock any pending `Promise.race` in the
+    // dispatch loop. This allows immediate shutdown even when the loop is
+    // blocked on `eventQueue.get()` or backpressure.
+    this.stopResolver?.();
+    this.stopResolver = null;
   }
 }

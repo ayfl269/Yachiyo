@@ -44,6 +44,14 @@ export class ProcessStage extends PipelineStage {
       await this.ctx.callEventHook(event, EventType.OnAgentBeginEvent);
       if (event.isStopped()) return;
 
+      // Acquire the session lock for BOTH the activatedHandlers path and the
+      // Agent path. Previously only the Agent path held the lock, which meant
+      // a plugin handler and an in-flight agent run could concurrently write
+      // to the same conversation history (saveUserMessage / saveAssistantMessage),
+      // causing lost updates and interleaved JSON. The lock is held until both
+      // branches complete.
+      const releaseLock = await this.ctx.sessionLockManager.acquireLock(event.unifiedMsgOrigin);
+      try {
       const activatedHandlers = event.getExtra<StarHandlerMetadata[]>("activated_handlers") ?? [];
       if (activatedHandlers.length > 0) {
         for (const handler of activatedHandlers) {
@@ -74,9 +82,7 @@ export class ProcessStage extends PipelineStage {
         }
       }
 
-      const releaseLock = await this.ctx.sessionLockManager.acquireLock(event.unifiedMsgOrigin);
-      try {
-        const systemPrompt = await this.buildSystemPrompt(event);
+      const systemPrompt = await this.buildSystemPrompt(event);
 
         const buildResult = await this.buildAgent(event, systemPrompt);
       if (!buildResult) {
@@ -398,6 +404,13 @@ export class ProcessStage extends PipelineStage {
       // Loop through agent steps (like runAgent does) to handle tool calls
       while (steps < this.maxStep + 1) {
         steps++;
+
+        // Renew the session lock on each step so the TTL watchdog does not
+        // force-release it during long multi-step tool execution. Without
+        // renewal, a 5-minute TTL could expire mid-run (e.g. during a slow
+        // web_fetch or multi-tool chain), allowing a second consumer to
+        // acquire the lock and write to the same history concurrently.
+        this.ctx.sessionLockManager.renewLock(event.unifiedMsgOrigin);
 
         if (event.isStopped()) {
           agentRunner.requestStop?.();

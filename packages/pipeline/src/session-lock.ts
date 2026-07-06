@@ -4,6 +4,12 @@
  * Locks auto-expire after `defaultTtlMs` (default 5 minutes) to prevent
  * permanently stuck sessions when the holder crashes or forgets to call
  * `release()`. A watchdog timer checks for expired locks periodically.
+ *
+ * Holders of long-running operations (e.g. LLM streaming, multi-step tool
+ * execution) should call `renewLock(umo)` periodically to push the TTL
+ * forward. Without renewal, the watchdog will force-release the lock while
+ * the holder is still active, allowing a second consumer to acquire it and
+ * causing concurrent writes to the same session.
  */
 export class SessionLockManager {
   private locks: Map<string, { promise: Promise<void>; release: () => void; acquiredAt: number; ttlMs: number; watchdog: ReturnType<typeof setInterval> }> = new Map();
@@ -43,6 +49,25 @@ export class SessionLockManager {
     return () => {
       this.forceRelease(umo);
     };
+  }
+
+  /**
+   * Renew (extend) the TTL of a currently held lock.
+   *
+   * This resets `acquiredAt` to the current time so the watchdog does not
+   * force-release the lock while the holder is still actively working.
+   * Long-running operations (LLM streaming, multi-step tool execution)
+   * should call this periodically — e.g. once per agent step or every
+   * 30 seconds — to prevent the lock from expiring mid-operation.
+   *
+   * Returns `true` if the lock was successfully renewed, `false` if no
+   * lock exists for the given `umo` (already released or never acquired).
+   */
+  renewLock(umo: string): boolean {
+    const entry = this.locks.get(umo);
+    if (!entry) return false;
+    entry.acquiredAt = Date.now();
+    return true;
   }
 
   private forceRelease(umo: string): void {
