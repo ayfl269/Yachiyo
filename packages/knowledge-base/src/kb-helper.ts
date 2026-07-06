@@ -36,8 +36,8 @@ export class KBHelper {
     let text: string;
     let finalUrl = url;
     try {
-      // safeFetch validates URL scheme + DNS-resolved IPs against private ranges
-      // and follows redirects manually, re-validating each Location header.
+      // safeFetch validates URL scheme to prevent non-HTTP protocols, and limits response
+      // size and redirect loops (LAN access is allowed per business requirements).
       const response = await safeFetch(url);
       finalUrl = response.url || url;
 

@@ -607,8 +607,8 @@ export async function quickTestMcpConnection(
           clientInfo: { name: "test-client", version: "1.0.0" },
         },
       };
-      // safeFetch validates the user-configured URL against private/reserved
-      // IP ranges to prevent SSRF via malicious MCP server configs.
+      // safeFetch validates URL scheme to prevent non-HTTP protocols, and limits response
+      // size and redirect loops (LAN access is allowed per business requirements).
       const response = await safeFetch(url, {
         method: "POST",
         headers: {

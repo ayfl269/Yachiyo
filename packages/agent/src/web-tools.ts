@@ -132,8 +132,8 @@ export function createWebFetchTool(): FunctionTool<WebToolContext> {
           fetchOptions.body = body;
         }
 
-        // safeFetch validates URL scheme + DNS-resolved IPs against private
-        // ranges and follows redirects manually, re-validating each hop.
+        // safeFetch validates URL scheme to prevent non-HTTP protocols, and limits response
+        // size and redirect loops (LAN access is allowed per business requirements).
         const response = await safeFetch(url, fetchOptions);
         clearTimeout(timeoutId);
 
@@ -776,8 +776,8 @@ export function createHttpRequestTool(): FunctionTool<WebToolContext> {
           fetchOptions.body = body;
         }
 
-        // safeFetch validates URL scheme + DNS-resolved IPs against private
-        // ranges and follows redirects manually, re-validating each hop.
+        // safeFetch validates URL scheme to prevent non-HTTP protocols, and limits response
+        // size and redirect loops (LAN access is allowed per business requirements).
         // When the caller disabled redirect following, pass maxRedirects=0
         // so the initial URL is still validated but no hops occur.
         const response = await safeFetch(url, fetchOptions, followRedirects ? 5 : 0);

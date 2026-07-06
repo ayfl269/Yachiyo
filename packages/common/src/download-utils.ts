@@ -82,9 +82,9 @@ export async function downloadBytes(url: string, timeoutMs: number = DEFAULT_DOW
   if (url.includes("multimedia.nt.qq.com.cn")) {
     headers["Referer"] = "https://web.qq.com/";
   }
-  // safeFetch validates URL scheme + DNS-resolved IPs against private/reserved
-  // ranges (SSRF defense-in-depth). It also follows redirects safely, re-validating
-  // each hop. The signal-based timeout is preserved.
+  // safeFetch validates URL scheme to prevent non-HTTP protocols, and limits response
+  // size and redirect loops (LAN access is allowed per business requirements).
+  // The signal-based timeout is preserved.
   const response = await safeFetch(url, {
     headers,
     signal: AbortSignal.timeout(timeoutMs),

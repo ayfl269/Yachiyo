@@ -83,9 +83,8 @@ export class OpenAISttProvider extends STTProvider {
     const { randomUUID } = await import("crypto");
     const { writeFileSync } = await import("fs");
 
-    // safeFetch validates URL scheme + DNS-resolved IPs against private/reserved
-    // ranges to prevent SSRF (e.g. user-supplied audio URL pointing to internal
-    // services or cloud metadata endpoints).
+    // safeFetch validates URL scheme to prevent non-HTTP protocols, and limits response
+    // size and redirect loops (LAN access is allowed per business requirements).
     const res = await safeFetch(url);
     if (!res.ok) {
       throw new ProviderAPIError("openai-stt", res.status, undefined, `Failed to download audio from ${url}`);
