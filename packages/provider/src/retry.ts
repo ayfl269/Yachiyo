@@ -12,6 +12,42 @@ export const DEFAULT_RETRY_CONFIG: RetryConfig = {
   retryableStatusCodes: [429, 500, 503],
 };
 
+/**
+ * Transient network errno codes surfaced by Node's http/https stack and
+ * undici. These have no HTTP status code (the request never completed)
+ * but represent exactly the kind of transient failure retry was designed
+ * for.
+ */
+const TRANSIENT_NETWORK_CODES = new Set([
+  "ECONNRESET",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ETIMEDOUT",
+  "ECONNREFUSED",
+  "EPIPE",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ECONNABORTED",
+  "UND_ERR_SOCKET",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
+
+/**
+ * Determine whether an error represents a transient network-level failure
+ * that should be retried even though it carries no HTTP status code.
+ *
+ * - Browser `fetch` surfaces DNS failures, connection resets, and TLS
+ *   handshake failures as `TypeError: fetch failed` / `Failed to fetch`.
+ * - Node surfaces the same conditions via `err.code` (errno).
+ */
+function isTransientNetworkError(err: any): boolean {
+  if (err instanceof TypeError) return true;
+  if (typeof err.code === "string" && TRANSIENT_NETWORK_CODES.has(err.code)) {
+    return true;
+  }
+  return false;
+}
+
 export async function withRetry<T>(
   fn: () => Promise<T>,
   config: RetryConfig = DEFAULT_RETRY_CONFIG,
@@ -28,7 +64,14 @@ export async function withRetry<T>(
       lastError = err;
 
       const statusCode = err.statusCode ?? err.status;
-      if (!config.retryableStatusCodes.includes(statusCode)) {
+      const isRetryableStatus =
+        statusCode != null && config.retryableStatusCodes.includes(statusCode);
+      // Network errors (DNS failures, connection resets, TLS handshake
+      // failures, etc.) carry no status code and would otherwise bypass
+      // retry entirely — even though they are the most transient errors.
+      const isNetworkError = isTransientNetworkError(err);
+
+      if (!isRetryableStatus && !isNetworkError) {
         throw err;
       }
 

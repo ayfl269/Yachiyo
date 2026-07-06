@@ -125,7 +125,8 @@ export function messageToAnthropic(messages: Message[]): AnthropicConversionResu
   let system = "";
   const result: AnthropicMessage[] = [];
 
-  for (const msg of messages) {
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
     // Skip checkpoint messages
     if (msg.role === "_checkpoint") continue;
 
@@ -145,27 +146,38 @@ export function messageToAnthropic(messages: Message[]): AnthropicConversionResu
       continue;
     }
 
-    // Tool result messages → user message with tool_result block
+    // Tool result messages → merge consecutive ones into a single user
+    // message. Anthropic enforces strict user/assistant alternation, so
+    // emitting one user message per tool_result (as happens when the
+    // assistant makes parallel tool calls) would produce back-to-back
+    // user messages and trigger a 400 error.
     if (msg.role === "tool") {
-      const outputText =
-        typeof msg.content === "string"
-          ? msg.content
-          : Array.isArray(msg.content)
-            ? msg.content
-                .filter((p) => !p._noSave && p.type === "text")
-                .map((p) => (p as { text: string }).text)
-                .join("\n")
-            : "";
-
+      const toolResults: AnthropicToolResultBlock[] = [];
+      while (i < messages.length && messages[i].role === "tool") {
+        const toolMsg = messages[i];
+        const outputText =
+          typeof toolMsg.content === "string"
+            ? toolMsg.content
+            : Array.isArray(toolMsg.content)
+              ? toolMsg.content
+                  .filter((p) => !p._noSave && p.type === "text")
+                  .map((p) => (p as { text: string }).text)
+                  .join("\n")
+              : "";
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: toolMsg.tool_call_id ?? "",
+          content: outputText,
+        });
+        i++;
+      }
+      // Step back so the outer loop's i++ lands on the first non-tool
+      // message; if every remaining message was a tool message, i ===
+      // messages.length here and the loop terminates cleanly after i--.
+      i--;
       result.push({
         role: "user",
-        content: [
-          {
-            type: "tool_result",
-            tool_use_id: msg.tool_call_id ?? "",
-            content: outputText,
-          },
-        ],
+        content: toolResults,
       });
       continue;
     }
