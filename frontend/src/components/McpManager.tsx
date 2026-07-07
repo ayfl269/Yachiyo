@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import {
-  Plus, X, Trash2, Pencil, RefreshCw,
+  Plus, Trash2, Pencil, RefreshCw,
   Wrench, AlertTriangle, CheckCircle2, XCircle,
   ChevronRight, Loader2, Server
 } from 'lucide-react'
