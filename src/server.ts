@@ -49,6 +49,7 @@ async function main() {
       enabled: dashboardEnabled,
       port: dashboardPort,
       host: dashboardHost,
+      debugChatEnabled: false,
     },
   });
 

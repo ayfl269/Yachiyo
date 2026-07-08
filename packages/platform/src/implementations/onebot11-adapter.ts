@@ -318,6 +318,88 @@ export class OneBot11Adapter extends PlatformAdapter {
     return null;
   }
 
+  /**
+   * 主动推送消息到指定会话。
+   * 通过解析 UMO 确定是群消息还是私聊消息，然后调用 OneBot 11 的 send_group_msg / send_private_msg API。
+   * UMO 格式: onebot11:group:<groupId> 或 onebot11:private:<userId>
+   */
+  override async sendProactiveMessage(
+    target: { umo: string; sessionId: string; platformId: string },
+    components: MessageComponent[],
+  ): Promise<boolean> {
+    const ws = this.getActiveWs();
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.warn("[OneBot11] Cannot send proactive message: no active WS connection");
+      return false;
+    }
+
+    // 解析 UMO: onebot11:group:<id> 或 onebot11:private:<id>
+    const match = target.umo.match(/^onebot11:(group|private):(.+)$/);
+    if (!match) {
+      console.warn(`[OneBot11] Cannot parse UMO for proactive message: ${target.umo}`);
+      return false;
+    }
+    const [, typeStr, idStr] = match;
+    const id = Number(idStr);
+    if (!Number.isFinite(id) || id <= 0) {
+      console.warn(`[OneBot11] Invalid target id in UMO: ${target.umo}`);
+      return false;
+    }
+
+    const action = typeStr === "group" ? "send_group_msg" : "send_private_msg";
+    const params: Record<string, any> =
+      typeStr === "group" ? { group_id: id } : { user_id: id };
+    params.message = this.componentsToOB11(components);
+
+    try {
+      this.callApi(action, params, ws);
+      return true;
+    } catch (e) {
+      console.error(`[OneBot11] Proactive message failed:`, e);
+      return false;
+    }
+  }
+
+  /** 调用 OneBot 11 API（适配器级别，供主动推送使用） */
+  private callApi(action: string, params: Record<string, any>, ws: WebSocket): void {
+    if (ws.readyState !== WebSocket.OPEN) {
+      console.warn(`[OneBot11] Cannot call API ${action}: WS not open`);
+      return;
+    }
+    const echo = generateId();
+    const payload = { action, params, echo };
+    try {
+      ws.send(JSON.stringify(payload));
+    } catch (e) {
+      console.error(`[OneBot11] Failed to send API call ${action}:`, e);
+    }
+  }
+
+  /** 将消息组件转换为 OneBot 11 消息段 */
+  private componentsToOB11(components: MessageComponent[]): OB11MessageSegment[] {
+    const segments: OB11MessageSegment[] = [];
+    for (const comp of components) {
+      switch (comp.type) {
+        case ComponentType.Plain:
+          segments.push({ type: "text", data: { text: (comp as PlainComponent).text ?? "" } });
+          break;
+        case ComponentType.Image: {
+          const img = comp as ImageComponent;
+          segments.push({ type: "image", data: { file: img.url ?? "", url: img.url ?? "" } });
+          break;
+        }
+        case ComponentType.At: {
+          const atComp = comp as AtComponent;
+          segments.push({ type: "at", data: { qq: atComp.qq ?? "all" } });
+          break;
+        }
+        default:
+          segments.push({ type: "text", data: { text: (comp as PlainComponent).text ?? JSON.stringify(comp.toDict()) } });
+      }
+    }
+    return segments;
+  }
+
   // ── Forward WS (本地启动 WS 服务器) ──
 
   private async startForwardWs(): Promise<void> {

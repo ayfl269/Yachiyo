@@ -3269,11 +3269,16 @@ export class DashboardServer {
           get unifiedMsgOrigin(): string { return umo; }
         })(message, platformMsg, platformMeta, sessionId);
 
+        // Mark this event as a debug chat so the pipeline can skip
+        // recording it to memory (avoids triggering memory consolidation
+        // and polluting long-term memory with debug/test conversations).
+        event.setExtra("_debugChat", true);
+
         // Push to event queue
         this.ctx.eventQueue.put(event);
 
         // Wait for response with timeout
-        const timeout = setTimeout(() => { responseResolve?.(); }, 60000);
+        const timeout = setTimeout(() => { responseResolve?.(); }, 180000);
 
         // Poll for result
         const pollInterval = setInterval(() => {

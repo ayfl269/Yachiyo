@@ -940,4 +940,74 @@ export class QQOfficialAdapter extends PlatformAdapter {
     const data = await response.json() as { channel_id: string };
     return data.channel_id;
   }
+
+  /**
+   * 主动推送消息到指定会话。
+   * 通过解析 unifiedMsgOrigin 提取 eventType 和 targetId，
+   * 然后调用对应的 REST API 发送消息。
+   * 对于 group/c2c，msg_id 留空以发送主动消息。
+   */
+  override async sendProactiveMessage(
+    target: { umo: string; sessionId: string; platformId: string },
+    components: MessageComponent[],
+  ): Promise<boolean> {
+    // QQOfficial 的 UMO 格式: qqofficial:<eventType>:<targetId>
+    const parsed = parseQQOfficialUMO(target.umo);
+    if (!parsed) {
+      // fallback: 尝试用 sessionId 作为 targetId，默认 c2c
+      console.warn(`[QQOfficial] Cannot parse UMO ${target.umo}, falling back to sessionId as c2c target.`);
+      const text = extractText(components);
+      if (!text) return false;
+      try {
+        await this.sendC2CMessage(target.sessionId, text, "");
+        return true;
+      } catch (e) {
+        console.error(`[QQOfficial] Proactive message (fallback) failed:`, e);
+        return false;
+      }
+    }
+
+    const text = extractText(components);
+    if (!text) return false;
+
+    try {
+      switch (parsed.eventType) {
+        case "group":
+          await this.sendGroupMessage(parsed.targetId, text, "");
+          break;
+        case "c2c":
+          await this.sendC2CMessage(parsed.targetId, text, "");
+          break;
+        case "guild":
+          await this.sendGuildMessage(parsed.targetId, text);
+          break;
+        case "direct":
+          await this.sendDirectMessage(parsed.targetId, text);
+          break;
+      }
+      return true;
+    } catch (e) {
+      console.error(`[QQOfficial] Proactive message failed:`, e);
+      return false;
+    }
+  }
+}
+
+/** 从消息组件中提取纯文本 */
+function extractText(components: MessageComponent[]): string {
+  return components
+    .filter((c): c is PlainComponent => c.type === ComponentType.Plain)
+    .map(c => c.text ?? "")
+    .join("");
+}
+
+/** 解析 QQOfficial 的 UMO，提取 eventType 和 targetId */
+function parseQQOfficialUMO(umo: string): { eventType: QQOfficialEventType; targetId: string } | null {
+  // 格式: qqofficial:<eventType>:<targetId>
+  const match = umo.match(/^qqofficial:(group|private|guild|direct):(.+)$/);
+  if (!match) return null;
+  const [, typeStr, targetId] = match;
+  // UMO 中的 "private" 对应 eventType "c2c"
+  const eventType = (typeStr === "private" ? "c2c" : typeStr) as QQOfficialEventType;
+  return { eventType, targetId };
 }

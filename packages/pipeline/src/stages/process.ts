@@ -615,8 +615,14 @@ export class ProcessStage extends PipelineStage {
   /**
    * Record a conversation turn (user message + assistant response) to short-term memory.
    * Called after OnAgentDoneEvent.
+   *
+   * Debug chat events (marked with `_debugChat` extra) are skipped to avoid
+   * polluting long-term memory with test conversations and to prevent
+   * triggering memory consolidation that could delay debug responses.
    */
   private recordConversationToMemory(event: MessageEvent): void {
+    if (event.getExtra<boolean>("_debugChat") === true) return;
+
     const store = this.ctx.memoryStore;
     if (!store) return;
     if (!this.ctx.config.memoryEnabled) return;

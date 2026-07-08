@@ -289,6 +289,34 @@ export class WebChatAdapter extends PlatformAdapter {
     return this.metadata;
   }
 
+  /**
+   * 主动推送消息到指定会话的 SSE 连接。
+   * WebChat 的 sessionId 是 webchat_xxx，用于查找活跃的 SSE 连接。
+   * 仅当该 session 有活跃的 SSE 连接时才能送达，否则消息丢弃。
+   */
+  override async sendProactiveMessage(
+    target: { umo: string; sessionId: string; platformId: string },
+    components: MessageComponent[],
+  ): Promise<boolean> {
+    const conn = this.activeStreams.get(target.sessionId);
+    if (!conn) {
+      console.warn(`[WebChatAdapter] No active SSE stream for session ${target.sessionId}, proactive message dropped.`);
+      return false;
+    }
+
+    // 构建与正常消息一致的事件结构
+    const payload = JSON.stringify({
+      type: "message",
+      content: components.map(c => c.toDict()),
+    });
+    writeSSE(conn, "message", payload);
+
+    // 同时发送 typing 停止信号，让前端知道这是一条完整消息
+    writeSSE(conn, "stop_typing", JSON.stringify({ type: "stop_typing" }));
+
+    return true;
+  }
+
   async healthCheck(): Promise<string | null> {
     if (!this.isRunning) return "Adapter not running";
     if (!this.server?.listening) return "HTTP server not listening";

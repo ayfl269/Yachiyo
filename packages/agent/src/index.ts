@@ -181,6 +181,28 @@ export {
 } from "./memory-tool.js";
 export type { MemoryToolContext, CreateMemoryToolOptions } from "./memory-tool.js";
 
+// Scheduler task store
+export {
+  SqliteSchedulerTaskStore,
+  SCHEDULER_MIGRATIONS,
+  computeNextFireAt,
+  computeInitialNextFireAt,
+} from "./scheduler-task-store.js";
+export type {
+  SchedulerTask,
+  SchedulerStats,
+  TaskType,
+  TaskStatus,
+  PlanStep,
+  StepStatus,
+} from "./scheduler-task-store.js";
+
+// Scheduler tool (agent-operated)
+export {
+  createSchedulerTool,
+} from "./scheduler-tool.js";
+export type { SchedulerToolContext, CreateSchedulerToolOptions } from "./scheduler-tool.js";
+
 // Memory store
 export {
   SqliteMemoryStore,

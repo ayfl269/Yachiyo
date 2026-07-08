@@ -40,6 +40,9 @@ import { createMemoryTool } from "@yachiyo/agent/memory-tool.js";
 import { MemoryConsolidator } from "@yachiyo/agent/memory-consolidator.js";
 import { createCodeSearchTool } from "@yachiyo/agent/code-search-tool.js";
 import { getSubAgentManagementTools } from "@yachiyo/agent/subagent-create-tool.js";
+import { SCHEDULER_MIGRATIONS, SqliteSchedulerTaskStore } from "@yachiyo/agent/scheduler-task-store.js";
+import { createSchedulerTool } from "@yachiyo/agent/scheduler-tool.js";
+import { TaskScheduler } from "@yachiyo/pipeline/task-scheduler.js";
 
 export interface BootstrapOptions {
   /** 数据目录路径，默认 ./data，支持 DATA_DIR 环境变量覆盖 */
@@ -109,6 +112,7 @@ export interface BootstrapContext {
   dbManager: DatabaseManager;
   toolManager: FunctionToolManager;
   memoryConsolidator: MemoryConsolidator;
+  taskScheduler: TaskScheduler;
   dashboardServer?: any;
   shutdown: () => Promise<void>;
 }
@@ -135,6 +139,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
   dbManager.migrate("memory", MEMORY_MIGRATIONS);
   dbManager.migrate("config", [...PROVIDER_CONFIG_MIGRATIONS, ...CONFIG_MIGRATIONS, ...CONFIG_EXTRAS_MIGRATIONS, ...PERSONA_MIGRATIONS, ...ADAPTER_MIGRATIONS]);
   dbManager.migrate("knowledge", KNOWLEDGE_MIGRATIONS);
+  dbManager.migrate("scheduler", SCHEDULER_MIGRATIONS);
 
   // 1. 创建核心组件（注入 SQLite Store）
   const eventQueue = new AsyncQueue<MessageEvent>();
@@ -318,6 +323,11 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
     toolManager.funcList.push(tool);
   }
 
+  // 注册定时任务工具 + 任务调度服务
+  const sqliteSchedulerTaskStore = new SqliteSchedulerTaskStore(dbManager.getDb("scheduler"));
+  const schedulerTool = createSchedulerTool({ sqliteStore: sqliteSchedulerTaskStore });
+  toolManager.funcList.push(schedulerTool);
+  const taskScheduler = new TaskScheduler(sqliteSchedulerTaskStore, eventQueue);
   // 6. 创建管线调度器
   const pipelineContext: PipelineContext = {
     get config() { return configManager.getActiveConfig() ?? defaultConfig; },
@@ -396,6 +406,12 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
   // 启动周期记忆整理
   memoryConsolidator.startPeriodic();
 
+  // 注入 AdapterRegistry 到 TaskScheduler（用于主动推送定时任务消息）
+  taskScheduler.setAdapterRegistry(adapterRegistry);
+
+  // 启动定时任务调度器
+  taskScheduler.start();
+
   // 9.5 启动管理后台
   let dashboardServer: any;
   if (options.dashboard?.enabled) {
@@ -453,6 +469,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
     dbManager,
     toolManager,
     memoryConsolidator,
+    taskScheduler,
     dashboardServer,
     async shutdown() {
       if (dashboardServer) {
@@ -462,6 +479,8 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
           console.error("[Bootstrap] Error stopping dashboard server:", e);
         }
       }
+      // 停止定时任务调度器
+      taskScheduler.stop();
       // 停止记忆整理周期定时器
       memoryConsolidator.stop();
       await adapterRegistry.stopAll();

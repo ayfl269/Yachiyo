@@ -13,7 +13,7 @@ import { join } from "path";
 
 // ── Types ──
 
-export type DatabaseName = "chat" | "memory" | "config" | "knowledge";
+export type DatabaseName = "chat" | "memory" | "config" | "knowledge" | "scheduler";
 
 export interface Migration {
   version: number;
@@ -53,7 +53,7 @@ export class DatabaseManager {
     }
 
     // Open all databases
-    const dbNames: DatabaseName[] = ["chat", "memory", "config", "knowledge"];
+    const dbNames: DatabaseName[] = ["chat", "memory", "config", "knowledge", "scheduler"];
     for (const name of dbNames) {
       const dbPath = join(this.dataDir, `${name}.db`);
       const db = new Database(dbPath);

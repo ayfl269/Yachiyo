@@ -7,6 +7,7 @@ import { ComponentType } from "@yachiyo/message/components.js";
 import { PlatformMessage } from "@yachiyo/message/platform-message.js";
 import { generateId } from "@yachiyo/common/id-generator.js";
 import type { MessageChain } from "@yachiyo/agent/types.js";
+import { MessageType } from "@yachiyo/message/types.js";
 
 export type AdapterStatus = "idle" | "initialized" | "running" | "stopping" | "stopped" | "error";
 
@@ -111,7 +112,33 @@ export abstract class PlatformAdapter {
 
   // --- 健康检查 ---
 
-  /** 适配器健康检查，返回 null 表示健康，否则返回错误描述 */
+  /**
+   * 主动推送消息到指定会话（不依赖事件回调）。
+   * 用于定时任务到期、提醒等场景向用户主动发送消息。
+   *
+   * @param target 路由信息（umo + sessionId + platformId）
+   * @param components 消息组件列表
+   * @returns true 表示推送成功，false 表示无法推送
+   */
+  async sendProactiveMessage(
+    target: { umo: string; sessionId: string; platformId: string },
+    components: MessageComponent[],
+  ): Promise<boolean> {
+    // 默认实现：调用 sendBySession 注入事件到 pipeline。
+    // 支持主动消息的 adapter 应覆盖此方法直接通过平台 API 推送。
+    try {
+      const session = new MessageSession();
+      session.platformId = target.platformId;
+      session.messageType = MessageType.FRIEND_MESSAGE;
+      session.sessionId = target.sessionId;
+      await this.sendBySession(session, components);
+      return true;
+    } catch (e) {
+      console.error(`[PlatformAdapter] sendProactiveMessage failed:`, e);
+      return false;
+    }
+  }
+
   async healthCheck(): Promise<string | null> {
     return this.isRunning ? null : "Adapter not running";
   }

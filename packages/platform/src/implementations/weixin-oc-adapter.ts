@@ -561,6 +561,42 @@ export class WeixinOCAdapter extends PlatformAdapter {
     return null;
   }
 
+  /**
+   * 主动推送消息到指定会话。
+   * WeixinOC 的 UMO 格式: weixin_oc:private:<userId>
+   * 通过 sendTextMessage 发送文本消息。
+   * 需要用户此前已发过消息以建立 context_token，否则无法推送。
+   */
+  override async sendProactiveMessage(
+    target: { umo: string; sessionId: string; platformId: string },
+    components: MessageComponent[],
+  ): Promise<boolean> {
+    // 解析 UMO: weixin_oc:private:<userId>
+    const match = target.umo.match(/^weixin_oc:private:(.+)$/);
+    if (!match) {
+      console.warn(`[WeixinOC] Cannot parse UMO for proactive message: ${target.umo}`);
+      return false;
+    }
+    const userId = match[1];
+
+    const text = components
+      .filter((c): c is PlainComponent => c.type === ComponentType.Plain)
+      .map(c => c.text ?? "")
+      .join("");
+    if (!text.trim()) return false;
+
+    try {
+      const ok = await this.sendTextMessage(userId, text);
+      if (!ok) {
+        console.warn(`[WeixinOC] Proactive message to ${userId} failed (no context token or API error).`);
+      }
+      return ok;
+    } catch (e) {
+      console.error(`[WeixinOC] Proactive message failed:`, e);
+      return false;
+    }
+  }
+
   // ── Login Flow ──
 
   private isLoginSessionValid(session: LoginSession | null): boolean {
