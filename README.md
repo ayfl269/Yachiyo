@@ -22,9 +22,10 @@ Yachiyo 是一个基于 TypeScript 实现的模块化 Agent 系统。采用 pnpm
 - **丰富的工具系统 (Tool System)**：内置文件操作、Shell 执行、代码执行、网页搜索/抓取、Playwright 浏览器控制、记忆管理、代码搜索、Text-to-Image 渲染等工具，支持通过 MCP 协议接入外部工具。
 - **子代理编排 (Sub-Agent Orchestration)**：支持创建子代理并行处理任务，通过 Handoff 机制实现代理间协作，支持沙箱隔离执行。
 - **安全沙箱 (Process Sandbox)**：基于 Windows Job Object / Linux cgroup 的进程级安全沙箱，可限制 CPU 权重、最大内存使用与最大衍生进程数，保障本地命令及代码安全执行。
-- **多平台适配器中心 (Adapter Registry)**：支持 QQ (OneBot11 WebSocket)、QQ Official Bot、微信 (WeChat OC) 平台适配，统一生命周期管理并共享异步事件队列。
+- **多平台适配器中心 (Adapter Registry)**：支持 QQ (OneBot11 WebSocket)、QQ Official Bot、微信 (WeChat OC)、WebChat 平台适配，统一生命周期管理并共享异步事件队列。各适配器均实现 `sendProactiveMessage` 主动推送能力，可用于定时任务到期提醒等场景。
+- **定时任务与提醒系统 (Scheduler System)**：内置 `scheduler_tool` 工具允许 Agent 创建/查询/更新/删除定时任务（reminder / scheduled / recurring / goal / plan 五种类型）、设置当前任务目标、维护多步骤执行计划。到期任务通过 `TaskScheduler` 周期检查（默认 30 秒）并经对应平台适配器主动推送提醒消息，无需用户发起会话。
 - **插件与技能系统 (Plugin & Skill)**：可扩展的插件注册与技能管理机制，支持事件过滤、自定义处理逻辑。
-- **React 管理后台 (Admin Dashboard)**：集成 React + Vite 管理面板，可视化管理提供商、插件、技能、角色、知识库、对话、记忆、配置、消息平台与会话白名单。
+- **React 管理后台 (Admin Dashboard)**：集成 React + Vite 管理面板，可视化管理提供商、插件、技能、角色、知识库、对话、记忆、配置、消息平台与会话白名单。支持调试 Chat 端点用于集成测试（调试对话不并入记忆，避免污染长期记忆与触发记忆整理）。
 
 ---
 
@@ -40,12 +41,16 @@ Yachiyo 是一个基于 TypeScript 实现的模块化 Agent 系统。采用 pnpm
 
 ## 支持的消息平台
 
-| 平台 | 协议 |
-|------|------|
-| QQ (第三方) | OneBot11 WebSocket |
-| QQ (官方) | QQ Official Bot API |
-| 微信 | WeChat OC |
-| WebHook (用于测试) | HTTP |
+| 平台 | 协议 | 主动推送¹ |
+|------|------|:--------:|
+| QQ (第三方) | OneBot11 WebSocket | ✓ |
+| QQ (官方) | QQ Official Bot API | ✓ |
+| 微信 | WeChat OC | ✓² |
+| WebChat | HTTP + SSE | ✓³ |
+
+¹ 主动推送用于定时任务到期提醒等场景，详见"定时任务系统"。
+² 微信 OC 需用户先前发过消息以建立 context_token。
+³ WebChat 需客户端保持 SSE 长连接活跃。
 
 ---
 
@@ -84,6 +89,7 @@ yachiyo/
 │   ├── chat.db                   # 对话历史
 │   ├── config.db                 # 配置、提供商、角色、适配器、会话黑白名单
 │   ├── memory.db                 # 代理长期记忆
+│   ├── scheduler.db              # 定时任务存储
 │   └── knowledge.db              # 知识库存储
 ├── dist/                         # 编译输出
 ├── package.json
@@ -133,7 +139,7 @@ pnpm frontend:dev
 pnpm test
 ```
 
-包含的测试文件（全部 8 个由 `pnpm test` 运行）：
+包含的测试文件（全部 9 个由 `pnpm test` 运行）：
 
 | 测试文件 | 测试内容 |
 |----------|---------|
@@ -144,7 +150,39 @@ pnpm test
 | `tests/memory-system-test.ts` | 记忆提取与整理 |
 | `tests/provider-caching-test.ts` | 模型 Prompt 缓存 |
 | `tests/provider-manager-test.ts` | 模型加载与 MCP 安全校验 |
+| `tests/scheduler-system-test.ts` | 定时任务系统（Store CRUD、Recurrence、TaskScheduler.tick 推送、scheduler_tool agent 操作） |
 | `tests/windows-sandbox-test.ts` | Windows 沙箱限制验证（非 Windows 自动跳过） |
+
+---
+
+## 定时任务系统
+
+Yachiyo 内置完整的定时任务与提醒系统，允许 Agent 主动管理用户的待办事项、周期提醒与多步骤执行计划。
+
+### 任务类型
+
+| 类型 | 说明 | 触发方式 |
+|------|------|---------|
+| `reminder` | 一次性提醒 | `scheduled_at` 到期触发 |
+| `scheduled` | 定时任务 | `scheduled_at` 到期触发 |
+| `recurring` | 周期任务 | 按 `recurrence`（`1h`/`30m`/`daily`/`weekly`）周期触发 |
+| `goal` | 当前任务目标 | 不自动触发，由 Agent 维护 |
+| `plan` | 多步骤执行计划 | 不自动触发，由 Agent 推进步骤 |
+
+### 工作流程
+
+1. **Agent 创建任务**：用户对话中要求设置提醒，Agent 调用 `scheduler_tool` 创建任务并自动绑定当前会话的 UMO / sessionId / platformId
+2. **TaskScheduler 周期检查**：后台 `TaskScheduler` 每 30 秒扫描到期任务
+3. **主动推送提醒**：到期任务通过对应平台适配器的 `sendProactiveMessage` 直接推送到用户，无需用户发起会话
+4. **周期任务重算**：recurring 类型任务触发后自动重算 `next_fire_at`，保持 pending 状态继续运行
+
+### Agent 可用操作
+
+`scheduler_tool` 提供 13 个 action：`create` / `get` / `list` / `search` / `update` / `delete` / `set_goal` / `get_goal` / `set_plan` / `update_step` / `next_step` / `fire_now` / `stats`。
+
+### 调试模式
+
+Dashboard 的 `/api/debug/chat` 端点用于集成测试。调试对话会被标记 `_debugChat`，不写入短期记忆，避免触发记忆整理导致调试响应延迟。通过 `debugChatEnabled` 配置项控制开关（默认关闭）。
 
 ---
 
