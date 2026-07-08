@@ -150,7 +150,7 @@ export class TaskScheduler {
       toDict() { return { type: "text", data: { text: messageText } }; },
     }];
 
-    // 路由信息：umo 用于平台解析，sessionId 用于 WebChat 等查找连接
+    // 路由信息：umo 用于平台解析，sessionId 用于查找会话连接
     const target = {
       umo: task.umo,
       sessionId: task.sessionId ?? task.umo,

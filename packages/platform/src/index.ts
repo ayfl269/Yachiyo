@@ -6,5 +6,4 @@ export {
   validateAdapterConfig,
   type AdapterConfigBase,
   type OneBot11AdapterConfig,
-  type WebChatAdapterConfig,
 } from "./config.js";

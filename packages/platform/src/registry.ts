@@ -2,12 +2,10 @@ import type { AsyncQueue } from "@yachiyo/common/async-queue.js";
 import type { MessageEvent } from "@yachiyo/message/event.js";
 import { PlatformAdapter } from "./adapter.js";
 import type { OneBot11AdapterConfig, QQOfficialAdapterConfig, WeixinOCAdapterConfig } from "./config.js";
-import type { WebChatConfig } from "./implementations/webchat-adapter.js";
 import type { SqliteAdapterStore } from "./sqlite-adapter-store.js";
 import { OneBot11Adapter } from "./implementations/onebot11-adapter.js";
 import { QQOfficialAdapter } from "./implementations/qqofficial-adapter.js";
 import { WeixinOCAdapter } from "./implementations/weixin-oc-adapter.js";
-import { WebChatAdapter } from "./implementations/webchat-adapter.js";
 
 export type AdapterFactory = (
   config: Record<string, unknown>,
@@ -152,8 +150,5 @@ export function registerBuiltinAdapterFactories(registry: AdapterRegistry): void
   });
   registry.registerFactory("weixin_oc", (config, eq) => {
     return new WeixinOCAdapter(config as WeixinOCAdapterConfig, eq);
-  });
-  registry.registerFactory("webchat", (config, eq) => {
-    return new WebChatAdapter(config as unknown as WebChatConfig, eq);
   });
 }

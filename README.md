@@ -22,7 +22,7 @@ Yachiyo 是一个基于 TypeScript 实现的模块化 Agent 系统。采用 pnpm
 - **丰富的工具系统 (Tool System)**：内置文件操作、Shell 执行、代码执行、网页搜索/抓取、Playwright 浏览器控制、记忆管理、代码搜索、Text-to-Image 渲染等工具，支持通过 MCP 协议接入外部工具。
 - **子代理编排 (Sub-Agent Orchestration)**：支持创建子代理并行处理任务，通过 Handoff 机制实现代理间协作，支持沙箱隔离执行。
 - **安全沙箱 (Process Sandbox)**：基于 Windows Job Object / Linux cgroup 的进程级安全沙箱，可限制 CPU 权重、最大内存使用与最大衍生进程数，保障本地命令及代码安全执行。
-- **多平台适配器中心 (Adapter Registry)**：支持 QQ (OneBot11 WebSocket)、QQ Official Bot、微信 (WeChat OC)、WebChat 平台适配，统一生命周期管理并共享异步事件队列。各适配器均实现 `sendProactiveMessage` 主动推送能力，可用于定时任务到期提醒等场景。
+- **多平台适配器中心 (Adapter Registry)**：支持 QQ (OneBot11 WebSocket)、QQ Official Bot、微信 (WeChat OC) 平台适配，统一生命周期管理并共享异步事件队列。各适配器均实现 `sendProactiveMessage` 主动推送能力，可用于定时任务到期提醒等场景。
 - **定时任务与提醒系统 (Scheduler System)**：内置 `scheduler_tool` 工具允许 Agent 创建/查询/更新/删除定时任务（reminder / scheduled / recurring / goal / plan 五种类型）、设置当前任务目标、维护多步骤执行计划。到期任务通过 `TaskScheduler` 周期检查（默认 30 秒）并经对应平台适配器主动推送提醒消息，无需用户发起会话。
 - **插件与技能系统 (Plugin & Skill)**：可扩展的插件注册与技能管理机制，支持事件过滤、自定义处理逻辑。
 - **React 管理后台 (Admin Dashboard)**：集成 React + Vite 管理面板，可视化管理提供商、插件、技能、角色、知识库、对话、记忆、配置、消息平台与会话白名单。支持调试 Chat 端点用于集成测试（调试对话不并入记忆，避免污染长期记忆与触发记忆整理）。
@@ -46,11 +46,11 @@ Yachiyo 是一个基于 TypeScript 实现的模块化 Agent 系统。采用 pnpm
 | QQ (第三方) | OneBot11 WebSocket | ✓ |
 | QQ (官方) | QQ Official Bot API | ✓ |
 | 微信 | WeChat OC | ✓² |
-| WebChat | HTTP + SSE | ✓³ |
 
 ¹ 主动推送用于定时任务到期提醒等场景，详见"定时任务系统"。
 ² 微信 OC 需用户先前发过消息以建立 context_token。
-³ WebChat 需客户端保持 SSE 长连接活跃。
+
+> **注意**：测试可以使用 Dashboard 的 `/api/debug/chat` 端点（通过 `debugChatEnabled` 配置项启用）。
 
 ---
 
@@ -72,7 +72,7 @@ yachiyo/
 │   ├── message/                  # @yachiyo/message — 消息模型与序列化
 │   ├── persona/                  # @yachiyo/persona — 角色/人格管理
 │   ├── pipeline/                 # @yachiyo/pipeline — 消息处理管线（调度器、8 个阶段）
-│   ├── platform/                 # @yachiyo/platform — 平台适配器（OneBot11、QQ Official、WebChat、WeChat）
+│   ├── platform/                 # @yachiyo/platform — 平台适配器（OneBot11、QQ Official、WeChat OC）
 │   ├── plugin/                   # @yachiyo/plugin — 插件系统
 │   ├── provider/                 # @yachiyo/provider — 模型提供商（实现、转换器、流解析器）
 │   ├── skill/                    # @yachiyo/skill — 技能管理
