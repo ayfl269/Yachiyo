@@ -439,6 +439,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
         toolManager,
         memoryStore: sqliteMemoryStore,
         memoryConsolidator,
+        schedulerStore: sqliteSchedulerTaskStore,
         shutdown: async () => {},
       } as any,
       {

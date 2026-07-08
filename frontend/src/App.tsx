@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Settings, HardDrive, Terminal, Sun, Moon,
   Users, FileCode, BookOpen, Sparkles, Menu, MessageSquare,
   Database, Puzzle, Brain, Lock, LogOut, UserCircle, KeyRound,
-  Eye, EyeOff
+  Eye, EyeOff, Clock
 } from 'lucide-react'
 import Dashboard from './components/Dashboard'
 import ConfigManager from './components/ConfigManager'
@@ -17,6 +17,7 @@ import MessagePlatformManager from './components/MessagePlatformManager'
 import ChatDataManager from './components/ChatDataManager'
 import PluginManager from './components/PluginManager'
 import MemoryManager from './components/MemoryManager'
+import SchedulerManager from './components/SchedulerManager'
 import AccountSettings from './components/AccountSettings'
 import { Modal } from './components/shared'
 import { ErrorBoundary } from './components/ErrorBoundary'
@@ -25,7 +26,7 @@ import { authStore, apiFetch } from './lib/api'
 type TabType =
   | 'dashboard' | 'configs' | 'providers' | 'mcp' | 'subagents'
   | 'skills' | 'kbs' | 'personas' | 'platforms' | 'chatdata'
-  | 'plugins' | 'memory'
+  | 'plugins' | 'memory' | 'scheduler'
 
 type AuthStatus = 'checking' | 'unauthenticated' | 'authenticated' | 'must_change_credentials'
 
@@ -40,6 +41,7 @@ const NAV_ITEMS: Array<{ key: TabType; label: string; icon: typeof LayoutDashboa
   { key: 'subagents', label: '子 Agent', icon: Users },
   { key: 'skills', label: 'Skills', icon: FileCode },
   { key: 'memory', label: '记忆', icon: Brain },
+  { key: 'scheduler', label: '定时任务', icon: Clock },
   { key: 'chatdata', label: '对话数据', icon: Database },
   { key: 'configs', label: '配置', icon: Settings },
 ]
@@ -389,6 +391,7 @@ function App() {
       case 'skills': return <SkillManager />
       case 'kbs': return <KnowledgeManager />
       case 'memory': return <MemoryManager />
+      case 'scheduler': return <SchedulerManager />
       case 'personas': return <PersonaManager />
       case 'plugins': return <PluginManager />
       default: return <Dashboard isLightMode={isLightMode} />

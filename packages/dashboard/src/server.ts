@@ -67,6 +67,7 @@ export interface BootstrapContext {
   dbManager: DatabaseManager;
   toolManager: FunctionToolManager;
   memoryConsolidator: MemoryConsolidator;
+  schedulerStore?: any;
   dashboardServer?: any;
   shutdown: () => Promise<void>;
 }
@@ -3199,6 +3200,255 @@ export class DashboardServer {
       }
       return;
     }
+
+    // ─── Scheduler Task API ──────────────────────────────────────────────
+    // S1. GET /api/scheduler/tasks — 列出定时任务（支持分页、类型/状态筛选、搜索）
+    if (pathname === "/api/scheduler/tasks" && req.method === "GET") {
+      try {
+        const store = (this.ctx as any).schedulerStore;
+        if (!store) {
+          res.writeHead(200);
+          res.end(JSON.stringify({ tasks: [], total: 0 }));
+          return;
+        }
+        const limit = parseInt(url.searchParams.get("limit") || "50");
+        const type = url.searchParams.get("type") || undefined;
+        const status = url.searchParams.get("status") || undefined;
+        const umo = url.searchParams.get("umo") || undefined;
+        const search = url.searchParams.get("search") || "";
+
+        const opts: any = {};
+        if (type) opts.type = type;
+        if (status) opts.status = status;
+        if (umo) opts.umo = umo;
+
+        let tasks: any[];
+        if (search) {
+          tasks = store.search(search, limit, opts);
+        } else {
+          tasks = store.list(limit, opts);
+        }
+        const total = store.count(opts);
+        res.writeHead(200);
+        res.end(JSON.stringify({ tasks, total }));
+      } catch (err: unknown) {
+        res.writeHead(200);
+        res.end(JSON.stringify({ tasks: [], total: 0, error: safeClientMessage(err) }));
+      }
+      return;
+    }
+
+    // S2. GET /api/scheduler/tasks/:id — 获取单个定时任务
+    if (pathname.startsWith("/api/scheduler/tasks/") && !pathname.includes("/fire") && req.method === "GET") {
+      try {
+        const store = (this.ctx as any).schedulerStore;
+        if (!store) {
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: "Scheduler store not initialized" }));
+          return;
+        }
+        const taskId = decodeURIComponent(pathname.slice("/api/scheduler/tasks/".length));
+        const task = store.get(taskId);
+        if (!task) {
+          res.writeHead(404);
+          res.end(JSON.stringify({ error: "Task not found" }));
+          return;
+        }
+        res.writeHead(200);
+        res.end(JSON.stringify({ task }));
+      } catch (err: unknown) {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: safeClientMessage(err) }));
+      }
+      return;
+    }
+
+    // S3. POST /api/scheduler/tasks — 创建定时任务
+    if (pathname === "/api/scheduler/tasks" && req.method === "POST") {
+      try {
+        const store = (this.ctx as any).schedulerStore;
+        if (!store) {
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: "Scheduler store not initialized" }));
+          return;
+        }
+        const parsed = await this.readJsonObject(req);
+        if (!parsed.ok) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: parsed.error }));
+          return;
+        }
+        const body = parsed.value as any;
+        if (!body.title) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: "Missing title" }));
+          return;
+        }
+        const now = new Date();
+        const { computeInitialNextFireAt } = await import("@yachiyo/agent/scheduler-task-store.js");
+        const nextFireAt = computeInitialNextFireAt(
+          body.scheduled_at ?? null,
+          body.recurrence ?? null,
+          now,
+        );
+        const taskId = body.id || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        const task = {
+          id: taskId,
+          type: body.type || "reminder",
+          title: body.title,
+          description: body.description || "",
+          status: body.status || "pending",
+          priority: body.priority ?? 0,
+          scheduledAt: body.scheduled_at ?? null,
+          recurrence: body.recurrence ?? null,
+          goal: body.goal ?? null,
+          plan: body.plan ?? [],
+          currentStep: body.plan && body.plan.length > 0 ? 0 : -1,
+          tags: body.tags ?? [],
+          umo: body.umo ?? null,
+          sessionId: body.session_id ?? null,
+          platformId: body.platform_id ?? null,
+          payload: body.payload ?? null,
+          lastFiredAt: null,
+          nextFireAt,
+        };
+        store.save(task);
+        res.writeHead(201);
+        res.end(JSON.stringify({ task }));
+      } catch (err: unknown) {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: safeClientMessage(err) }));
+      }
+      return;
+    }
+
+    // S4. PATCH /api/scheduler/tasks/:id — 更新定时任务
+    if (pathname.startsWith("/api/scheduler/tasks/") && req.method === "PATCH") {
+      try {
+        const store = (this.ctx as any).schedulerStore;
+        if (!store) {
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: "Scheduler store not initialized" }));
+          return;
+        }
+        const taskId = decodeURIComponent(pathname.slice("/api/scheduler/tasks/".length));
+        const existing = store.get(taskId);
+        if (!existing) {
+          res.writeHead(404);
+          res.end(JSON.stringify({ error: "Task not found" }));
+          return;
+        }
+        const parsed = await this.readJsonObject(req);
+        if (!parsed.ok) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: parsed.error }));
+          return;
+        }
+        const body = parsed.value as any;
+        const updated = {
+          ...existing,
+          ...(body.title !== undefined && { title: body.title }),
+          ...(body.description !== undefined && { description: body.description }),
+          ...(body.status !== undefined && { status: body.status }),
+          ...(body.priority !== undefined && { priority: body.priority }),
+          ...(body.scheduled_at !== undefined && { scheduledAt: body.scheduled_at }),
+          ...(body.recurrence !== undefined && { recurrence: body.recurrence }),
+          ...(body.goal !== undefined && { goal: body.goal }),
+          ...(body.payload !== undefined && { payload: body.payload }),
+          ...(body.tags !== undefined && { tags: body.tags }),
+        };
+        store.save(updated);
+        res.writeHead(200);
+        res.end(JSON.stringify({ task: updated }));
+      } catch (err: unknown) {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: safeClientMessage(err) }));
+      }
+      return;
+    }
+
+    // S5. DELETE /api/scheduler/tasks/:id — 删除定时任务
+    if (pathname.startsWith("/api/scheduler/tasks/") && req.method === "DELETE") {
+      try {
+        const store = (this.ctx as any).schedulerStore;
+        if (!store) {
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: "Scheduler store not initialized" }));
+          return;
+        }
+        const taskId = decodeURIComponent(pathname.slice("/api/scheduler/tasks/".length));
+        const deleted = store.delete(taskId);
+        if (!deleted) {
+          res.writeHead(404);
+          res.end(JSON.stringify({ error: "Task not found" }));
+          return;
+        }
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: true }));
+      } catch (err: unknown) {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: safeClientMessage(err) }));
+      }
+      return;
+    }
+
+    // S6. GET /api/scheduler/stats — 定时任务统计
+    if (pathname === "/api/scheduler/stats" && req.method === "GET") {
+      try {
+        const store = (this.ctx as any).schedulerStore;
+        if (!store) {
+          res.writeHead(200);
+          res.end(JSON.stringify({ stats: { total: 0, byType: {}, byStatus: {} } }));
+          return;
+        }
+        const stats = store.stats();
+        res.writeHead(200);
+        res.end(JSON.stringify({ stats }));
+      } catch (err: unknown) {
+        res.writeHead(200);
+        res.end(JSON.stringify({ stats: { total: 0, byType: {}, byStatus: {} }, error: safeClientMessage(err) }));
+      }
+      return;
+    }
+
+    // S7. POST /api/scheduler/tasks/:id/fire — 立即触发任务
+    if (pathname.includes("/fire") && pathname.startsWith("/api/scheduler/tasks/") && req.method === "POST") {
+      try {
+        const store = (this.ctx as any).schedulerStore;
+        if (!store) {
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: "Scheduler store not initialized" }));
+          return;
+        }
+        const taskId = decodeURIComponent(pathname.slice("/api/scheduler/tasks/".length, pathname.lastIndexOf("/fire")));
+        const task = store.get(taskId);
+        if (!task) {
+          res.writeHead(404);
+          res.end(JSON.stringify({ error: "Task not found" }));
+          return;
+        }
+        const now = new Date();
+        const { computeInitialNextFireAt } = await import("@yachiyo/agent/scheduler-task-store.js");
+        const nextFireAt = task.recurrence
+          ? computeInitialNextFireAt(task.scheduledAt, task.recurrence, now)
+          : null;
+        const updated = {
+          ...task,
+          lastFiredAt: now.toISOString(),
+          nextFireAt,
+          status: task.recurrence ? task.status : "completed",
+        };
+        store.save(updated);
+        res.writeHead(200);
+        res.end(JSON.stringify({ task: updated }));
+      } catch (err: unknown) {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: safeClientMessage(err) }));
+      }
+      return;
+    }
+
+    // ─── End Scheduler Task API ──────────────────────────────────────────
 
     // ---- Debug Webhook: POST /api/debug/chat ----
     // Disabled by default: this endpoint runs the FULL agent pipeline (all
