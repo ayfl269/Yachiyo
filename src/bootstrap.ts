@@ -32,6 +32,9 @@ import { FunctionToolManager } from "@yachiyo/agent/func-tool-manager.js";
 import { SkillManager } from "@yachiyo/skill/index.js";
 import {
   getWebTools,
+  closeSharedBrowser,
+  closeWebSearchProviders,
+  closeAllBrowserPages,
 } from "@yachiyo/agent/web-tools.js";
 import {
   getRuntimeComputerTools,
@@ -488,6 +491,10 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
       await conversationManager.close();
       await knowledgeBaseManager.terminate();
       await providerManager.terminate();
+      // 关闭无头浏览器及所有打开的页面，防止 Chromium 进程泄漏
+      try { await closeAllBrowserPages(); } catch { /* ignore */ }
+      try { await closeWebSearchProviders(); } catch { /* ignore */ }
+      try { await closeSharedBrowser(); } catch { /* ignore */ }
       dbManager.close();
     },
   };

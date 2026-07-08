@@ -11,6 +11,9 @@ out/
 tsconfig.tsbuildinfo
 *.tsbuildinfo
 
+# Playwright browser binaries (installed locally via `npx playwright install`)
+.ms-playwright/
+
 # SQLite databases and temp files
 data/
 

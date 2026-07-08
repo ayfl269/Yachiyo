@@ -6,6 +6,7 @@ import { createFunctionTool, type FunctionTool } from "./tool.js";
 import type { CallToolResult, ImageContent } from "./types.js";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import TurndownService from "turndown";
+import { randomUUID } from "crypto";
 import { safeFetch, assertSafeUrl } from "@yachiyo/common/ssrf-guard.js";
 import { isDomainAllowed, type SandboxPolicy } from "./sandbox.js";
 
@@ -864,6 +865,623 @@ export function createHttpRequestTool(): FunctionTool<WebToolContext> {
   });
 }
 
+// ── Browser Automation Tools ──
+//
+// A stateful set of tools that share a Chromium instance and track open
+// pages in a registry. Unlike web_fetch_tool (one-shot fetch + screenshot),
+// these tools let the agent navigate, interact, and inspect pages across
+// multiple turns: click buttons, fill forms, take screenshots, extract
+// text, run scripts, etc.
+//
+// Page lifecycle:
+//   browser_navigate → returns pageId
+//   browser_click / browser_type / browser_screenshot / … use pageId
+//   browser_close_page → closes the page and removes it from the registry
+
+/** Registry of open browser pages, keyed by a short id. */
+interface PageEntry {
+  page: Page;
+  context: BrowserContext;
+  /** ISO timestamp when the page was opened. */
+  openedAt: string;
+  /** Last navigated URL (for list_pages display). */
+  url: string;
+  /** Optional human-friendly title. */
+  title: string;
+}
+
+const pageRegistry = new Map<string, PageEntry>();
+
+/** Maximum concurrent pages to prevent unbounded memory growth. */
+const MAX_BROWSER_PAGES = 10;
+
+/**
+ * Generate a short, unique page id. Uses crypto.randomUUID() truncated to
+ * 8 chars for readability while keeping a vanishingly small collision risk
+ * across the small (≤10) set of live pages.
+ */
+function generatePageId(): string {
+  return randomUUID().slice(0, 8);
+}
+
+/**
+ * Get the sandbox policy from the tool context, if present.
+ * Used to enforce domain restrictions on navigation URLs.
+ */
+function getSandboxPolicy(_ctx: unknown): SandboxPolicy | undefined {
+  const webCtx = (_ctx as { context?: WebToolContext } | undefined)?.context;
+  return webCtx?.sandboxPolicy;
+}
+
+/**
+ * Resolve a page from the registry. Returns null if not found, and includes
+ * the page id in the error message when missing so the agent can recover.
+ */
+function getPage(pageId: string): PageEntry | null {
+  return pageRegistry.get(pageId) ?? null;
+}
+
+// ── Browser Navigate Tool ──
+
+export function createBrowserNavigateTool(): FunctionTool<WebToolContext> {
+  return createFunctionTool<WebToolContext>({
+    name: "browser_navigate",
+    description: "Open a URL in a new headless browser tab and return a page_id for further interaction (click, type, screenshot, etc.). Each call opens a fresh page.",
+    parameters: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "The URL to navigate to." },
+        wait_until: { type: "string", description: "When to consider navigation done. 'load' waits for the load event, 'domcontentloaded' for DOM ready, 'networkidle' for no network activity. Default: load.", enum: ["load", "domcontentloaded", "networkidle"], default: "load" },
+        timeout: { type: "integer", description: "Navigation timeout in seconds. Default: 30.", minimum: 1, default: 30 },
+      },
+      required: ["url"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const url = String(args[0] ?? "");
+      const waitUntil = (args[1] as "load" | "domcontentloaded" | "networkidle") ?? "load";
+      const timeout = args[2] != null ? Number(args[2]) : 30;
+      const policy = getSandboxPolicy(_ctx);
+
+      if (policy && !isDomainAllowed(url, policy)) {
+        return { content: [{ type: "text", text: `error: Domain not allowed by sandbox policy for URL: ${url}` }], isError: true };
+      }
+
+      // Enforce a maximum number of concurrent pages to prevent resource
+      // exhaustion. Clean up closed pages first before refusing.
+      if (pageRegistry.size >= MAX_BROWSER_PAGES) {
+        for (const [id, entry] of pageRegistry) {
+          if (entry.page.isClosed()) {
+            try { await entry.context.close(); } catch { /* ignore */ }
+            pageRegistry.delete(id);
+          }
+        }
+        if (pageRegistry.size >= MAX_BROWSER_PAGES) {
+          return {
+            content: [{ type: "text", text: `error: Maximum number of open pages (${MAX_BROWSER_PAGES}) reached. Use browser_close_page to close unused pages, or browser_list_pages to inspect.` }],
+            isError: true,
+          };
+        }
+      }
+
+      try {
+        await assertSafeUrl(url);
+        const browser = await getSharedBrowser();
+        const context = await browser.newContext({
+          userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+          viewport: { width: 1280, height: 720 },
+          locale: "en-US",
+        });
+        const page = await context.newPage();
+        await page.goto(url, { waitUntil, timeout: timeout * 1000 });
+
+        const pageId = generatePageId();
+        const title = await page.title().catch(() => "");
+        pageRegistry.set(pageId, {
+          page,
+          context,
+          openedAt: new Date().toISOString(),
+          url,
+          title,
+        });
+
+        // Auto-remove from registry when the page is closed externally.
+        page.on("close", () => {
+          pageRegistry.delete(pageId);
+          // Context is closed with the page; no separate cleanup needed.
+          try { context.close(); } catch { /* ignore */ }
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: `Navigated to ${url}\npage_id: ${pageId}\ntitle: ${title}\nUse this page_id with browser_click / browser_type / browser_screenshot / etc.`,
+          }],
+        };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return { content: [{ type: "text", text: `error: Navigation failed: ${msg}` }], isError: true };
+      }
+    },
+  });
+}
+
+// ── Browser Click Tool ──
+
+export function createBrowserClickTool(): FunctionTool<WebToolContext> {
+  return createFunctionTool<WebToolContext>({
+    name: "browser_click",
+    description: "Click an element on a browser page identified by a CSS selector. If multiple elements match, clicks the first one.",
+    parameters: {
+      type: "object",
+      properties: {
+        page_id: { type: "string", description: "The page_id returned by browser_navigate." },
+        selector: { type: "string", description: "CSS selector of the element to click (e.g. 'button#submit', 'a[href=\"/about\"]', 'input[name=\"q\"]')." },
+        timeout: { type: "integer", description: "Time to wait for the element to appear, in seconds. Default: 10.", minimum: 1, default: 10 },
+      },
+      required: ["page_id", "selector"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const pageId = String(args[0] ?? "");
+      const selector = String(args[1] ?? "");
+      const timeout = args[2] != null ? Number(args[2]) : 10;
+      const entry = getPage(pageId);
+      if (!entry) {
+        return { content: [{ type: "text", text: `error: Page not found: ${pageId}. Use browser_list_pages to see open pages, or browser_navigate to open a new one.` }], isError: true };
+      }
+      if (entry.page.isClosed()) {
+        pageRegistry.delete(pageId);
+        return { content: [{ type: "text", text: `error: Page ${pageId} has been closed.` }], isError: true };
+      }
+      try {
+        await entry.page.locator(selector).first().click({ timeout: timeout * 1000 });
+        return { content: [{ type: "text", text: `Clicked element: ${selector}` }] };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return { content: [{ type: "text", text: `error: Click failed for selector '${selector}': ${msg}` }], isError: true };
+      }
+    },
+  });
+}
+
+// ── Browser Type Tool ──
+
+export function createBrowserTypeTool(): FunctionTool<WebToolContext> {
+  return createFunctionTool<WebToolContext>({
+    name: "browser_type",
+    description: "Type text into an input element on a browser page. Clears the field first by default. Useful for filling forms and search boxes.",
+    parameters: {
+      type: "object",
+      properties: {
+        page_id: { type: "string", description: "The page_id returned by browser_navigate." },
+        selector: { type: "string", description: "CSS selector of the input element." },
+        text: { type: "string", description: "The text to type into the field." },
+        clear: { type: "boolean", description: "Clear the field before typing. Default: true.", default: true },
+        delay: { type: "integer", description: "Delay between keystrokes in milliseconds. Default: 0.", minimum: 0, default: 0 },
+        press_enter: { type: "boolean", description: "Press Enter after typing. Default: false.", default: false },
+      },
+      required: ["page_id", "selector", "text"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const pageId = String(args[0] ?? "");
+      const selector = String(args[1] ?? "");
+      const text = String(args[2] ?? "");
+      const clear = args[3] !== false;
+      const delay = args[4] != null ? Number(args[4]) : 0;
+      const pressEnter = args[5] === true;
+      const entry = getPage(pageId);
+      if (!entry) {
+        return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
+      }
+      if (entry.page.isClosed()) {
+        pageRegistry.delete(pageId);
+        return { content: [{ type: "text", text: `error: Page ${pageId} has been closed.` }], isError: true };
+      }
+      try {
+        const locator = entry.page.locator(selector).first();
+        if (clear) {
+          await locator.fill("");
+        }
+        await locator.type(text, { delay });
+        if (pressEnter) {
+          await locator.press("Enter");
+        }
+        return { content: [{ type: "text", text: `Typed "${text}" into ${selector}${pressEnter ? " and pressed Enter" : ""}` }] };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return { content: [{ type: "text", text: `error: Type failed for selector '${selector}': ${msg}` }], isError: true };
+      }
+    },
+  });
+}
+
+// ── Browser Screenshot Tool ──
+
+export function createBrowserScreenshotTool(): FunctionTool<WebToolContext> {
+  return createFunctionTool<WebToolContext>({
+    name: "browser_screenshot",
+    description: "Capture a screenshot of a browser page or a specific element. Returns a PNG image as base64. Useful for visual inspection.",
+    parameters: {
+      type: "object",
+      properties: {
+        page_id: { type: "string", description: "The page_id returned by browser_navigate." },
+        full_page: { type: "boolean", description: "Capture the full scrollable page. Default: false (viewport only).", default: false },
+        selector: { type: "string", description: "Optional CSS selector. If provided, captures only that element." },
+      },
+      required: ["page_id"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const pageId = String(args[0] ?? "");
+      const fullPage = args[1] === true;
+      const selector = args[2] != null ? String(args[2]) : undefined;
+      const entry = getPage(pageId);
+      if (!entry) {
+        return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
+      }
+      if (entry.page.isClosed()) {
+        pageRegistry.delete(pageId);
+        return { content: [{ type: "text", text: `error: Page ${pageId} has been closed.` }], isError: true };
+      }
+      try {
+        let buffer: Buffer;
+        if (selector) {
+          buffer = await entry.page.locator(selector).first().screenshot({ type: "png" });
+        } else {
+          buffer = await entry.page.screenshot({ fullPage, type: "png" });
+        }
+        return {
+          content: [
+            { type: "text", text: `Screenshot captured (${buffer.length} bytes, ${fullPage ? "full page" : "viewport"}${selector ? ` of ${selector}` : ""}).` },
+            { type: "image", data: buffer.toString("base64"), mimeType: "image/png" } as ImageContent,
+          ],
+        };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return { content: [{ type: "text", text: `error: Screenshot failed: ${msg}` }], isError: true };
+      }
+    },
+  });
+}
+
+// ── Browser Snapshot Tool ──
+
+export function createBrowserSnapshotTool(): FunctionTool<WebToolContext> {
+  return createFunctionTool<WebToolContext>({
+    name: "browser_snapshot",
+    description: "Get a text snapshot of a browser page's structure. Returns the accessibility tree or the visible text content of the page body. Useful for understanding page layout without a screenshot.",
+    parameters: {
+      type: "object",
+      properties: {
+        page_id: { type: "string", description: "The page_id returned by browser_navigate." },
+        format: { type: "string", description: "Snapshot format. 'text' returns visible body text, 'html' returns cleaned outer HTML of the body, 'accessibility' returns the accessibility tree. Default: text.", enum: ["text", "html", "accessibility"], default: "text" },
+        max_length: { type: "integer", description: "Maximum length of the returned text in characters. Default: 20000.", minimum: 100, default: 20000 },
+      },
+      required: ["page_id"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const pageId = String(args[0] ?? "");
+      const format = (args[1] as "text" | "html" | "accessibility") ?? "text";
+      const maxLength = args[2] != null ? Number(args[2]) : 20000;
+      const entry = getPage(pageId);
+      if (!entry) {
+        return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
+      }
+      if (entry.page.isClosed()) {
+        pageRegistry.delete(pageId);
+        return { content: [{ type: "text", text: `error: Page ${pageId} has been closed.` }], isError: true };
+      }
+      try {
+        let result = "";
+        if (format === "accessibility") {
+          // page.accessibility was removed from Playwright's public types in
+          // newer versions; access it via a dynamic property lookup so we keep
+          // working across versions without importing private types.
+          const accessibility = (entry.page as unknown as { accessibility?: { snapshot: () => Promise<unknown> } }).accessibility;
+          if (accessibility) {
+            const snapshot = await accessibility.snapshot();
+            result = JSON.stringify(snapshot, null, 2);
+          } else {
+            // Fallback: extract a semantic outline via the DOM.
+            result = await entry.page.evaluate("(() => { const els = document.querySelectorAll('h1,h2,h3,h4,a,button,input,nav,main,article,section'); const out = []; els.forEach((el) => { const tag = el.tagName.toLowerCase(); const text = (el.textContent || '').trim().slice(0, 80); const role = el.getAttribute('role') || ''; const href = el.getAttribute('href') || ''; out.push(`<${tag}${role ? ' role=' + role : ''}${href ? ' href=' + href : ''}> ${text}`); }); return out.join('\\n'); })()");
+          }
+        } else if (format === "html") {
+          const html = (await entry.page.evaluate("document.body ? document.body.outerHTML : ''")) as string;
+          result = htmlToMarkdown(html);
+        } else {
+          result = (await entry.page.evaluate("document.body ? document.body.innerText : ''")) as string;
+        }
+        if (result.length > maxLength) {
+          result = result.slice(0, maxLength) + `\n\n... (truncated, total ${result.length} characters)`;
+        }
+        return { content: [{ type: "text", text: result || "(empty page)" }] };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return { content: [{ type: "text", text: `error: Snapshot failed: ${msg}` }], isError: true };
+      }
+    },
+  });
+}
+
+// ── Browser Get Text Tool ──
+
+export function createBrowserGetTextTool(): FunctionTool<WebToolContext> {
+  return createFunctionTool<WebToolContext>({
+    name: "browser_get_text",
+    description: "Extract text content from elements matching a CSS selector on a browser page. Returns one text entry per matching element.",
+    parameters: {
+      type: "object",
+      properties: {
+        page_id: { type: "string", description: "The page_id returned by browser_navigate." },
+        selector: { type: "string", description: "CSS selector to match elements (e.g. 'h1', '.title', 'article p')." },
+        attribute: { type: "string", description: "If provided, return this attribute value instead of text content (e.g. 'href', 'src')." },
+        max_results: { type: "integer", description: "Maximum number of elements to return. Default: 50.", minimum: 1, default: 50 },
+      },
+      required: ["page_id", "selector"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const pageId = String(args[0] ?? "");
+      const selector = String(args[1] ?? "");
+      const attribute = args[2] != null ? String(args[2]) : undefined;
+      const maxResults = args[3] != null ? Number(args[3]) : 50;
+      const entry = getPage(pageId);
+      if (!entry) {
+        return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
+      }
+      if (entry.page.isClosed()) {
+        pageRegistry.delete(pageId);
+        return { content: [{ type: "text", text: `error: Page ${pageId} has been closed.` }], isError: true };
+      }
+      try {
+        const elements = await entry.page.locator(selector).all();
+        const items: string[] = [];
+        for (const el of elements) {
+          if (items.length >= maxResults) break;
+          if (attribute) {
+            const val = await el.getAttribute(attribute);
+            if (val != null) items.push(val);
+          } else {
+            const text = await el.textContent();
+            const trimmed = text?.trim();
+            if (trimmed) items.push(trimmed);
+          }
+        }
+        if (items.length === 0) {
+          return { content: [{ type: "text", text: `No matching elements found for selector '${selector}'.` }] };
+        }
+        const formatted = items.map((t, i) => `${i + 1}. ${t}`).join("\n");
+        return { content: [{ type: "text", text: `${items.length} match(es) for '${selector}':\n\n${formatted}` }] };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return { content: [{ type: "text", text: `error: Get text failed: ${msg}` }], isError: true };
+      }
+    },
+  });
+}
+
+// ── Browser Execute Script Tool ──
+
+export function createBrowserExecuteScriptTool(): FunctionTool<WebToolContext> {
+  return createFunctionTool<WebToolContext>({
+    name: "browser_execute_script",
+    description: "Execute JavaScript code in the context of a browser page and return the result. The script runs in the page (has access to document/window). Must return a JSON-serializable value.",
+    parameters: {
+      type: "object",
+      properties: {
+        page_id: { type: "string", description: "The page_id returned by browser_navigate." },
+        script: { type: "string", description: "JavaScript code to execute. The code is wrapped and its return value (if any) is serialized. Use 'return' to return a value, e.g. 'return document.title;'." },
+      },
+      required: ["page_id", "script"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const pageId = String(args[0] ?? "");
+      const script = String(args[1] ?? "");
+      const entry = getPage(pageId);
+      if (!entry) {
+        return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
+      }
+      if (entry.page.isClosed()) {
+        pageRegistry.delete(pageId);
+        return { content: [{ type: "text", text: `error: Page ${pageId} has been closed.` }], isError: true };
+      }
+      try {
+        // Wrap the script so that bare 'return' statements work as expected.
+        // Playwright's page.evaluate treats the function body as the script.
+        const wrapped = `(async () => { ${script} })()`;
+        const result = await entry.page.evaluate(wrapped);
+        const text = result === undefined ? "(undefined)" : typeof result === "string" ? result : JSON.stringify(result, null, 2);
+        return { content: [{ type: "text", text }] };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return { content: [{ type: "text", text: `error: Script execution failed: ${msg}` }], isError: true };
+      }
+    },
+  });
+}
+
+// ── Browser Press Key Tool ──
+
+export function createBrowserPressKeyTool(): FunctionTool<WebToolContext> {
+  return createFunctionTool<WebToolContext>({
+    name: "browser_press_key",
+    description: "Press a keyboard key on a browser page. Useful for submitting forms, dismissing dialogs, scrolling, etc.",
+    parameters: {
+      type: "object",
+      properties: {
+        page_id: { type: "string", description: "The page_id returned by browser_navigate." },
+        key: { type: "string", description: "Key to press (e.g. 'Enter', 'Tab', 'Escape', 'ArrowDown', 'Control+a'). See Playwright key names." },
+      },
+      required: ["page_id", "key"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const pageId = String(args[0] ?? "");
+      const key = String(args[1] ?? "");
+      const entry = getPage(pageId);
+      if (!entry) {
+        return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
+      }
+      if (entry.page.isClosed()) {
+        pageRegistry.delete(pageId);
+        return { content: [{ type: "text", text: `error: Page ${pageId} has been closed.` }], isError: true };
+      }
+      try {
+        await entry.page.keyboard.press(key);
+        return { content: [{ type: "text", text: `Pressed key: ${key}` }] };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return { content: [{ type: "text", text: `error: Key press failed: ${msg}` }], isError: true };
+      }
+    },
+  });
+}
+
+// ── Browser Wait For Tool ──
+
+export function createBrowserWaitForTool(): FunctionTool<WebToolContext> {
+  return createFunctionTool<WebToolContext>({
+    name: "browser_wait_for",
+    description: "Wait for an element to appear on a browser page, or for a fixed duration. Useful for pages with dynamic content that loads after navigation.",
+    parameters: {
+      type: "object",
+      properties: {
+        page_id: { type: "string", description: "The page_id returned by browser_navigate." },
+        selector: { type: "string", description: "CSS selector to wait for. If omitted, waits for a fixed duration instead." },
+        timeout: { type: "integer", description: "Maximum wait time in seconds. Default: 10.", minimum: 1, default: 10 },
+        state: { type: "string", description: "Wait for the element to reach this state. 'attached' = present in DOM, 'visible' = rendered, 'hidden' = not visible. Default: visible.", enum: ["attached", "visible", "hidden"], default: "visible" },
+      },
+      required: ["page_id"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const pageId = String(args[0] ?? "");
+      const selector = args[1] != null ? String(args[1]) : undefined;
+      const timeout = args[2] != null ? Number(args[2]) : 10;
+      const state = (args[3] as "attached" | "visible" | "hidden") ?? "visible";
+      const entry = getPage(pageId);
+      if (!entry) {
+        return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
+      }
+      if (entry.page.isClosed()) {
+        pageRegistry.delete(pageId);
+        return { content: [{ type: "text", text: `error: Page ${pageId} has been closed.` }], isError: true };
+      }
+      try {
+        if (selector) {
+          await entry.page.locator(selector).first().waitFor({ state, timeout: timeout * 1000 });
+          return { content: [{ type: "text", text: `Element '${selector}' reached state '${state}'.` }] };
+        } else {
+          await entry.page.waitForTimeout(timeout * 1000);
+          return { content: [{ type: "text", text: `Waited ${timeout} seconds.` }] };
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return { content: [{ type: "text", text: `error: Wait failed: ${msg}` }], isError: true };
+      }
+    },
+  });
+}
+
+// ── Browser List Pages Tool ──
+
+export function createBrowserListPagesTool(): FunctionTool<WebToolContext> {
+  return createFunctionTool<WebToolContext>({
+    name: "browser_list_pages",
+    description: "List all currently open browser pages with their page_id, URL, title, and open time. Useful for tracking which pages are available for interaction.",
+    parameters: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+    active: true,
+    handler: async (): Promise<CallToolResult> => {
+      if (pageRegistry.size === 0) {
+        return { content: [{ type: "text", text: "No open browser pages. Use browser_navigate to open one." }] };
+      }
+      // Clean up closed pages before listing.
+      const closed: string[] = [];
+      for (const [id, entry] of pageRegistry) {
+        if (entry.page.isClosed()) {
+          try { await entry.context.close(); } catch { /* ignore */ }
+          closed.push(id);
+        }
+      }
+      for (const id of closed) pageRegistry.delete(id);
+
+      if (pageRegistry.size === 0) {
+        return { content: [{ type: "text", text: "No open browser pages (all were closed). Use browser_navigate to open one." }] };
+      }
+
+      const lines: string[] = [`Open browser pages (${pageRegistry.size}/${MAX_BROWSER_PAGES}):`];
+      for (const [id, entry] of pageRegistry) {
+        const title = entry.title || "(untitled)";
+        const url = entry.url || "(no url)";
+        lines.push(`- page_id: ${id} | ${title} | ${url} | opened: ${entry.openedAt}`);
+      }
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    },
+  });
+}
+
+// ── Browser Close Page Tool ──
+
+export function createBrowserClosePageTool(): FunctionTool<WebToolContext> {
+  return createFunctionTool<WebToolContext>({
+    name: "browser_close_page",
+    description: "Close a browser page and free its resources. The page_id becomes invalid after this call.",
+    parameters: {
+      type: "object",
+      properties: {
+        page_id: { type: "string", description: "The page_id returned by browser_navigate. If omitted, closes all open pages." },
+      },
+      required: [],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const pageId = args[0] != null ? String(args[0]) : undefined;
+
+      if (!pageId) {
+        // Close all pages.
+        const count = pageRegistry.size;
+        if (count === 0) {
+          return { content: [{ type: "text", text: "No open browser pages to close." }] };
+        }
+        for (const [id, entry] of pageRegistry) {
+          try { await entry.context.close(); } catch { /* ignore */ }
+          pageRegistry.delete(id);
+        }
+        return { content: [{ type: "text", text: `Closed all ${count} browser page(s).` }] };
+      }
+
+      const entry = getPage(pageId);
+      if (!entry) {
+        return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
+      }
+      try {
+        await entry.context.close();
+      } catch { /* ignore */ }
+      pageRegistry.delete(pageId);
+      return { content: [{ type: "text", text: `Closed page ${pageId}.` }] };
+    },
+  });
+}
+
+/**
+ * Close all open browser pages and clear the registry. Call during shutdown
+ * to prevent Chromium process/context leaks.
+ */
+export async function closeAllBrowserPages(): Promise<void> {
+  for (const [id, entry] of pageRegistry) {
+    try { await entry.context.close(); } catch { /* ignore */ }
+    pageRegistry.delete(id);
+  }
+}
+
 // ── Tool assembly ──
 
 /**
@@ -874,5 +1492,37 @@ export function getWebTools(engine: SearchEngine = "bing", customSearchProvider?
     createWebFetchTool(),
     createWebSearchTool(customSearchProvider, engine),
     createHttpRequestTool(),
+    // Browser automation tools (full headless browser control)
+    createBrowserNavigateTool(),
+    createBrowserClickTool(),
+    createBrowserTypeTool(),
+    createBrowserScreenshotTool(),
+    createBrowserSnapshotTool(),
+    createBrowserGetTextTool(),
+    createBrowserExecuteScriptTool(),
+    createBrowserPressKeyTool(),
+    createBrowserWaitForTool(),
+    createBrowserListPagesTool(),
+    createBrowserClosePageTool(),
+  ];
+}
+
+/**
+ * Get only the browser automation tools. Useful when you want to add
+ * interactive browser control to a tool set without the fetch/search/http tools.
+ */
+export function getBrowserAutomationTools(): FunctionTool<WebToolContext>[] {
+  return [
+    createBrowserNavigateTool(),
+    createBrowserClickTool(),
+    createBrowserTypeTool(),
+    createBrowserScreenshotTool(),
+    createBrowserSnapshotTool(),
+    createBrowserGetTextTool(),
+    createBrowserExecuteScriptTool(),
+    createBrowserPressKeyTool(),
+    createBrowserWaitForTool(),
+    createBrowserListPagesTool(),
+    createBrowserClosePageTool(),
   ];
 }

@@ -172,6 +172,22 @@ export {
   createHttpRequestTool,
   getWebTools,
   getSearchProvider,
+  closeSharedBrowser,
+  closeWebSearchProviders,
+  // Browser automation tools
+  createBrowserNavigateTool,
+  createBrowserClickTool,
+  createBrowserTypeTool,
+  createBrowserScreenshotTool,
+  createBrowserSnapshotTool,
+  createBrowserGetTextTool,
+  createBrowserExecuteScriptTool,
+  createBrowserPressKeyTool,
+  createBrowserWaitForTool,
+  createBrowserListPagesTool,
+  createBrowserClosePageTool,
+  getBrowserAutomationTools,
+  closeAllBrowserPages,
 } from "./web-tools.js";
 export type { WebToolContext, WebSearchProvider, SearchEngine } from "./web-tools.js";
 
