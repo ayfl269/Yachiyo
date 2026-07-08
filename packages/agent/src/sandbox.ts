@@ -49,7 +49,17 @@ export interface SandboxPolicy {
  * Restrictive by default.
  */
 export const DEFAULT_DYNAMIC_SUBAGENT_POLICY: SandboxPolicy = {
-  deniedTools: ["execute_shell", "execute_python", "execute_node", "file_delete_tool"],
+  deniedTools: [
+    "execute_shell",
+    "execute_python",
+    "execute_node",
+    "file_delete_tool",
+    "interactive_shell_start",
+    "interactive_shell_send",
+    "interactive_shell_read",
+    "interactive_shell_list",
+    "interactive_shell_close",
+  ],
   allowShell: false,
   allowCodeExecution: false,
   allowFileDeletion: false,
@@ -78,6 +88,11 @@ export function applySandboxPolicyToToolSet(
   // Add implicit denials based on policy flags
   if (!policy.allowShell) {
     denied.add("execute_shell");
+    denied.add("interactive_shell_start");
+    denied.add("interactive_shell_send");
+    denied.add("interactive_shell_read");
+    denied.add("interactive_shell_list");
+    denied.add("interactive_shell_close");
   }
   if (!policy.allowCodeExecution) {
     denied.add("execute_python");

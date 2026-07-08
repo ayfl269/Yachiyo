@@ -165,6 +165,23 @@ export {
 } from "./computer-tools.js";
 export type { ComputerToolContext, ComputerRuntime } from "./computer-tools.js";
 
+// Interactive shell tools
+export {
+  createInteractiveShellStartTool,
+  createInteractiveShellSendTool,
+  createInteractiveShellReadTool,
+  createInteractiveShellListTool,
+  createInteractiveShellCloseTool,
+  getInteractiveShellTools,
+  interactiveShellStart,
+  interactiveShellSend,
+  interactiveShellRead,
+  interactiveShellClose,
+  listInteractiveSessions,
+  cleanupDeadSessions,
+  closeAllInteractiveSessions,
+} from "./interactive-shell-tool.js";
+
 // Web tools
 export {
   createWebFetchTool,

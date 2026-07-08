@@ -39,6 +39,7 @@ import {
 import {
   getRuntimeComputerTools,
 } from "@yachiyo/agent/computer-tools.js";
+import { getInteractiveShellTools } from "@yachiyo/agent/interactive-shell-tool.js";
 import { createMemoryTool } from "@yachiyo/agent/memory-tool.js";
 import { MemoryConsolidator } from "@yachiyo/agent/memory-consolidator.js";
 import { createCodeSearchTool } from "@yachiyo/agent/code-search-tool.js";
@@ -256,6 +257,11 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
 
   // 注册计算机工具 (file_read/write/edit, list_dir, delete, move, grep, shell, python, node)
   for (const tool of getRuntimeComputerTools("local", workspaceRoot)) {
+    toolManager.funcList.push(tool);
+  }
+
+  // 注册交互式终端工具 (interactive_shell_start/send/read/list/close)
+  for (const tool of getInteractiveShellTools(workspaceRoot)) {
     toolManager.funcList.push(tool);
   }
 
