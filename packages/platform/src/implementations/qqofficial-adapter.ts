@@ -44,6 +44,7 @@ const OP = {
   IDENTIFY: 2,
   RESUME: 6,
   RECONNECT: 7,
+  INVALID_SESSION: 9,
   HELLO: 10,
   HEARTBEAT_ACK: 11,
 } as const;
@@ -51,6 +52,7 @@ const OP = {
 /** Dispatch event types */
 const DISPATCH_TYPE = {
   READY: "READY",
+  RESUMED: "RESUMED",
   GROUP_AT_MESSAGE_CREATE: "GROUP_AT_MESSAGE_CREATE",
   C2C_MESSAGE_CREATE: "C2C_MESSAGE_CREATE",
   AT_MESSAGE_CREATE: "AT_MESSAGE_CREATE",
@@ -383,6 +385,9 @@ export class QQOfficialAdapter extends PlatformAdapter {
 
     console.info(`[QQOfficial] Authenticated successfully, token expires in ${data.expires_in}s`);
 
+    if (this.tokenRefreshTimer) {
+      clearTimeout(this.tokenRefreshTimer);
+    }
     this.tokenRefreshTimer = setTimeout(() => {
       this.refreshToken().catch((e: unknown) => {
         console.error("[QQOfficial] Token refresh failed:", e);
@@ -436,7 +441,6 @@ export class QQOfficialAdapter extends PlatformAdapter {
 
     this.ws.on("open", () => {
       console.info("[QQOfficial] WebSocket connected");
-      this.reconnectAttempts = 0;
     });
 
     this.ws.on("message", (raw: Buffer) => {
@@ -466,8 +470,12 @@ export class QQOfficialAdapter extends PlatformAdapter {
       case OP.HELLO: {
         const hello = data.d as HelloData;
         this.startHeartbeat(hello.heartbeat_interval);
-        // After hello, send identify
-        this.sendIdentify();
+        // After hello, send identify or resume
+        if (this.sessionId && this.lastSeq !== null) {
+          this.sendResume();
+        } else {
+          this.sendIdentify();
+        }
         break;
       }
 
@@ -478,6 +486,15 @@ export class QQOfficialAdapter extends PlatformAdapter {
 
       case OP.RECONNECT: {
         console.info("[QQOfficial] Server requested reconnect");
+        this.cleanupWs();
+        this.scheduleReconnect();
+        break;
+      }
+
+      case OP.INVALID_SESSION: {
+        console.warn("[QQOfficial] Invalid session, clearing session state and re-identifying");
+        this.sessionId = null;
+        this.lastSeq = null;
         this.cleanupWs();
         this.scheduleReconnect();
         break;
@@ -508,6 +525,13 @@ export class QQOfficialAdapter extends PlatformAdapter {
           const ready = data as ReadyData;
           this.sessionId = ready.session_id;
           console.info(`[QQOfficial] Session ready, session_id=${this.sessionId}`);
+          this.reconnectAttempts = 0;
+          break;
+        }
+
+        case DISPATCH_TYPE.RESUMED: {
+          console.info("[QQOfficial] Session resumed successfully");
+          this.reconnectAttempts = 0;
           break;
         }
 
@@ -808,6 +832,9 @@ export class QQOfficialAdapter extends PlatformAdapter {
 
     console.info(`[QQOfficial] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
 
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+    }
     this.reconnectTimer = setTimeout(async () => {
       if (this._status !== "running") return;
 
