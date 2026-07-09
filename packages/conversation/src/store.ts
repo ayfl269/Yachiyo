@@ -1,5 +1,17 @@
 import type { ConversationRecord } from "./manager.js";
 
+/** Lightweight conversation metadata (without the heavy history JSON). */
+export interface ConversationMetadata {
+  id: string;
+  unifiedMsgOrigin: string;
+  personaId: string | null;
+  platformId: string;
+  title: string;
+  createdAt: Date;
+  updatedAt: Date;
+  tokenUsage: number | null;
+}
+
 export interface PlatformMessageHistory {
   id: string;
   platformId: string;
@@ -89,6 +101,8 @@ export abstract class ConversationStore {
   abstract createConversation(conversation: ConversationRecord): Promise<void>;
   abstract getConversationById(id: string): Promise<ConversationRecord | null>;
   abstract getAllConversations(): Promise<ConversationRecord[]>;
+  /** Like getAllConversations but omits the heavy history JSON field. */
+  abstract getAllConversationMetadata(): Promise<ConversationMetadata[]>;
   abstract getFilteredConversations(options: {
     page?: number;
     pageSize?: number;
@@ -174,6 +188,18 @@ export class InMemoryConversationStore extends ConversationStore {
   }
   async getAllConversations(): Promise<ConversationRecord[]> {
     return [...this.conversations.values()];
+  }
+  async getAllConversationMetadata(): Promise<ConversationMetadata[]> {
+    return [...this.conversations.values()].map((c) => ({
+      id: c.id,
+      unifiedMsgOrigin: c.unifiedMsgOrigin,
+      personaId: c.personaId,
+      platformId: c.platformId,
+      title: c.title,
+      createdAt: c.createdAt,
+      updatedAt: c.updatedAt,
+      tokenUsage: c.tokenUsage,
+    }));
   }
   async getFilteredConversations(options: {
     page?: number; pageSize?: number; platformIds?: string[]; searchQuery?: string;

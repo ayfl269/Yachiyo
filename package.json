@@ -15,6 +15,7 @@
     "test:windows": "tsx tests/windows-sandbox-test.ts",
     "test:browser": "tsx tests/browser-automation-test.ts",
     "test:interactive-shell": "tsx tests/interactive-shell-test.ts",
+    "test:conversation": "tsx tests/conversation-test.ts",
     "test:watch": "tsx watch tests/test.ts",
     "frontend:install": "cd frontend && pnpm install --frozen-lockfile --ignore-workspace",
     "frontend:dev": "cd frontend && pnpm run dev",

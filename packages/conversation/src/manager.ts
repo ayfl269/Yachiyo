@@ -35,6 +35,11 @@ export class ConversationManager {
     this.memoryConsolidator = consolidator;
   }
 
+  /** Returns the underlying store (or null if no store was configured). */
+  getStore(): ConversationStore | null {
+    return this.store;
+  }
+
   async initialize(): Promise<void> {
     if (this.store) {
       await this.store.initialize();

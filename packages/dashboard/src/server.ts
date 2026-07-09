@@ -46,6 +46,8 @@ import type { SqliteAdapterStore } from "@yachiyo/platform/sqlite-adapter-store.
 import type { DatabaseManager } from "@yachiyo/common/database.js";
 import type { FunctionToolManager } from "@yachiyo/agent/func-tool-manager.js";
 import type { MemoryConsolidator } from "@yachiyo/agent/memory-consolidator.js";
+import type { SqliteMemoryStore } from "@yachiyo/agent/sqlite-memory-store.js";
+import type { SqliteSchedulerTaskStore } from "@yachiyo/agent/scheduler-task-store.js";
 import type { SkillManager } from "@yachiyo/skill/index.js";
 import { safeFetch } from "@yachiyo/common/ssrf-guard.js";
 
@@ -67,8 +69,9 @@ export interface BootstrapContext {
   dbManager: DatabaseManager;
   toolManager: FunctionToolManager;
   memoryConsolidator: MemoryConsolidator;
-  schedulerStore?: any;
-  dashboardServer?: any;
+  schedulerStore?: SqliteSchedulerTaskStore;
+  memoryStore?: SqliteMemoryStore;
+  dashboardServer?: DashboardServer;
   shutdown: () => Promise<void>;
 }
 
@@ -935,13 +938,13 @@ export class DashboardServer {
       return;
     }
     if (pathname === "/api/session-whitelist/candidates" && req.method === "GET") {
-      const store = (this.ctx.conversationManager as any).store;
+      const store = this.ctx.conversationManager.getStore();
       if (!store) {
         res.writeHead(200);
         res.end(JSON.stringify({ candidates: [] }));
         return;
       }
-      const allConvs = await store.getAllConversations();
+      const allConvs = await store.getAllConversationMetadata();
       const seen = new Set<string>();
       const candidates: Array<{ umo: string; title: string }> = [];
       for (const conv of allConvs) {
@@ -1586,7 +1589,7 @@ export class DashboardServer {
         }
         res.writeHead(200);
         res.end(JSON.stringify(providers));
-      } catch (_err: any) {
+      } catch (_err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify([]));
       }
@@ -1817,7 +1820,7 @@ export class DashboardServer {
 
     // 18. Conversations (Chat Data)
     if (pathname === "/api/conversations" && req.method === "GET") {
-      const store = (this.ctx.conversationManager as any).store;
+      const store = this.ctx.conversationManager.getStore();
       if (!store) {
         res.writeHead(200);
         res.end(JSON.stringify({ list: [], total: 0 }));
@@ -1834,7 +1837,7 @@ export class DashboardServer {
 
     if (pathname.startsWith("/api/conversations/") && req.method === "GET") {
       const id = pathname.substring("/api/conversations/".length);
-      const store = (this.ctx.conversationManager as any).store;
+      const store = this.ctx.conversationManager.getStore();
       if (!store) {
         res.writeHead(404);
         res.end(JSON.stringify({ error: "Store not available" }));
@@ -1854,7 +1857,7 @@ export class DashboardServer {
     // 18.5. PUT /api/conversations/:id - 编辑对话历史（防上下文污染）
     if (pathname.startsWith("/api/conversations/") && req.method === "PUT") {
       const id = pathname.substring("/api/conversations/".length);
-      const store = (this.ctx.conversationManager as any).store;
+      const store = this.ctx.conversationManager.getStore();
       try {
         if (!store) {
           res.writeHead(400, { "Content-Type": "application/json" });
@@ -1893,7 +1896,7 @@ export class DashboardServer {
 
     if (pathname.startsWith("/api/conversations/") && req.method === "DELETE") {
       const id = pathname.substring("/api/conversations/".length);
-      const store = (this.ctx.conversationManager as any).store;
+      const store = this.ctx.conversationManager.getStore();
       if (store) {
         await store.deleteConversation(id);
       }
@@ -2026,7 +2029,7 @@ export class DashboardServer {
 
         if (sqliteStore) {
           try {
-            providerSources = sqliteStore.getAllProviderSources().map((s: any) => ({
+            providerSources = sqliteStore.getAllProviderSources().map((s: { id: string; type: string; provider_type: string; provider: string; key: string; api_base: string; enable: boolean; extra_config: Record<string, unknown> }) => ({
               id: s.id,
               type: s.type,
               provider_type: s.provider_type,
@@ -2510,7 +2513,7 @@ export class DashboardServer {
             running: Math.floor((now - this.startTime) / 1000),
             start_time: Math.floor(this.startTime / 1000),
             message_time_series: [],
-            platform: adapters.map((a: any) => ({
+            platform: adapters.map((a) => ({
               name: a.meta?.().name || a.meta?.().id || "unknown",
               count: 0,
             })),
@@ -2637,7 +2640,7 @@ export class DashboardServer {
             name: cfg.serverName,
             config: cfg.config,
             active: client?.active ?? false,
-            tools: client?.tools?.map((t: any) => t.name) ?? [],
+            tools: client?.tools?.map((t: { name: string }) => t.name) ?? [],
             errlogs: client?.serverErrLogs ?? [],
             createdAt: cfg.createdAt,
             updatedAt: cfg.updatedAt,
@@ -2646,7 +2649,7 @@ export class DashboardServer {
 
         res.writeHead(200);
         res.end(JSON.stringify(servers));
-      } catch (_err: any) {
+      } catch (_err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify([]));
       }
@@ -2741,7 +2744,7 @@ export class DashboardServer {
           return;
         }
         const skills = this.ctx.skillManager.listSkills();
-        const skill = skills.find((s: any) => s.name === skillName);
+        const skill = skills.find((s) => s.name === skillName);
         if (!skill?.path) {
           res.writeHead(404);
           res.end(JSON.stringify({ error: "Skill not found or no path" }));
@@ -2792,7 +2795,7 @@ export class DashboardServer {
           return;
         }
         const skills = this.ctx.skillManager.listSkills();
-        const skill = skills.find((s: any) => s.name === skillName);
+        const skill = skills.find((s) => s.name === skillName);
         if (!skill?.path) {
           res.writeHead(404);
           res.end(JSON.stringify({ error: "Skill not found" }));
@@ -2812,7 +2815,7 @@ export class DashboardServer {
         }));
         res.writeHead(200);
         res.end(JSON.stringify(files));
-      } catch (_err: any) {
+      } catch (_err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify([]));
       }
@@ -2824,7 +2827,7 @@ export class DashboardServer {
     // M1. GET /api/memories — 列出记忆（支持分页、搜索、类型/作用域筛选）
     if (pathname === "/api/memories" && req.method === "GET") {
       try {
-        const memoryStore = (this.ctx as any).memoryStore;
+        const memoryStore = this.ctx.memoryStore;
         if (!memoryStore) {
           res.writeHead(200);
           res.end(JSON.stringify({ memories: [], total: 0 }));
@@ -2860,7 +2863,7 @@ export class DashboardServer {
     // M2. POST /api/memories — 新建/更新记忆（支持分层参数）
     if (pathname === "/api/memories" && req.method === "POST") {
       try {
-        const memoryStore = (this.ctx as any).memoryStore;
+        const memoryStore = this.ctx.memoryStore;
         if (!memoryStore) {
           res.writeHead(500);
           res.end(JSON.stringify({ error: "Memory store not initialized" }));
@@ -2889,7 +2892,7 @@ export class DashboardServer {
         if (priority !== undefined) options.priority = priority;
         if (expires_at !== undefined) options.expiresAt = expires_at;
 
-        memoryStore.save(key, value || "", tags || [], options);
+        memoryStore.save(key, value || "", Array.isArray(tags) ? tags.map(String) : [], options);
         res.writeHead(200);
         res.end(JSON.stringify({ success: true }));
       } catch (err: unknown) {
@@ -2902,7 +2905,7 @@ export class DashboardServer {
     // M3. GET /api/memories/search — 搜索记忆（支持类型/作用域筛选）
     if (pathname === "/api/memories/search" && req.method === "GET") {
       try {
-        const memoryStore = (this.ctx as any).memoryStore;
+        const memoryStore = this.ctx.memoryStore;
         if (!memoryStore) {
           res.writeHead(200);
           res.end(JSON.stringify([]));
@@ -2926,7 +2929,7 @@ export class DashboardServer {
         const memories = memoryStore.search(query, limit, filterOptions);
         res.writeHead(200);
         res.end(JSON.stringify(memories));
-      } catch (_err: any) {
+      } catch (_err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify([]));
       }
@@ -2936,7 +2939,7 @@ export class DashboardServer {
     // M4. DELETE /api/memories/:key — 删除记忆
     if (pathname.startsWith("/api/memories/") && req.method === "DELETE") {
       try {
-        const memoryStore = (this.ctx as any).memoryStore;
+        const memoryStore = this.ctx.memoryStore;
         if (!memoryStore) {
           res.writeHead(500);
           res.end(JSON.stringify({ error: "Memory store not initialized" }));
@@ -2961,7 +2964,7 @@ export class DashboardServer {
     // M5. POST /api/memories/clear — 清空所有记忆
     if (pathname === "/api/memories/clear" && req.method === "POST") {
       try {
-        const memoryStore = (this.ctx as any).memoryStore;
+        const memoryStore = this.ctx.memoryStore;
         if (!memoryStore) {
           res.writeHead(500);
           res.end(JSON.stringify({ error: "Memory store not initialized" }));
@@ -2980,7 +2983,7 @@ export class DashboardServer {
     // M6. GET /api/memories/stats — 记忆统计
     if (pathname === "/api/memories/stats" && req.method === "GET") {
       try {
-        const memoryStore = (this.ctx as any).memoryStore;
+        const memoryStore = this.ctx.memoryStore;
         if (!memoryStore) {
           res.writeHead(200);
           res.end(JSON.stringify({ total: 0, byType: {}, byScope: {} }));
@@ -2999,7 +3002,7 @@ export class DashboardServer {
     // M7. POST /api/memories/consolidate — 手动触发记忆整理
     if (pathname === "/api/memories/consolidate" && req.method === "POST") {
       try {
-        const consolidator = (this.ctx as any).memoryConsolidator;
+        const consolidator = this.ctx.memoryConsolidator;
         if (!consolidator) {
           res.writeHead(500);
           res.end(JSON.stringify({ error: "Memory consolidator not initialized" }));
@@ -3018,7 +3021,7 @@ export class DashboardServer {
     // M8. GET /api/memories/consolidation-config — 获取整理配置
     if (pathname === "/api/memories/consolidation-config" && req.method === "GET") {
       try {
-        const consolidator = (this.ctx as any).memoryConsolidator;
+        const consolidator = this.ctx.memoryConsolidator;
         if (!consolidator) {
           res.writeHead(200);
           res.end(JSON.stringify({ enabled: false }));
@@ -3037,7 +3040,7 @@ export class DashboardServer {
     // M9. PATCH /api/memories/consolidation-config — 更新整理配置
     if (pathname === "/api/memories/consolidation-config" && req.method === "PATCH") {
       try {
-        const consolidator = (this.ctx as any).memoryConsolidator;
+        const consolidator = this.ctx.memoryConsolidator;
         if (!consolidator) {
           res.writeHead(500);
           res.end(JSON.stringify({ error: "Memory consolidator not initialized" }));
@@ -3062,7 +3065,7 @@ export class DashboardServer {
     // M10. GET /api/conversation-indices — 列出/搜索对话索引（由整理器写入的 title+topics）
     if (pathname === "/api/conversation-indices" && req.method === "GET") {
       try {
-        const memoryStore = (this.ctx as any).memoryStore;
+        const memoryStore = this.ctx.memoryStore;
         if (!memoryStore) {
           res.writeHead(200);
           res.end(JSON.stringify({ indices: [], total: 0 }));
@@ -3089,7 +3092,7 @@ export class DashboardServer {
     // M11. DELETE /api/conversation-indices/:id — 删除单条对话索引
     if (pathname.startsWith("/api/conversation-indices/") && req.method === "DELETE") {
       try {
-        const memoryStore = (this.ctx as any).memoryStore;
+        const memoryStore = this.ctx.memoryStore;
         if (!memoryStore) {
           res.writeHead(500);
           res.end(JSON.stringify({ error: "Memory store not initialized" }));
@@ -3115,7 +3118,7 @@ export class DashboardServer {
     // M12. POST /api/conversation-indices/clear — 清空所有对话索引
     if (pathname === "/api/conversation-indices/clear" && req.method === "POST") {
       try {
-        const memoryStore = (this.ctx as any).memoryStore;
+        const memoryStore = this.ctx.memoryStore;
         if (!memoryStore) {
           res.writeHead(500);
           res.end(JSON.stringify({ error: "Memory store not initialized" }));
@@ -3146,7 +3149,7 @@ export class DashboardServer {
           return;
         }
         const skills = this.ctx.skillManager.listSkills();
-        const skill = skills.find((s: any) => s.name === skillName);
+        const skill = skills.find((s) => s.name === skillName);
         if (!skill?.path) {
           res.writeHead(404);
           res.end(JSON.stringify({ error: "Skill not found" }));
@@ -3179,7 +3182,7 @@ export class DashboardServer {
           return;
         }
         const skills = this.ctx.skillManager.listSkills();
-        const skill = skills.find((s: any) => s.name === name);
+        const skill = skills.find((s) => s.name === name);
         if (!skill?.path) {
           res.writeHead(404);
           res.end(JSON.stringify({ error: "Skill not found" }));
@@ -3205,7 +3208,7 @@ export class DashboardServer {
     // S1. GET /api/scheduler/tasks — 列出定时任务（支持分页、类型/状态筛选、搜索）
     if (pathname === "/api/scheduler/tasks" && req.method === "GET") {
       try {
-        const store = (this.ctx as any).schedulerStore;
+        const store = this.ctx.schedulerStore;
         if (!store) {
           res.writeHead(200);
           res.end(JSON.stringify({ tasks: [], total: 0 }));
@@ -3241,7 +3244,7 @@ export class DashboardServer {
     // S2. GET /api/scheduler/tasks/:id — 获取单个定时任务
     if (pathname.startsWith("/api/scheduler/tasks/") && !pathname.includes("/fire") && req.method === "GET") {
       try {
-        const store = (this.ctx as any).schedulerStore;
+        const store = this.ctx.schedulerStore;
         if (!store) {
           res.writeHead(500);
           res.end(JSON.stringify({ error: "Scheduler store not initialized" }));
@@ -3266,7 +3269,7 @@ export class DashboardServer {
     // S3. POST /api/scheduler/tasks — 创建定时任务
     if (pathname === "/api/scheduler/tasks" && req.method === "POST") {
       try {
-        const store = (this.ctx as any).schedulerStore;
+        const store = this.ctx.schedulerStore;
         if (!store) {
           res.writeHead(500);
           res.end(JSON.stringify({ error: "Scheduler store not initialized" }));
@@ -3325,7 +3328,7 @@ export class DashboardServer {
     // S4. PATCH /api/scheduler/tasks/:id — 更新定时任务
     if (pathname.startsWith("/api/scheduler/tasks/") && req.method === "PATCH") {
       try {
-        const store = (this.ctx as any).schedulerStore;
+        const store = this.ctx.schedulerStore;
         if (!store) {
           res.writeHead(500);
           res.end(JSON.stringify({ error: "Scheduler store not initialized" }));
@@ -3370,7 +3373,7 @@ export class DashboardServer {
     // S5. DELETE /api/scheduler/tasks/:id — 删除定时任务
     if (pathname.startsWith("/api/scheduler/tasks/") && req.method === "DELETE") {
       try {
-        const store = (this.ctx as any).schedulerStore;
+        const store = this.ctx.schedulerStore;
         if (!store) {
           res.writeHead(500);
           res.end(JSON.stringify({ error: "Scheduler store not initialized" }));
@@ -3395,7 +3398,7 @@ export class DashboardServer {
     // S6. GET /api/scheduler/stats — 定时任务统计
     if (pathname === "/api/scheduler/stats" && req.method === "GET") {
       try {
-        const store = (this.ctx as any).schedulerStore;
+        const store = this.ctx.schedulerStore;
         if (!store) {
           res.writeHead(200);
           res.end(JSON.stringify({ stats: { total: 0, byType: {}, byStatus: {} } }));
@@ -3414,7 +3417,7 @@ export class DashboardServer {
     // S7. POST /api/scheduler/tasks/:id/fire — 立即触发任务
     if (pathname.includes("/fire") && pathname.startsWith("/api/scheduler/tasks/") && req.method === "POST") {
       try {
-        const store = (this.ctx as any).schedulerStore;
+        const store = this.ctx.schedulerStore;
         if (!store) {
           res.writeHead(500);
           res.end(JSON.stringify({ error: "Scheduler store not initialized" }));

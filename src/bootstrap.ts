@@ -48,6 +48,8 @@ import { getSubAgentManagementTools } from "@yachiyo/agent/subagent-create-tool.
 import { SCHEDULER_MIGRATIONS, SqliteSchedulerTaskStore } from "@yachiyo/agent/scheduler-task-store.js";
 import { createSchedulerTool } from "@yachiyo/agent/scheduler-tool.js";
 import { TaskScheduler } from "@yachiyo/pipeline/task-scheduler.js";
+import { ProviderType } from "@yachiyo/provider/types.js";
+import type { DashboardServer } from "@yachiyo/dashboard/server.js";
 
 export interface BootstrapOptions {
   /** 数据目录路径，默认 ./data，支持 DATA_DIR 环境变量覆盖 */
@@ -118,7 +120,7 @@ export interface BootstrapContext {
   toolManager: FunctionToolManager;
   memoryConsolidator: MemoryConsolidator;
   taskScheduler: TaskScheduler;
-  dashboardServer?: any;
+  dashboardServer?: DashboardServer;
   shutdown: () => Promise<void>;
 }
 
@@ -296,7 +298,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
           providerManager.setFallbackProviders(cfg.fallbackProviderIds);
         }
 
-        const defaultProvider = providerManager.getUsingProvider("chat_completion" as any);
+        const defaultProvider = providerManager.getUsingProvider(ProviderType.CHAT_COMPLETION);
         if (defaultProvider) {
           memoryConsolidator.setProvider(defaultProvider);
           const fallbackProviders = providerManager.getFallbackProviders();
@@ -407,7 +409,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
   await adapterRegistry.startAll();
 
   // 9.2 配置记忆整理器并启动周期性定时器（使用间隔格式如 "12h"）
-  const defaultProvider = providerManager.getUsingProvider("chat_completion" as any);
+  const defaultProvider = providerManager.getUsingProvider(ProviderType.CHAT_COMPLETION);
   if (defaultProvider) {
     memoryConsolidator.setProvider(defaultProvider);
     // 同时设置 fallback providers，主 provider 失败时自动切换
@@ -427,7 +429,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
   taskScheduler.start();
 
   // 9.5 启动管理后台
-  let dashboardServer: any;
+  let dashboardServer: DashboardServer | undefined;
   if (options.dashboard?.enabled) {
     const { DashboardServer } = await import("@yachiyo/dashboard/server.js");
     dashboardServer = new DashboardServer(
@@ -452,7 +454,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
         memoryConsolidator,
         schedulerStore: sqliteSchedulerTaskStore,
         shutdown: async () => {},
-      } as any,
+      },
       {
         port: options.dashboard.port,
         host: options.dashboard.host,

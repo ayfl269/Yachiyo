@@ -1,4 +1,4 @@
-import { ConversationStore, type PlatformMessageHistory, type WebchatThread, type Attachment, type ApiKey, type Preference, type CommandConfig, type PlatformSession, type ProviderStat } from "./store.js";
+import { ConversationStore, type ConversationMetadata, type PlatformMessageHistory, type WebchatThread, type Attachment, type ApiKey, type Preference, type CommandConfig, type PlatformSession, type ProviderStat } from "./store.js";
 import type { ConversationRecord } from "./manager.js";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from "fs";
 import { join } from "path";
@@ -184,6 +184,19 @@ export class JsonFileConversationStore extends ConversationStore {
 
   async getAllConversations(): Promise<ConversationRecord[]> {
     return [...this.cache.values()];
+  }
+
+  async getAllConversationMetadata(): Promise<ConversationMetadata[]> {
+    return [...this.cache.values()].map((c) => ({
+      id: c.id,
+      unifiedMsgOrigin: c.unifiedMsgOrigin,
+      personaId: c.personaId,
+      platformId: c.platformId,
+      title: c.title,
+      createdAt: c.createdAt,
+      updatedAt: c.updatedAt,
+      tokenUsage: c.tokenUsage,
+    }));
   }
 
   async getFilteredConversations(options: {

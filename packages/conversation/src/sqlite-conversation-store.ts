@@ -10,6 +10,7 @@ import type Database from "better-sqlite3";
 import type { ConversationRecord } from "./manager.js";
 import {
   ConversationStore,
+  type ConversationMetadata,
   type PlatformMessageHistory,
   type WebchatThread,
   type Attachment,
@@ -163,6 +164,18 @@ interface ConversationRow {
   updated_at: string;
 }
 
+/** Row type for conversations table WITHOUT the heavy history column. */
+interface ConversationMetadataRow {
+  id: string;
+  unified_msg_origin: string;
+  persona_id: string | null;
+  platform_id: string;
+  title: string;
+  token_usage: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
 /** Row type for the platform_message_history table. */
 interface PlatformMessageHistoryRow {
   id: string;
@@ -301,6 +314,22 @@ export class SqliteConversationStore extends ConversationStore {
   async getAllConversations(): Promise<ConversationRecord[]> {
     const rows = this.db.prepare("SELECT * FROM conversations ORDER BY updated_at DESC").all() as ConversationRow[];
     return rows.map((r) => this.rowToConversation(r));
+  }
+
+  async getAllConversationMetadata(): Promise<ConversationMetadata[]> {
+    const rows = this.db.prepare(
+      "SELECT id, unified_msg_origin, persona_id, platform_id, title, token_usage, created_at, updated_at FROM conversations ORDER BY updated_at DESC"
+    ).all() as ConversationMetadataRow[];
+    return rows.map((r) => ({
+      id: r.id,
+      unifiedMsgOrigin: r.unified_msg_origin,
+      personaId: r.persona_id,
+      platformId: r.platform_id,
+      title: r.title,
+      createdAt: new Date(r.created_at),
+      updatedAt: new Date(r.updated_at),
+      tokenUsage: r.token_usage,
+    }));
   }
 
   async getFilteredConversations(options: {
