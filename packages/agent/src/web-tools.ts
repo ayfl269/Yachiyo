@@ -1482,6 +1482,301 @@ export async function closeAllBrowserPages(): Promise<void> {
   }
 }
 
+// ── Browser Select Tool ──
+
+export function createBrowserSelectTool(): FunctionTool<WebToolContext> {
+  return createFunctionTool<WebToolContext>({
+    name: "browser_select",
+    description:
+      "Select one or more options in a <select> element on a browser page. " +
+      "Options can be specified by value, label (visible text), or index. " +
+      "For multi-select elements, pass an array to select multiple options.",
+    parameters: {
+      type: "object",
+      properties: {
+        page_id: { type: "string", description: "The page_id returned by browser_navigate." },
+        selector: { type: "string", description: "CSS selector of the <select> element (e.g. 'select#country', 'select[name=\"lang\"]')." },
+        values: {
+          description: "Option value(s) to select. Can be a single string or an array of strings for multi-select. Matches the <option value=\"...\"> attribute.",
+          oneOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" } },
+          ],
+        },
+        labels: {
+          description: "Alternatively, select by visible text label(s) instead of value. Can be a single string or an array. Matches the text content of <option>.",
+          oneOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" } },
+          ],
+        },
+        index: {
+          type: "integer",
+          description: "Alternatively, select by zero-based index of the option.",
+          minimum: 0,
+        },
+        timeout: { type: "integer", description: "Time to wait for the element to appear, in seconds. Default: 10.", minimum: 1, default: 10 },
+      },
+      required: ["page_id", "selector"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const pageId = String(args[0] ?? "");
+      const selector = String(args[1] ?? "");
+      const values = args[2];
+      const labels = args[3];
+      const index = args[4] != null ? Number(args[4]) : undefined;
+      const timeout = args[5] != null ? Number(args[5]) : 10;
+
+      const entry = getPage(pageId);
+      if (!entry) {
+        return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
+      }
+      if (entry.page.isClosed()) {
+        pageRegistry.delete(pageId);
+        return { content: [{ type: "text", text: `error: Page ${pageId} has been closed.` }], isError: true };
+      }
+
+      // At least one selection criterion must be provided.
+      if (values == null && labels == null && index == null) {
+        return {
+          content: [{ type: "text", text: "error: At least one of 'values', 'labels', or 'index' must be provided." }],
+          isError: true,
+        };
+      }
+
+      try {
+        const locator = entry.page.locator(selector).first();
+        await locator.waitFor({ state: "visible", timeout: timeout * 1000 });
+
+        const selectedLabels: string[] = [];
+
+        if (values != null) {
+          const valArray = Array.isArray(values) ? values : [values];
+          await locator.selectOption(valArray as string[]);
+          for (const v of valArray) selectedLabels.push(`value="${v}"`);
+        } else if (labels != null) {
+          const labelArray = Array.isArray(labels) ? labels : [labels];
+          await locator.selectOption(labelArray.map((l: string) => ({ label: l })));
+          for (const l of labelArray) selectedLabels.push(`label="${l}"`);
+        } else if (index != null) {
+          await locator.selectOption({ index });
+          selectedLabels.push(`index=${index}`);
+        }
+
+        // Read back the currently selected option text for confirmation.
+        const selectedTexts = await locator.locator("option:checked").allTextContents();
+        const confirmation = selectedTexts.length > 0
+          ? `Selected: ${selectedTexts.join(", ")}`
+          : "Selection applied.";
+
+        return {
+          content: [{ type: "text", text: `Selected option(s) in ${selector} — ${selectedLabels.join(", ")}.\n${confirmation}` }],
+        };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return { content: [{ type: "text", text: `error: Select failed for selector '${selector}': ${msg}` }], isError: true };
+      }
+    },
+  });
+}
+
+// ── Browser Upload Tool ──
+
+export function createBrowserUploadTool(): FunctionTool<WebToolContext> {
+  return createFunctionTool<WebToolContext>({
+    name: "browser_upload",
+    description:
+      "Upload one or more files to an <input type=\"file\"> element on a browser page. " +
+      "The file path(s) must be accessible from the local filesystem. " +
+      "If the page uses a custom file dialog (hidden input), provide the selector for the hidden input.",
+    parameters: {
+      type: "object",
+      properties: {
+        page_id: { type: "string", description: "The page_id returned by browser_navigate." },
+        selector: { type: "string", description: "CSS selector of the file input element (e.g. 'input[type=\"file\"]')." },
+        files: {
+          description: "Absolute or relative path(s) to the file(s) to upload. Can be a single string or an array of strings for multiple files.",
+          oneOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" } },
+          ],
+        },
+        timeout: { type: "integer", description: "Time to wait for the element to appear, in seconds. Default: 10.", minimum: 1, default: 10 },
+      },
+      required: ["page_id", "selector", "files"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const pageId = String(args[0] ?? "");
+      const selector = String(args[1] ?? "");
+      const files = args[2];
+      const timeout = args[3] != null ? Number(args[3]) : 10;
+
+      const entry = getPage(pageId);
+      if (!entry) {
+        return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
+      }
+      if (entry.page.isClosed()) {
+        pageRegistry.delete(pageId);
+        return { content: [{ type: "text", text: `error: Page ${pageId} has been closed.` }], isError: true };
+      }
+
+      if (files == null) {
+        return { content: [{ type: "text", text: "error: 'files' parameter is required." }], isError: true };
+      }
+
+      const fileList = Array.isArray(files) ? files : [files];
+
+      try {
+        const locator = entry.page.locator(selector).first();
+        await locator.waitFor({ state: "attached", timeout: timeout * 1000 });
+        await locator.setInputFiles(fileList as string[]);
+
+        return {
+          content: [{ type: "text", text: `Uploaded ${fileList.length} file(s) to ${selector}: ${fileList.join(", ")}` }],
+        };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return { content: [{ type: "text", text: `error: Upload failed for selector '${selector}': ${msg}` }], isError: true };
+      }
+    },
+  });
+}
+
+// ── Browser Hover Tool ──
+
+export function createBrowserHoverTool(): FunctionTool<WebToolContext> {
+  return createFunctionTool<WebToolContext>({
+    name: "browser_hover",
+    description:
+      "Hover the mouse over an element on a browser page. Triggers CSS :hover state, " +
+      "JavaScript mouseover/mouseenter events, and is useful for revealing dropdown menus, " +
+      "tooltips, or other hover-activated UI elements.",
+    parameters: {
+      type: "object",
+      properties: {
+        page_id: { type: "string", description: "The page_id returned by browser_navigate." },
+        selector: { type: "string", description: "CSS selector of the element to hover over." },
+        timeout: { type: "integer", description: "Time to wait for the element to appear, in seconds. Default: 10.", minimum: 1, default: 10 },
+      },
+      required: ["page_id", "selector"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const pageId = String(args[0] ?? "");
+      const selector = String(args[1] ?? "");
+      const timeout = args[2] != null ? Number(args[2]) : 10;
+
+      const entry = getPage(pageId);
+      if (!entry) {
+        return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
+      }
+      if (entry.page.isClosed()) {
+        pageRegistry.delete(pageId);
+        return { content: [{ type: "text", text: `error: Page ${pageId} has been closed.` }], isError: true };
+      }
+
+      try {
+        const locator = entry.page.locator(selector).first();
+        await locator.waitFor({ state: "visible", timeout: timeout * 1000 });
+        await locator.hover();
+        return { content: [{ type: "text", text: `Hovered over element: ${selector}` }] };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return { content: [{ type: "text", text: `error: Hover failed for selector '${selector}': ${msg}` }], isError: true };
+      }
+    },
+  });
+}
+
+// ── Browser Drag and Drop Tool ──
+
+export function createBrowserDragAndDropTool(): FunctionTool<WebToolContext> {
+  return createFunctionTool<WebToolContext>({
+    name: "browser_drag_and_drop",
+    description:
+      "Drag an element from a source selector and drop it onto a target element on a browser page. " +
+      "Useful for drag-and-drop interactions like reordering list items, moving kanban cards, or adjusting sliders. " +
+      "Works with HTML5 drag-and-drop API and standard mouse events.",
+    parameters: {
+      type: "object",
+      properties: {
+        page_id: { type: "string", description: "The page_id returned by browser_navigate." },
+        source_selector: { type: "string", description: "CSS selector of the element to drag (source)." },
+        target_selector: { type: "string", description: "CSS selector of the element to drop onto (target)." },
+        timeout: { type: "integer", description: "Time to wait for the elements to appear, in seconds. Default: 10.", minimum: 1, default: 10 },
+      },
+      required: ["page_id", "source_selector", "target_selector"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const pageId = String(args[0] ?? "");
+      const sourceSelector = String(args[1] ?? "");
+      const targetSelector = String(args[2] ?? "");
+      const timeout = args[3] != null ? Number(args[3]) : 10;
+
+      const entry = getPage(pageId);
+      if (!entry) {
+        return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
+      }
+      if (entry.page.isClosed()) {
+        pageRegistry.delete(pageId);
+        return { content: [{ type: "text", text: `error: Page ${pageId} has been closed.` }], isError: true };
+      }
+
+      try {
+        const sourceLocator = entry.page.locator(sourceSelector).first();
+        const targetLocator = entry.page.locator(targetSelector).first();
+        await sourceLocator.waitFor({ state: "visible", timeout: timeout * 1000 });
+        await targetLocator.waitFor({ state: "visible", timeout: timeout * 1000 });
+
+        // Try the native HTML5 drag-and-drop API first (dragTo). This dispatches
+        // the full dragstart → dragenter → dragover → drop event sequence.
+        // If that doesn't trigger the expected behavior (some custom UIs listen
+        // to mouse events instead), fall back to a manual mouse-based drag.
+        try {
+          await sourceLocator.dragTo(targetLocator, { timeout: timeout * 1000 });
+        } catch {
+          // Fallback: manual mouse drag via down/move/up
+          const sourceBox = await sourceLocator.boundingBox();
+          const targetBox = await targetLocator.boundingBox();
+          if (!sourceBox || !targetBox) {
+            throw new Error("Could not determine element bounding boxes for manual drag.");
+          }
+          const sourceX = sourceBox.x + sourceBox.width / 2;
+          const sourceY = sourceBox.y + sourceBox.height / 2;
+          const targetX = targetBox.x + targetBox.width / 2;
+          const targetY = targetBox.y + targetBox.height / 2;
+
+          await entry.page.mouse.move(sourceX, sourceY);
+          await entry.page.mouse.down();
+          // Move in a few steps to trigger intermediate dragover events.
+          const steps = 5;
+          for (let i = 1; i <= steps; i++) {
+            await entry.page.mouse.move(
+              sourceX + (targetX - sourceX) * (i / steps),
+              sourceY + (targetY - sourceY) * (i / steps)
+            );
+            await entry.page.waitForTimeout(50);
+          }
+          await entry.page.mouse.up();
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: `Dragged ${sourceSelector} → ${targetSelector}`,
+          }],
+        };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return { content: [{ type: "text", text: `error: Drag and drop failed: ${msg}` }], isError: true };
+      }
+    },
+  });
+}
+
 // ── Tool assembly ──
 
 /**
@@ -1496,6 +1791,10 @@ export function getWebTools(engine: SearchEngine = "bing", customSearchProvider?
     createBrowserNavigateTool(),
     createBrowserClickTool(),
     createBrowserTypeTool(),
+    createBrowserSelectTool(),
+    createBrowserUploadTool(),
+    createBrowserHoverTool(),
+    createBrowserDragAndDropTool(),
     createBrowserScreenshotTool(),
     createBrowserSnapshotTool(),
     createBrowserGetTextTool(),
@@ -1516,6 +1815,10 @@ export function getBrowserAutomationTools(): FunctionTool<WebToolContext>[] {
     createBrowserNavigateTool(),
     createBrowserClickTool(),
     createBrowserTypeTool(),
+    createBrowserSelectTool(),
+    createBrowserUploadTool(),
+    createBrowserHoverTool(),
+    createBrowserDragAndDropTool(),
     createBrowserScreenshotTool(),
     createBrowserSnapshotTool(),
     createBrowserGetTextTool(),
