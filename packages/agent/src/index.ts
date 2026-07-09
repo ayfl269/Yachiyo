@@ -280,7 +280,7 @@ export type { ConversationSearchToolContext, CreateConversationSearchToolOptions
 export {
   createAskUserTool,
 } from "./ask-user-tool.js";
-export type { AskUserToolContext } from "./ask-user-tool.js";
+export type { AskUserToolContext, PlainMessageComponent } from "./ask-user-tool.js";
 
 // Image reference utilities
 export {

@@ -16,10 +16,20 @@
 
 import { createFunctionTool, type FunctionTool } from "./tool.js";
 import type { CallToolResult } from "./types.js";
-import type { PlainComponent } from "@yachiyo/message/components.js";
-import { ComponentType } from "@yachiyo/message/components.js";
 
 // ── Context type ──
+
+/**
+ * Minimal plain-text message component shape. Defined locally to avoid a
+ * circular dependency between the agent and message packages (message
+ * depends on agent). The concrete PlainComponent structurally satisfies
+ * this interface, so passing real components to send() works at runtime.
+ */
+export interface PlainMessageComponent {
+  type: "Plain";
+  text: string;
+  toDict(): Record<string, unknown>;
+}
 
 /**
  * Minimal interface for the message event capabilities the tool needs.
@@ -28,15 +38,15 @@ import { ComponentType } from "@yachiyo/message/components.js";
  */
 export interface AskUserToolContext {
   /** Send message components to the user. */
-  send?: (components: PlainComponent[]) => Promise<void>;
+  send?: (components: PlainMessageComponent[]) => Promise<void>;
   /** The unified message origin (session identifier). */
   unifiedMsgOrigin?: string;
 }
 
 // ── Helpers ──
 
-function plainText(text: string): PlainComponent {
-  return { type: ComponentType.Plain, text, toDict: () => ({ type: "text", data: { text } }) };
+function plainText(text: string): PlainMessageComponent {
+  return { type: "Plain", text, toDict: () => ({ type: "text", data: { text } }) };
 }
 
 // ── Tool factory ──

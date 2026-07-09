@@ -14,11 +14,10 @@
 import {
   createAskUserTool,
   type AskUserToolContext,
+  type PlainMessageComponent,
 } from "@yachiyo/agent/ask-user-tool.js";
 import { FunctionToolExecutor } from "@yachiyo/agent/tool-executor.js";
 import type { ContextWrapper, CallToolResult } from "@yachiyo/agent/types.js";
-import type { PlainComponent } from "@yachiyo/message/components.js";
-import { ComponentType } from "@yachiyo/message/components.js";
 
 // ── Test helpers ──
 
@@ -58,16 +57,16 @@ function createMockContext(options?: {
   unifiedMsgOrigin?: string;
 }): {
   ctx: AskUserToolContext;
-  sendCalls: PlainComponent[][];
+  sendCalls: PlainMessageComponent[][];
 } {
-  const sendCalls: PlainComponent[][] = [];
+  const sendCalls: PlainMessageComponent[][] = [];
   const ctx: AskUserToolContext = {
     unifiedMsgOrigin: options?.unifiedMsgOrigin ?? "test:umo",
     send: options?.sendShouldThrow
       ? async () => {
           throw options.sendShouldThrow!;
         }
-      : async (components: PlainComponent[]) => {
+      : async (components: PlainMessageComponent[]) => {
           sendCalls.push(components);
         },
   };
@@ -122,7 +121,7 @@ async function testBasicQuestion(): Promise<void> {
 
   assert(sendCalls.length === 1, "send 被调用一次");
   assertEqual(sendCalls[0].length, 1, "发送单个组件");
-  assertEqual(sendCalls[0][0].type, ComponentType.Plain, "组件类型为 Plain");
+  assertEqual(sendCalls[0][0].type, "Plain", "组件类型为 Plain");
 
   const sentText = sendCalls[0][0].text;
   assert(sentText.includes("你想要什么语言？"), "发送的文本包含问题");
