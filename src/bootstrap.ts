@@ -43,6 +43,7 @@ import { getInteractiveShellTools } from "@yachiyo/agent/interactive-shell-tool.
 import { createMemoryTool } from "@yachiyo/agent/memory-tool.js";
 import { MemoryConsolidator } from "@yachiyo/agent/memory-consolidator.js";
 import { createCodeSearchTool } from "@yachiyo/agent/code-search-tool.js";
+import { createConversationSearchTool } from "@yachiyo/agent/conversation-search-tool.js";
 import { getSubAgentManagementTools } from "@yachiyo/agent/subagent-create-tool.js";
 import { SCHEDULER_MIGRATIONS, SqliteSchedulerTaskStore } from "@yachiyo/agent/scheduler-task-store.js";
 import { createSchedulerTool } from "@yachiyo/agent/scheduler-tool.js";
@@ -326,6 +327,10 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
   // 注册代码搜索工具
   const codeSearchTool = createCodeSearchTool(workspaceRoot);
   toolManager.funcList.push(codeSearchTool);
+
+  // 注册会话搜索工具 (搜索历史会话标题和消息内容)
+  const conversationSearchTool = createConversationSearchTool({ store: sqliteConversationStore });
+  toolManager.funcList.push(conversationSearchTool);
 
   // 注册子代理管理工具 (create/list/delete_subagent)
   for (const tool of getSubAgentManagementTools(workspaceRoot)) {

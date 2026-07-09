@@ -270,6 +270,12 @@ export {
 } from "./code-search-tool.js";
 export type { CodeSearchToolContext } from "./code-search-tool.js";
 
+// Conversation search tool
+export {
+  createConversationSearchTool,
+} from "./conversation-search-tool.js";
+export type { ConversationSearchToolContext, CreateConversationSearchToolOptions } from "./conversation-search-tool.js";
+
 // Image reference utilities
 export {
   normalizeAndDedupeStrings,
