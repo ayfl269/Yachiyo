@@ -140,7 +140,7 @@ export function interactiveShellStart(
   const cwd = options.cwd ?? options.workspaceRoot ?? process.cwd();
   const isWindows = process.platform === "win32";
   const exe = isWindows ? "cmd.exe" : "/bin/sh";
-  const args = isWindows ? ["/Q"] : ["-i"]; // /Q disables echo on cmd; -i is ignored harmlessly by sh
+  const args = isWindows ? ["/Q"] : []; // /Q disables echo on cmd; sh needs no flags for piped input
 
   // If a specific command is provided, we still launch the shell and let the
   // caller send it via stdin. This keeps the session interactive. However, if

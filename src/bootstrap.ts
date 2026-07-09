@@ -336,7 +336,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
   const sqliteSchedulerTaskStore = new SqliteSchedulerTaskStore(dbManager.getDb("scheduler"));
   const schedulerTool = createSchedulerTool({ sqliteStore: sqliteSchedulerTaskStore });
   toolManager.funcList.push(schedulerTool);
-  const taskScheduler = new TaskScheduler(sqliteSchedulerTaskStore);
+  const taskScheduler = new TaskScheduler(sqliteSchedulerTaskStore, eventQueue);
   // 6. 创建管线调度器
   const pipelineContext: PipelineContext = {
     get config() { return configManager.getActiveConfig() ?? defaultConfig; },
