@@ -13,7 +13,6 @@
  */
 
 import Database from "better-sqlite3";
-import { AsyncQueue } from "@yachiyo/common/async-queue.js";
 import {
   SCHEDULER_MIGRATIONS,
   SqliteSchedulerTaskStore,
@@ -22,7 +21,6 @@ import {
   createSchedulerTool,
 } from "@yachiyo/agent/index.js";
 import { TaskScheduler } from "@yachiyo/pipeline/task-scheduler.js";
-import type { MessageEvent } from "@yachiyo/message/event.js";
 import type { CallToolResult, FunctionTool } from "@yachiyo/agent/index.js";
 
 let passCount = 0;
@@ -583,20 +581,18 @@ async function main(): Promise<void> {
     getAdapter: (id: string) => (id === "p" ? mockAdapter : undefined),
   } as any;
 
-  // Fresh store + queue for this test
+  // Fresh store for this test
   const db2 = new Database(":memory:");
   db2.pragma("foreign_keys = ON");
   for (const m of SCHEDULER_MIGRATIONS) {
     db2.exec(m.up);
   }
   const store2 = new SqliteSchedulerTaskStore(db2);
-  const eventQueue = new AsyncQueue<MessageEvent>();
-  const taskScheduler = new TaskScheduler(store2, eventQueue, { interval: 60000 });
+  const taskScheduler = new TaskScheduler(store2, { interval: 60000 });
   taskScheduler.setAdapterRegistry(mockRegistry);
 
   // No tasks → tick does nothing
   await taskScheduler.tick();
-  assert(eventQueue.size === 0, "tick: 无任务时不入队");
 
   // Add a due task with routing info
   store2.save({

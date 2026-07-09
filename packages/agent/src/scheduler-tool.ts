@@ -121,7 +121,7 @@ export function createSchedulerTool(options?: CreateSchedulerToolOptions): Funct
         },
         recurrence: {
           type: "string",
-          description: "Recurrence pattern for recurring tasks: '1h', '30m', 'daily', 'weekly'.",
+          description: "Recurrence pattern for recurring tasks: '1h', '30m', 'daily', 'weekly', 'monthly'.",
         },
         goal: { type: "string", description: "Current task goal text (for goal/plan tasks)." },
         payload: { type: "string", description: "Message/payload delivered when the task fires." },

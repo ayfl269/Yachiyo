@@ -12,9 +12,7 @@
  * proactive messages), the task is still marked fired to avoid retry loops.
  */
 
-import type { AsyncQueue } from "@yachiyo/common/async-queue.js";
-import type { SqliteSchedulerTaskStore } from "@yachiyo/agent/scheduler-task-store.js";
-import type { SchedulerTask } from "@yachiyo/agent/scheduler-task-store.js";
+import type { SqliteSchedulerTaskStore, SchedulerTask } from "@yachiyo/agent/scheduler-task-store.js";
 import type { AdapterRegistry } from "@yachiyo/platform/registry.js";
 import { ComponentType } from "@yachiyo/message/components.js";
 
@@ -29,20 +27,18 @@ const DEFAULT_INTERVAL = 30_000;
 
 export class TaskScheduler {
   private store: SqliteSchedulerTaskStore;
-  private eventQueue: AsyncQueue<any>;
   private adapterRegistry: AdapterRegistry | null;
   private interval: number;
   private enabled: boolean;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private ticking: boolean = false;
 
   constructor(
     store: SqliteSchedulerTaskStore,
-    eventQueue: AsyncQueue<any>,
     config?: TaskSchedulerConfig,
     adapterRegistry?: AdapterRegistry,
   ) {
     this.store = store;
-    this.eventQueue = eventQueue;
     this.adapterRegistry = adapterRegistry ?? null;
     this.interval = config?.interval ?? DEFAULT_INTERVAL;
     this.enabled = config?.enabled ?? true;
@@ -84,6 +80,10 @@ export class TaskScheduler {
 
   /** Process all due tasks now. Exposed for testing/manual triggers. */
   async tick(): Promise<void> {
+    if (this.ticking) {
+      return;
+    }
+    this.ticking = true;
     let fired = 0;
     let skipped = 0;
     try {
@@ -104,6 +104,8 @@ export class TaskScheduler {
       }
     } catch (e) {
       console.error("[TaskScheduler] Error during tick:", e);
+    } finally {
+      this.ticking = false;
     }
     if (fired > 0 || skipped > 0) {
       console.log(`[TaskScheduler] Tick complete: ${fired} fired, ${skipped} skipped.`);
@@ -189,7 +191,7 @@ function buildReminderMessage(task: SchedulerTask): string {
   };
 
   const label = typeLabel[task.type] ?? "任务";
-  lines.push(`⏰ ${label}：${task.title}`);
+  lines.push(`[${label}] ${task.title}`);
 
   if (task.description) {
     lines.push(task.description);
@@ -203,7 +205,7 @@ function buildReminderMessage(task: SchedulerTask): string {
   if (task.plan.length > 0) {
     lines.push(`计划进度 (步骤 ${task.currentStep + 1}/${task.plan.length})：`);
     for (let i = 0; i < task.plan.length; i++) {
-      const marker = i === task.currentStep ? "▶" : " ";
+      const marker = i === task.currentStep ? ">" : " ";
       const step = task.plan[i];
       lines.push(`  ${marker} [${step.status}] ${step.description}`);
     }

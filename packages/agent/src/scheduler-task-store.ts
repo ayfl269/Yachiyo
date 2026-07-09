@@ -436,6 +436,7 @@ export class SqliteSchedulerTaskStore {
  *   - "Nh" / "Nm" / "Ns": N hours/minutes/seconds
  *   - "daily": every 24 hours
  *   - "weekly": every 7 days
+ *   - "monthly": every 1 month (calendar month)
  */
 export function computeNextFireAt(recurrence: string, from: Date): Date | null {
   const trimmed = recurrence.trim().toLowerCase();
@@ -454,6 +455,11 @@ export function computeNextFireAt(recurrence: string, from: Date): Date | null {
   }
   if (trimmed === "weekly") {
     return new Date(from.getTime() + 7 * 24 * 3600_000);
+  }
+  if (trimmed === "monthly") {
+    const d = new Date(from);
+    d.setMonth(d.getMonth() + 1);
+    return d;
   }
 
   return null;
