@@ -276,6 +276,12 @@ export {
 } from "./conversation-search-tool.js";
 export type { ConversationSearchToolContext, CreateConversationSearchToolOptions } from "./conversation-search-tool.js";
 
+// Ask user question tool
+export {
+  createAskUserTool,
+} from "./ask-user-tool.js";
+export type { AskUserToolContext } from "./ask-user-tool.js";
+
 // Image reference utilities
 export {
   normalizeAndDedupeStrings,
