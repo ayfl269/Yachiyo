@@ -7,7 +7,7 @@ export interface StarHandlerMetadata {
   handlerFullName: string;
   handlerName: string;
   handlerModulePath: string;
-  handler: (event: MessageEvent, ...args: any[]) => any;
+  handler: (event: MessageEvent, ...args: unknown[]) => unknown;
   eventFilters: HandlerFilter[];
   desc: string;
   extrasConfigs: Record<string, unknown>;

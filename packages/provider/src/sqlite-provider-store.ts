@@ -110,6 +110,43 @@ export interface StoredProviderSource {
   updatedAt: string;
 }
 
+// ── Database row types ──
+
+interface ProviderConfigRow {
+  id: string;
+  type: string;
+  config: string;
+  is_default: number;
+  is_fallback: number;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+interface McpServerConfigRow {
+  server_name: string;
+  config: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ProviderSourceRow {
+  id: string;
+  type: string;
+  provider_type: string;
+  provider: string;
+  key: string;
+  api_base: string;
+  enable: number;
+  extra_config: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface IdRow {
+  id: string;
+}
+
 // ── SqliteProviderStore ──
 
 export class SqliteProviderStore {
@@ -177,12 +214,12 @@ export class SqliteProviderStore {
   }
 
   getProviderConfig(id: string): StoredProviderConfig | null {
-    const row = this.db.prepare("SELECT * FROM provider_configs WHERE id = ?").get(id) as any;
+    const row = this.db.prepare("SELECT * FROM provider_configs WHERE id = ?").get(id) as ProviderConfigRow | undefined;
     return row ? this.rowToProviderConfig(row) : null;
   }
 
   getAllProviderConfigs(): StoredProviderConfig[] {
-    const rows = this.db.prepare("SELECT * FROM provider_configs ORDER BY sort_order, created_at").all() as any[];
+    const rows = this.db.prepare("SELECT * FROM provider_configs ORDER BY sort_order, created_at").all() as ProviderConfigRow[];
     return rows.map((r) => this.rowToProviderConfig(r));
   }
 
@@ -200,7 +237,7 @@ export class SqliteProviderStore {
   }
 
   getDefaultProviderId(): string | null {
-    const row = this.db.prepare("SELECT id FROM provider_configs WHERE is_default = 1 LIMIT 1").get() as any;
+    const row = this.db.prepare("SELECT id FROM provider_configs WHERE is_default = 1 LIMIT 1").get() as IdRow | undefined;
     return row?.id ?? null;
   }
 
@@ -217,7 +254,7 @@ export class SqliteProviderStore {
   }
 
   getFallbackProviderIds(): string[] {
-    const rows = this.db.prepare("SELECT id FROM provider_configs WHERE is_fallback = 1 ORDER BY sort_order").all() as any[];
+    const rows = this.db.prepare("SELECT id FROM provider_configs WHERE is_fallback = 1 ORDER BY sort_order").all() as IdRow[];
     return rows.map((r) => r.id);
   }
 
@@ -237,7 +274,7 @@ export class SqliteProviderStore {
   }
 
   getAllMcpServerConfigs(): StoredMcpServerConfig[] {
-    const rows = this.db.prepare("SELECT * FROM mcp_server_configs").all() as any[];
+    const rows = this.db.prepare("SELECT * FROM mcp_server_configs").all() as McpServerConfigRow[];
     return rows.map((r) => ({
       serverName: r.server_name,
       config: JSON.parse(r.config),
@@ -300,13 +337,13 @@ export class SqliteProviderStore {
 
   getProviderSource(id: string): StoredProviderSource | null {
     this.ensureProviderSourcesTable();
-    const row = this.db.prepare("SELECT * FROM provider_sources WHERE id = ?").get(id) as any;
+    const row = this.db.prepare("SELECT * FROM provider_sources WHERE id = ?").get(id) as ProviderSourceRow | undefined;
     return row ? this.rowToProviderSource(row) : null;
   }
 
   getAllProviderSources(): StoredProviderSource[] {
     this.ensureProviderSourcesTable();
-    const rows = this.db.prepare("SELECT * FROM provider_sources ORDER BY created_at").all() as any[];
+    const rows = this.db.prepare("SELECT * FROM provider_sources ORDER BY created_at").all() as ProviderSourceRow[];
     return rows.map((r) => this.rowToProviderSource(r));
   }
 
@@ -315,7 +352,7 @@ export class SqliteProviderStore {
     this.db.prepare("DELETE FROM provider_sources WHERE id = ?").run(id);
   }
 
-  private rowToProviderSource(row: any): StoredProviderSource {
+  private rowToProviderSource(row: ProviderSourceRow): StoredProviderSource {
     return {
       id: row.id,
       type: row.type,
@@ -332,7 +369,7 @@ export class SqliteProviderStore {
 
   // ── Helpers ──
 
-  private rowToProviderConfig(row: any): StoredProviderConfig {
+  private rowToProviderConfig(row: ProviderConfigRow): StoredProviderConfig {
     return {
       id: row.id,
       type: row.type,

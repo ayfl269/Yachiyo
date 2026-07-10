@@ -14,7 +14,7 @@
 
 import type { SqliteSchedulerTaskStore, SchedulerTask } from "@yachiyo/agent/scheduler-task-store.js";
 import type { AdapterRegistry } from "@yachiyo/platform/registry.js";
-import { ComponentType } from "@yachiyo/message/components.js";
+import { ComponentType, type PlainComponent, type MessageComponent } from "@yachiyo/message/components.js";
 
 export interface TaskSchedulerConfig {
   /** Check interval in milliseconds. Default: 30000 (30s). */
@@ -146,7 +146,7 @@ export class TaskScheduler {
     }
 
     // Build message component
-    const components = [{
+    const components: PlainComponent[] = [{
       type: ComponentType.Plain,
       text: messageText,
       toDict() { return { type: "text", data: { text: messageText } }; },
@@ -160,7 +160,7 @@ export class TaskScheduler {
     };
 
     try {
-      const delivered = await adapter.sendProactiveMessage(target, components as any);
+      const delivered = await adapter.sendProactiveMessage(target, components as MessageComponent[]);
       if (delivered) {
         console.log(`[TaskScheduler] Task "${task.title}" (${task.id}) delivered to ${target.umo}.`);
       } else {

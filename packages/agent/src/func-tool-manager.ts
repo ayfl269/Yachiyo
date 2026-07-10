@@ -251,7 +251,8 @@ export class FunctionToolManager {
     }
   }
 
-  private async terminateMcpClient(name: string): Promise<void> {
+  /** Terminate an MCP client and remove its tools. Public for dashboard use. */
+  async terminateMcpClient(name: string): Promise<void> {
     const runtime = this.mcpServerRuntime.get(name);
     if (runtime) {
       try {

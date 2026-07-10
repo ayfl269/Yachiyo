@@ -398,7 +398,7 @@ export class MCPClient {
           { capabilities: {} }
         );
         await client.connect(transport);
-        this.session = wrapMcpClientAsSession(client as any);
+        this.session = wrapMcpClientAsSession(client as unknown as McpSdkClient);
       } else {
         // SSE transport
         const { SSEClientTransport } = await import(
@@ -413,7 +413,7 @@ export class MCPClient {
           { capabilities: {} }
         );
         await client.connect(transport);
-        this.session = wrapMcpClientAsSession(client as any);
+        this.session = wrapMcpClientAsSession(client as unknown as McpSdkClient);
       }
     } catch (e) {
       throw new Error(
@@ -448,7 +448,7 @@ export class MCPClient {
         { capabilities: {} }
       );
       await client.connect(transport);
-      this.session = wrapMcpClientAsSession(client as any);
+      this.session = wrapMcpClientAsSession(client as unknown as McpSdkClient);
     } catch (e) {
       throw new Error(
         `Failed to connect to MCP server via stdio: ${e}. ` +

@@ -1,5 +1,5 @@
 import { BaseAgentRunHooks } from "@yachiyo/agent/hooks.js";
-import type { ContextWrapper } from "@yachiyo/agent/types.js";
+import type { ContextWrapper, CallToolResult } from "@yachiyo/agent/types.js";
 import type { LLMResponse } from "@yachiyo/agent/types.js";
 import type { FunctionTool } from "@yachiyo/agent/tool.js";
 import type { MessageEvent } from "@yachiyo/message/event.js";
@@ -43,7 +43,7 @@ export class MainAgentHooks implements BaseAgentRunHooks<MessageEvent> {
     runContext: ContextWrapper<MessageEvent>,
     tool: FunctionTool,
     toolArgs: Record<string, unknown>,
-    toolResult: any,
+    toolResult: CallToolResult | null,
   ): Promise<void> {
     const { EventType } = await import("@yachiyo/plugin/event-type.js");
     runContext.context.clearResult();

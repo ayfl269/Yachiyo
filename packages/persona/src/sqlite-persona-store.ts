@@ -40,6 +40,30 @@ export const PERSONA_MIGRATIONS: Migration[] = [
   },
 ];
 
+// ── Database row types ──
+
+interface PersonaRow {
+  id: string;
+  name: string;
+  prompt: string;
+  begin_dialogs: string | null;
+  mood_imitation_dialogs: string | null;
+  tools: string | null;
+  skills: string | null;
+  custom_error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface PersonaFolderRow {
+  id: string;
+  name: string;
+  parent_id: string | null;
+  description: string | null;
+  sort_order: number;
+  created_at: string;
+}
+
 // ── SqlitePersonaStore ──
 
 export class SqlitePersonaStore extends PersonaStore {
@@ -51,7 +75,7 @@ export class SqlitePersonaStore extends PersonaStore {
   }
 
   async getPersona(personaId: string): Promise<Personality | null> {
-    const row = this.db.prepare("SELECT * FROM personas WHERE id = ?").get(personaId) as any;
+    const row = this.db.prepare("SELECT * FROM personas WHERE id = ?").get(personaId) as PersonaRow | undefined;
     return row ? this.rowToPersonality(row) : null;
   }
 
@@ -78,7 +102,7 @@ export class SqlitePersonaStore extends PersonaStore {
   }
 
   async getAllPersonas(): Promise<Map<string, Personality>> {
-    const rows = this.db.prepare("SELECT * FROM personas").all() as any[];
+    const rows = this.db.prepare("SELECT * FROM personas").all() as PersonaRow[];
     const map = new Map<string, Personality>();
     for (const row of rows) {
       map.set(row.id, this.rowToPersonality(row));
@@ -87,7 +111,7 @@ export class SqlitePersonaStore extends PersonaStore {
   }
 
   async getFolder(folderId: string): Promise<PersonaFolder | null> {
-    const row = this.db.prepare("SELECT * FROM persona_folders WHERE id = ?").get(folderId) as any;
+    const row = this.db.prepare("SELECT * FROM persona_folders WHERE id = ?").get(folderId) as PersonaFolderRow | undefined;
     return row ? this.rowToFolder(row) : null;
   }
 
@@ -104,7 +128,7 @@ export class SqlitePersonaStore extends PersonaStore {
   }
 
   async getAllFolders(): Promise<Map<string, PersonaFolder>> {
-    const rows = this.db.prepare("SELECT * FROM persona_folders ORDER BY sort_order").all() as any[];
+    const rows = this.db.prepare("SELECT * FROM persona_folders ORDER BY sort_order").all() as PersonaFolderRow[];
     const map = new Map<string, PersonaFolder>();
     for (const row of rows) {
       map.set(row.id, this.rowToFolder(row));
@@ -114,7 +138,7 @@ export class SqlitePersonaStore extends PersonaStore {
 
   // ── Helpers ──
 
-  private rowToPersonality(row: any): Personality {
+  private rowToPersonality(row: PersonaRow): Personality {
     return {
       name: row.name,
       prompt: row.prompt,
@@ -126,7 +150,7 @@ export class SqlitePersonaStore extends PersonaStore {
     };
   }
 
-  private rowToFolder(row: any): PersonaFolder {
+  private rowToFolder(row: PersonaFolderRow): PersonaFolder {
     return {
       id: row.id,
       name: row.name,

@@ -109,6 +109,11 @@ export class ProviderManager {
     this.sqliteStore = store;
   }
 
+  /** Expose the SQLite store for dashboard/management access. */
+  getStore(): SqliteProviderStore | undefined {
+    return this.sqliteStore;
+  }
+
   registerProvider(provider: Provider): void {
     this.providerInsts.push(provider);
     const id = this.extractId(provider.providerConfig);

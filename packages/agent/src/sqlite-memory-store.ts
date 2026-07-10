@@ -237,6 +237,7 @@ export class SqliteMemoryStore {
     scopeId?: string;
     priority?: number;
     expiresAt?: string | null;
+    source?: string;
   }): void {
     const now = new Date().toISOString();
     const memoryType = options?.memoryType ?? "long_term";

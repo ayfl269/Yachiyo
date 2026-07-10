@@ -33,7 +33,7 @@ import type { AsyncQueue } from "@yachiyo/common/async-queue.js";
 import type { MessageEvent } from "@yachiyo/message/event.js";
 import type { ProviderManager } from "@yachiyo/provider/manager.js";
 import type { ConversationManager } from "@yachiyo/conversation/manager.js";
-import type { PersonaManager } from "@yachiyo/persona/manager.js";
+import type { PersonaManager, Personality } from "@yachiyo/persona/manager.js";
 import type { KnowledgeBaseManager } from "@yachiyo/knowledge-base/manager.js";
 import type { SessionLockManager } from "@yachiyo/pipeline/session-lock.js";
 import type { SessionServiceManager } from "@yachiyo/pipeline/stages/session-status-check.js";
@@ -43,11 +43,12 @@ import type { EventBus } from "@yachiyo/pipeline/event-bus.js";
 import type { PipelineScheduler } from "@yachiyo/pipeline/scheduler.js";
 import type { AdapterRegistry } from "@yachiyo/platform/registry.js";
 import type { SqliteAdapterStore } from "@yachiyo/platform/sqlite-adapter-store.js";
+import type { AdapterConfigBase } from "@yachiyo/platform/config.js";
 import type { DatabaseManager } from "@yachiyo/common/database.js";
 import type { FunctionToolManager } from "@yachiyo/agent/func-tool-manager.js";
 import type { MemoryConsolidator } from "@yachiyo/agent/memory-consolidator.js";
-import type { SqliteMemoryStore } from "@yachiyo/agent/sqlite-memory-store.js";
-import type { SqliteSchedulerTaskStore } from "@yachiyo/agent/scheduler-task-store.js";
+import type { SqliteMemoryStore, MemoryEntry, ConversationIndexEntry, MemoryType, MemoryScope } from "@yachiyo/agent/sqlite-memory-store.js";
+import type { SqliteSchedulerTaskStore, SchedulerTask, TaskType, TaskStatus } from "@yachiyo/agent/scheduler-task-store.js";
 import type { SkillManager } from "@yachiyo/skill/index.js";
 import { safeFetch } from "@yachiyo/common/ssrf-guard.js";
 import { proxyManager } from "@yachiyo/agent/proxy-manager.js";
@@ -74,6 +75,38 @@ export interface BootstrapContext {
   memoryStore?: SqliteMemoryStore;
   dashboardServer?: DashboardServer;
   shutdown: () => Promise<void>;
+}
+
+/**
+ * Runtime shape of a provider config stored in `ProviderManager.providerConfigs`.
+ *
+ * The underlying storage type is `Record<string, unknown>` (an index
+ * signature), so dashboard code that needs to read specific fields must
+ * narrow through this interface instead of casting to `any`.
+ */
+interface ProviderRuntimeConfig {
+  type?: string;
+  model?: string;
+  apiKey?: string;
+  baseUrl?: string;
+  provider_source_id?: string;
+  provider_type?: string;
+  modalities?: string[];
+  custom_extra_body?: Record<string, unknown>;
+  max_context_tokens?: number;
+  reasoning?: boolean;
+  [key: string]: unknown;
+}
+
+/** Minimal entry shape returned by adm-zip's `zip.getEntries()`. */
+interface ZipEntry {
+  name: string;
+  entryName: string;
+}
+
+/** Minimal zip reader shape used by skill-parsing helpers. */
+interface ZipReader {
+  readAsText(entry: unknown): string;
 }
 
 export function isPathSafe(basePath: string, targetPath: string): boolean {
@@ -888,7 +921,7 @@ export class DashboardServer {
         res.end(JSON.stringify({ error: "Missing config ID" }));
         return;
       }
-      this.ctx.configManager.updateConfig(config as any);
+      this.ctx.configManager.updateConfig(config as unknown as Parameters<typeof this.ctx.configManager.updateConfig>[0]);
       res.writeHead(200);
       res.end(JSON.stringify({ success: true, config }));
       return;
@@ -976,9 +1009,9 @@ export class DashboardServer {
       }
       try {
         const { createChatProvider } = await import("@yachiyo/provider/factory.js");
-        const prov = createChatProvider(type as any, config as any);
+        const prov = createChatProvider(type as unknown as Parameters<typeof createChatProvider>[0], config as unknown as Parameters<typeof createChatProvider>[1]);
         const response = await prov.textChat({
-          contexts: [{ role: "user", content: "hello" } as any]
+          contexts: [{ role: "user" as const, content: "hello" }]
         });
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, message: response.completionText || "Connection success" }));
@@ -1017,7 +1050,7 @@ export class DashboardServer {
     // 5. GET /api/providers
     if (pathname === "/api/providers" && req.method === "GET") {
       const providerConfigsMap = this.ctx.providerManager.providerConfigs;
-      const providersList: any[] = [];
+      const providersList: Array<Record<string, unknown>> = [];
       const disabledIds = this.ctx.providerManager.getDisabledIds();
       for (const [id, config] of providerConfigsMap.entries()) {
         providersList.push({
@@ -1131,7 +1164,7 @@ export class DashboardServer {
 
     // 11. GET /api/mcp
     if (pathname === "/api/mcp" && req.method === "GET") {
-      const sqliteStore = (this.ctx.providerManager as any).sqliteStore;
+      const sqliteStore = this.ctx.providerManager.getStore();
       const mcpConfigs = sqliteStore ? sqliteStore.getAllMcpServerConfigs() : [];
       res.writeHead(200);
       res.end(JSON.stringify(mcpConfigs));
@@ -1149,7 +1182,7 @@ export class DashboardServer {
         return;
       }
 
-      const sqliteStore = (this.ctx.providerManager as any).sqliteStore;
+      const sqliteStore = this.ctx.providerManager.getStore();
       if (sqliteStore) {
         sqliteStore.saveMcpServerConfig({
           serverName,
@@ -1173,7 +1206,7 @@ export class DashboardServer {
         return;
       }
 
-      const sqliteStore = (this.ctx.providerManager as any).sqliteStore;
+      const sqliteStore = this.ctx.providerManager.getStore();
       if (sqliteStore) {
         sqliteStore.deleteMcpServerConfig(serverName);
       }
@@ -1337,7 +1370,7 @@ export class DashboardServer {
     // 16. Personas CRUD
     if (pathname === "/api/personas" && req.method === "GET") {
       const personasMap = await this.ctx.personaManager.getAllPersonas();
-      const list: any[] = [];
+      const list: Array<Record<string, unknown>> = [];
       for (const [id, p] of personasMap.entries()) {
         list.push({ id, ...p });
       }
@@ -1371,7 +1404,7 @@ export class DashboardServer {
         tools: tools || null,
         skills: skills || null,
         customErrorMessage: customErrorMessage || null,
-      } as any);
+      } as unknown as Personality);
       res.writeHead(200);
       res.end(JSON.stringify({ success: true }));
       return;
@@ -1438,7 +1471,7 @@ export class DashboardServer {
       }
       const docs = this.ctx.knowledgeBaseManager.getDocuments(kbId);
       res.writeHead(200);
-      res.end(JSON.stringify({ ...kb, doc_count: docs.length, chunk_count: docs.reduce((s: number, d: any) => s + (d.chunkCount || 0), 0) }));
+      res.end(JSON.stringify({ ...kb, doc_count: docs.length, chunk_count: docs.reduce((s: number, d: { chunkCount?: number }) => s + (d.chunkCount || 0), 0) }));
       return;
     }
 
@@ -1577,14 +1610,15 @@ export class DashboardServer {
         const providerType = url.searchParams.get("provider_type") || "";
         const types = providerType.split(",").filter(Boolean);
         const providerConfigsMap = this.ctx.providerManager.providerConfigs;
-        const providers: any[] = [];
+        const providers: Array<Record<string, unknown>> = [];
         for (const [id, config] of providerConfigsMap.entries()) {
-          const pType = (config as any).type || "";
+          const cfg = config as ProviderRuntimeConfig;
+          const pType = cfg.type || "";
           if (types.length === 0 || types.includes(pType)) {
             providers.push({
               id,
               provider_type: pType,
-              model: (config as any).model || "",
+              model: cfg.model || "",
             });
           }
         }
@@ -1600,7 +1634,7 @@ export class DashboardServer {
     // 16.16 GET /api/tools/list — List all function tools
     if (pathname === "/api/tools/list" && req.method === "GET") {
       try {
-        const toolMgr = this.ctx.toolManager as any;
+        const toolMgr = this.ctx.toolManager;
         const mcpClientDict = toolMgr?.mcpClientDict as Map<string, any> | undefined;
         const tools: Array<{ name: string; description: string; origin: string; active: boolean; readonly: boolean }> = [];
 
@@ -1609,10 +1643,11 @@ export class DashboardServer {
           for (const fnTool of toolMgr.funcList) {
             // MCP tools in funcList carry mcpServerName — use it for origin
             const isMcp = "mcpServerName" in fnTool;
+            const mcpName = isMcp ? (fnTool as { mcpServerName?: string }).mcpServerName : undefined;
             tools.push({
               name: fnTool.name || "",
               description: fnTool.description || "",
-              origin: isMcp ? `mcp:${fnTool.mcpServerName}` : (fnTool.origin || "builtin"),
+              origin: mcpName ? `mcp:${mcpName}` : "builtin",
               active: fnTool.active !== false,
               readonly: false,
             });
@@ -1657,7 +1692,7 @@ export class DashboardServer {
         status: a.status,
         isRunning: a.isRunning,
         meta: a.meta(),
-        config: (a as any).config || {},
+        config: (a as { config?: Record<string, unknown> }).config || {},
       }));
       res.writeHead(200);
       res.end(JSON.stringify(list));
@@ -1675,7 +1710,7 @@ export class DashboardServer {
       try {
         const fullConfig = { type, id, ...config };
         const adapter = await this.ctx.adapterRegistry.addAndStart(type, fullConfig, this.ctx.eventQueue);
-        this.ctx.adapterStore?.save(fullConfig as any);
+        this.ctx.adapterStore?.save(fullConfig as AdapterConfigBase);
         res.writeHead(200);
         res.end(JSON.stringify({
           success: true,
@@ -1686,7 +1721,7 @@ export class DashboardServer {
             status: adapter.status,
             isRunning: adapter.isRunning,
             meta: adapter.meta(),
-            config: (adapter as any).config || {},
+            config: (adapter as { config?: Record<string, unknown> }).config || {},
           }
         }));
       } catch (err: unknown) {
@@ -1725,10 +1760,10 @@ export class DashboardServer {
         // Stop & remove old adapter (ignore errors)
         try {
           await this.ctx.adapterRegistry.removeAdapter(id);
-        } catch (removeErr: any) {
-          console.warn(`[DashboardServer] Warning: failed to stop old adapter ${id}:`, removeErr.message);
+        } catch (removeErr: unknown) {
+          console.warn(`[DashboardServer] Warning: failed to stop old adapter ${id}:`, removeErr instanceof Error ? removeErr.message : removeErr);
           // Force remove from map even if stop failed
-          (this.ctx.adapterRegistry as any).adapters.delete(id);
+          (this.ctx.adapterRegistry as unknown as { adapters: Map<string, unknown> }).adapters.delete(id);
         }
         // Create new adapter with updated config
         const fullConfig = { ...config, type, id };
@@ -1736,7 +1771,7 @@ export class DashboardServer {
           type, fullConfig, this.ctx.eventQueue,
         );
         // 持久化到数据库
-        this.ctx.adapterStore?.save(fullConfig as any);
+        this.ctx.adapterStore?.save(fullConfig as AdapterConfigBase);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ success: true, adapter: { id: adapter.meta().id, status: adapter.status } }));
       } catch (err: unknown) {
@@ -1759,9 +1794,9 @@ export class DashboardServer {
           res.end(JSON.stringify({ error: "Adapter not found" }));
           return;
         }
-        if (typeof (adapter as any).getLoginStatus === "function") {
+        if (typeof (adapter as { getLoginStatus?: unknown }).getLoginStatus === "function") {
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify((adapter as any).getLoginStatus()));
+          res.end(JSON.stringify((adapter as unknown as { getLoginStatus: () => unknown }).getLoginStatus()));
         } else {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ loggedIn: true, qrStatus: null, qrImgContent: null, qrError: null }));
@@ -1786,7 +1821,7 @@ export class DashboardServer {
           adapter.setStatus("stopped");
           // 更新 DB 中的 enabled 标记
           if (savedConfig) {
-            this.ctx.adapterStore?.save({ ...savedConfig, enabled: false } as any);
+            this.ctx.adapterStore?.save({ ...savedConfig, enabled: false } as AdapterConfigBase);
           }
         } else {
           // 启用：如果实例存在则重启，否则从 DB 配置重新创建
@@ -1797,13 +1832,13 @@ export class DashboardServer {
               adapter.setStatus("error");
             });
             if (savedConfig) {
-              this.ctx.adapterStore?.save({ ...savedConfig, enabled: true } as any);
+              this.ctx.adapterStore?.save({ ...savedConfig, enabled: true } as AdapterConfigBase);
             }
           } else if (savedConfig) {
             // 实例不存在，从 DB 重新创建并启动
             savedConfig.enabled = true;
-            await this.ctx.adapterRegistry.addAndStart(savedConfig.type, savedConfig as any, this.ctx.eventQueue);
-            this.ctx.adapterStore?.save(savedConfig as any);
+            await this.ctx.adapterRegistry.addAndStart(savedConfig.type, savedConfig as AdapterConfigBase, this.ctx.eventQueue);
+            this.ctx.adapterStore?.save(savedConfig as AdapterConfigBase);
           } else {
             res.writeHead(400);
             res.end(JSON.stringify({ error: "No saved config for this adapter" }));
@@ -1947,7 +1982,7 @@ export class DashboardServer {
           // would leak into access logs, browser history, and Referer headers.
           // Use POST /api/providers/models with a JSON body for the "type a new
           // key and fetch models" scenario instead.
-          const sqliteStore = (this.ctx.providerManager as any).sqliteStore;
+          const sqliteStore = this.ctx.providerManager.getStore();
           let providerConfig = this.ctx.providerManager.getProviderConfigById(sourceId, true, true);
 
           if (!providerConfig && sqliteStore) {
@@ -2024,9 +2059,9 @@ export class DashboardServer {
     if (pathname === "/api/config/provider/template" && req.method === "GET") {
       try {
         const configTemplate = this.buildProviderTemplates();
-        const sqliteStore = (this.ctx.providerManager as any).sqliteStore;
-        let providerSources: any[] = [];
-        let providers: any[] = [];
+        const sqliteStore = this.ctx.providerManager.getStore();
+        let providerSources: Array<Record<string, unknown>> = [];
+        let providers: Array<Record<string, unknown>> = [];
 
         if (sqliteStore) {
           try {
@@ -2052,20 +2087,21 @@ export class DashboardServer {
         const providerConfigsMap = this.ctx.providerManager.providerConfigs;
         const disabledIds = this.ctx.providerManager.getDisabledIds();
         for (const [id, config] of providerConfigsMap.entries()) {
+          const cfg = config as ProviderRuntimeConfig;
           providers.push({
             id,
             enable: !disabledIds.includes(id),
-            model: (config as any).model || "",
-            provider_source_id: (config as any).provider_source_id || "",
-            provider_type: (config as any).provider_type || this.guessProviderTypeFromConfig(config),
-            type: (config as any).type || "",
-            modalities: (config as any).modalities || [],
-            custom_extra_body: (config as any).custom_extra_body || {},
-            max_context_tokens: (config as any).max_context_tokens || 0,
-            reasoning: (config as any).reasoning || false,
+            model: cfg.model || "",
+            provider_source_id: cfg.provider_source_id || "",
+            provider_type: cfg.provider_type || this.guessProviderTypeFromConfig(config),
+            type: cfg.type || "",
+            modalities: cfg.modalities || [],
+            custom_extra_body: cfg.custom_extra_body || {},
+            max_context_tokens: cfg.max_context_tokens || 0,
+            reasoning: cfg.reasoning || false,
             // Masked key — real key only returned via reveal_key endpoint
-            key: maskSecret((config as any).apiKey),
-            api_base: (config as any).baseUrl || "",
+            key: maskSecret(cfg.apiKey),
+            api_base: cfg.baseUrl || "",
           });
         }
 
@@ -2128,7 +2164,7 @@ export class DashboardServer {
           this.loginAttempts.set(rlKey, { count: 1, firstAttemptAt: now });
         }
 
-        const sqliteStore = (this.ctx.providerManager as any).sqliteStore;
+        const sqliteStore = this.ctx.providerManager.getStore();
         let realKey = "";
         if (sqliteStore) {
           try {
@@ -2141,8 +2177,11 @@ export class DashboardServer {
         // 也查找 provider config 中的 apiKey（非聊天类型可能直接存储在 config 中）
         if (!realKey) {
           const config = this.ctx.providerManager.providerConfigs.get(id);
-          if (config && (config as any).apiKey) {
-            realKey = (config as any).apiKey as string;
+          if (config) {
+            const cfg = config as ProviderRuntimeConfig;
+            if (cfg.apiKey) {
+              realKey = cfg.apiKey as string;
+            }
           }
         }
         // no-store prevents browsers/proxies from caching the key response.
@@ -2172,7 +2211,7 @@ export class DashboardServer {
           return;
         }
 
-        const sqliteStore = (this.ctx.providerManager as any).sqliteStore;
+        const sqliteStore = this.ctx.providerManager.getStore();
         if (!sqliteStore) {
           res.writeHead(500);
           res.end(JSON.stringify({ status: "error", message: "数据库未初始化" }));
@@ -2185,9 +2224,10 @@ export class DashboardServer {
           // 同时更新关联的 provider 的 provider_source_id
           const providerConfigsMap = this.ctx.providerManager.providerConfigs;
           for (const [pid, pconfig] of providerConfigsMap.entries()) {
-            if ((pconfig as any).provider_source_id === original_id) {
-              (pconfig as any).provider_source_id = config.id;
-              await this.ctx.providerManager.updateProvider(pid, pconfig as any);
+            const pcfg = pconfig as ProviderRuntimeConfig;
+            if (pcfg.provider_source_id === original_id) {
+              pcfg.provider_source_id = config.id;
+              await this.ctx.providerManager.updateProvider(pid, pcfg as unknown as Parameters<typeof this.ctx.providerManager.updateProvider>[1]);
             }
           }
         }
@@ -2248,7 +2288,7 @@ export class DashboardServer {
           return;
         }
 
-        const sqliteStore = (this.ctx.providerManager as any).sqliteStore;
+        const sqliteStore = this.ctx.providerManager.getStore();
         if (!sqliteStore) {
           res.writeHead(500);
           res.end(JSON.stringify({ status: "error", message: "数据库未初始化" }));
@@ -2259,7 +2299,7 @@ export class DashboardServer {
         const providerConfigsMap = this.ctx.providerManager.providerConfigs;
         const idsToDelete: string[] = [];
         for (const [pid, pconfig] of providerConfigsMap.entries()) {
-          if ((pconfig as any).provider_source_id === id) {
+          if ((pconfig as ProviderRuntimeConfig).provider_source_id === id) {
             idsToDelete.push(pid);
           }
         }
@@ -2292,7 +2332,7 @@ export class DashboardServer {
 
         // 查找关联的 provider source 以获取连接信息
         // 注意：source.type 仅作为默认值，用户显式指定的 config.type 优先
-        const sqliteStore = (this.ctx.providerManager as any).sqliteStore;
+        const sqliteStore = this.ctx.providerManager.getStore();
         let sourceType = providerConfig.type || "";
         let apiKey = providerConfig.key || "";
         let apiBase = providerConfig.api_base || "";
@@ -2339,7 +2379,7 @@ export class DashboardServer {
           }
         }
 
-        await this.ctx.providerManager.loadProvider(loadConfig as any);
+        await this.ctx.providerManager.loadProvider(loadConfig as unknown as Parameters<typeof this.ctx.providerManager.loadProvider>[0]);
 
         if (providerConfig.enable === false) {
           this.ctx.providerManager.setDisabled(providerConfig.id);
@@ -2390,7 +2430,7 @@ export class DashboardServer {
 
         // 查找关联的 provider source 以获取连接信息
         // 注意：source.type 仅作为默认值，用户显式指定的 config.type 优先
-        const sqliteStore = (this.ctx.providerManager as any).sqliteStore;
+        const sqliteStore = this.ctx.providerManager.getStore();
         let sourceType = config.type || "";
         let apiKey = config.key || "";
         let apiBase = config.api_base || "";
@@ -2415,7 +2455,7 @@ export class DashboardServer {
           baseUrl: apiBase,
         };
 
-        await this.ctx.providerManager.updateProvider(id, loadConfig as any);
+        await this.ctx.providerManager.updateProvider(id, loadConfig as unknown as Parameters<typeof this.ctx.providerManager.updateProvider>[1]);
 
         if (config.enable === false) {
           this.ctx.providerManager.setDisabled(config.id || id);
@@ -2462,7 +2502,7 @@ export class DashboardServer {
 
         // 使用完整配置（含实际模型名）创建临时 provider 进行测试，确保测试结果反映真实对话行为
         const { createChatProvider } = await import("@yachiyo/provider/factory.js");
-        const prov = createChatProvider(type as any, { apiKey, baseUrl, model, modalities: providerConfig.modalities || [] } as any);
+        const prov = createChatProvider(type as unknown as Parameters<typeof createChatProvider>[0], { apiKey, baseUrl, model, modalities: providerConfig.modalities || [] } as unknown as Parameters<typeof createChatProvider>[1]);
 
         // 优先使用流式调用测试（与实际对话一致），配置禁用或不支持流式时回退到非流式
         const config = this.ctx.configManager.getActiveConfig();
@@ -2471,7 +2511,7 @@ export class DashboardServer {
         if (modelStreaming && prov.textChatStream) {
           let received = false;
           for await (const chunk of prov.textChatStream({
-            contexts: [{ role: "user", content: "hello" } as any],
+            contexts: [{ role: "user" as const, content: "hello" }],
           })) {
             if (chunk.completionText || chunk.reasoningContent || chunk.toolsCallName) {
               received = true;
@@ -2481,7 +2521,7 @@ export class DashboardServer {
           if (!received) throw new Error("流式响应未返回有效内容");
         } else {
           await prov.textChat({
-            contexts: [{ role: "user", content: "hello" } as any],
+            contexts: [{ role: "user" as const, content: "hello" }],
           });
         }
 
@@ -2630,12 +2670,12 @@ export class DashboardServer {
     // 30. GET /api/tools/mcp/servers — Enhanced MCP server list with runtime info
     if (pathname === "/api/tools/mcp/servers" && req.method === "GET") {
       try {
-        const sqliteStore = (this.ctx.providerManager as any).sqliteStore;
+        const sqliteStore = this.ctx.providerManager.getStore();
         const mcpConfigs = sqliteStore ? sqliteStore.getAllMcpServerConfigs() : [];
-        const toolMgr = this.ctx.toolManager as any;
-        const mcpClientDict = toolMgr?.mcpClientDict as Map<string, any> | undefined;
+        const toolMgr = this.ctx.toolManager;
+        const mcpClientDict = toolMgr?.mcpClientDict as unknown as ReadonlyMap<string, { active?: boolean; tools?: Array<{ name: string }>; serverErrLogs?: unknown[] }> | undefined;
 
-        const servers = mcpConfigs.map((cfg: any) => {
+        const servers = mcpConfigs.map((cfg) => {
           const client = mcpClientDict?.get(cfg.serverName);
           return {
             name: cfg.serverName,
@@ -2683,7 +2723,7 @@ export class DashboardServer {
       try {
         const body = await this.readBody(req);
         const { serverName, config, active, oldName } = JSON.parse(body);
-        const sqliteStore = (this.ctx.providerManager as any).sqliteStore;
+        const sqliteStore = this.ctx.providerManager.getStore();
 
         if (oldName && oldName !== serverName && sqliteStore) {
           sqliteStore.deleteMcpServerConfig(oldName);
@@ -2700,7 +2740,7 @@ export class DashboardServer {
 
         // Handle active/inactive toggle
         if (typeof active === "boolean") {
-          const toolMgr = this.ctx.toolManager as any;
+          const toolMgr = this.ctx.toolManager;
           if (active) {
             await toolMgr?.enableMcpServer?.(serverName, config || {});
           } else {
@@ -2722,9 +2762,9 @@ export class DashboardServer {
       try {
         const body = await this.readBody(req);
         const { serverName } = JSON.parse(body);
-        const sqliteStore = (this.ctx.providerManager as any).sqliteStore;
+        const sqliteStore = this.ctx.providerManager.getStore();
         if (sqliteStore) sqliteStore.deleteMcpServerConfig(serverName);
-        const toolMgr = this.ctx.toolManager as any;
+        const toolMgr = this.ctx.toolManager;
         await toolMgr?.terminateMcpClient?.(serverName);
         res.writeHead(200);
         res.end(JSON.stringify({ success: true }));
@@ -2770,7 +2810,7 @@ export class DashboardServer {
             "Content-Type": "application/zip",
             "Content-Disposition": `attachment; filename="${skillName}.zip"`,
           });
-          const archive = (Archiver as any).default("zip", { zlib: { level: 9 } });
+          const archive = (Archiver as { default: (type: string, opts?: Record<string, unknown>) => { pipe: (dest: ServerResponse) => void; directory: (path: string, flag: boolean) => void; finalize: () => Promise<void> } }).default("zip", { zlib: { level: 9 } });
           archive.pipe(res);
           archive.directory(skillPath, false);
           await archive.finalize();
@@ -2809,7 +2849,7 @@ export class DashboardServer {
         }
         const dirPath = join(skill.path, subPath);
         const entries = await readdir(dirPath, { withFileTypes: true });
-        const files = entries.map((e: any) => ({
+        const files = entries.map((e: { name: string; isDirectory: () => boolean }) => ({
           name: e.name,
           isDirectory: e.isDirectory(),
           path: subPath ? `${subPath}/${e.name}` : e.name,
@@ -2840,12 +2880,12 @@ export class DashboardServer {
         const scope = url.searchParams.get("scope") || undefined;
         const scopeId = url.searchParams.get("scope_id") || undefined;
 
-        const filterOptions: any = {};
-        if (memoryType) filterOptions.memoryType = memoryType;
-        if (scope) filterOptions.scope = scope;
+        const filterOptions: { memoryType?: MemoryType; scope?: MemoryScope; scopeId?: string } = {};
+        if (memoryType) filterOptions.memoryType = memoryType as MemoryType;
+        if (scope) filterOptions.scope = scope as MemoryScope;
         if (scopeId) filterOptions.scopeId = scopeId;
 
-        let memories: any[];
+        let memories: MemoryEntry[];
         if (query) {
           memories = memoryStore.search(query, limit, filterOptions);
         } else {
@@ -2886,9 +2926,9 @@ export class DashboardServer {
           res.end(JSON.stringify({ error: "Missing key" }));
           return;
         }
-        const options: any = {};
-        if (memory_type) options.memoryType = memory_type;
-        if (scope) options.scope = scope;
+        const options: { memoryType?: MemoryType; scope?: MemoryScope; scopeId?: string; priority?: number; expiresAt?: string | null } = {};
+        if (memory_type) options.memoryType = memory_type as MemoryType;
+        if (scope) options.scope = scope as MemoryScope;
         if (scope_id) options.scopeId = scope_id;
         if (priority !== undefined) options.priority = priority;
         if (expires_at !== undefined) options.expiresAt = expires_at;
@@ -2922,9 +2962,9 @@ export class DashboardServer {
           res.end(JSON.stringify({ error: "Missing search query" }));
           return;
         }
-        const filterOptions: any = {};
-        if (memoryType) filterOptions.memoryType = memoryType;
-        if (scope) filterOptions.scope = scope;
+        const filterOptions: { memoryType?: MemoryType; scope?: MemoryScope; scopeId?: string } = {};
+        if (memoryType) filterOptions.memoryType = memoryType as MemoryType;
+        if (scope) filterOptions.scope = scope as MemoryScope;
         if (scopeId) filterOptions.scopeId = scopeId;
 
         const memories = memoryStore.search(query, limit, filterOptions);
@@ -3074,7 +3114,7 @@ export class DashboardServer {
         }
         const limit = parseInt(url.searchParams.get("limit") || "50");
         const query = url.searchParams.get("search") || "";
-        let indices: any[];
+        let indices: ConversationIndexEntry[];
         if (query) {
           indices = memoryStore.searchConversationIndices(query, limit);
         } else {
@@ -3221,12 +3261,12 @@ export class DashboardServer {
         const umo = url.searchParams.get("umo") || undefined;
         const search = url.searchParams.get("search") || "";
 
-        const opts: any = {};
-        if (type) opts.type = type;
-        if (status) opts.status = status;
+        const opts: { type?: TaskType; status?: TaskStatus; umo?: string } = {};
+        if (type) opts.type = type as TaskType;
+        if (status) opts.status = status as TaskStatus;
         if (umo) opts.umo = umo;
 
-        let tasks: any[];
+        let tasks: SchedulerTask[];
         if (search) {
           tasks = store.search(search, limit, opts);
         } else {
@@ -3282,7 +3322,7 @@ export class DashboardServer {
           res.end(JSON.stringify({ error: parsed.error }));
           return;
         }
-        const body = parsed.value as any;
+        const body = parsed.value as Record<string, unknown>;
         if (!body.title) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "Missing title" }));
@@ -3291,31 +3331,32 @@ export class DashboardServer {
         const now = new Date();
         const { computeInitialNextFireAt } = await import("@yachiyo/agent/scheduler-task-store.js");
         const nextFireAt = computeInitialNextFireAt(
-          body.scheduled_at ?? null,
-          body.recurrence ?? null,
+          (body.scheduled_at as string | null | undefined) ?? null,
+          (body.recurrence as string | null | undefined) ?? null,
           now,
         );
-        const taskId = body.id || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        const taskId = (body.id as string) || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        const plan = Array.isArray(body.plan) ? body.plan : [];
         const task = {
           id: taskId,
-          type: body.type || "reminder",
-          title: body.title,
-          description: body.description || "",
-          status: body.status || "pending",
-          priority: body.priority ?? 0,
-          scheduledAt: body.scheduled_at ?? null,
-          recurrence: body.recurrence ?? null,
-          goal: body.goal ?? null,
-          plan: body.plan ?? [],
-          currentStep: body.plan && body.plan.length > 0 ? 0 : -1,
-          tags: body.tags ?? [],
-          umo: body.umo ?? null,
-          sessionId: body.session_id ?? null,
-          platformId: body.platform_id ?? null,
-          payload: body.payload ?? null,
+          type: (body.type as TaskType) || "reminder",
+          title: body.title as string,
+          description: (body.description as string) || "",
+          status: (body.status as TaskStatus) || "pending",
+          priority: (body.priority as number) ?? 0,
+          scheduledAt: (body.scheduled_at as string | null) ?? null,
+          recurrence: (body.recurrence as string | null) ?? null,
+          goal: (body.goal as string | null) ?? null,
+          plan,
+          currentStep: plan.length > 0 ? 0 : -1,
+          tags: Array.isArray(body.tags) ? body.tags as string[] : [],
+          umo: (body.umo as string | null) ?? null,
+          sessionId: (body.session_id as string | null) ?? null,
+          platformId: (body.platform_id as string | null) ?? null,
+          payload: (body.payload as unknown) ?? null,
           lastFiredAt: null,
           nextFireAt,
-        };
+        } as SchedulerTask;
         store.save(task);
         res.writeHead(201);
         res.end(JSON.stringify({ task }));
@@ -3348,19 +3389,19 @@ export class DashboardServer {
           res.end(JSON.stringify({ error: parsed.error }));
           return;
         }
-        const body = parsed.value as any;
+        const body = parsed.value as Record<string, unknown>;
         const updated = {
           ...existing,
-          ...(body.title !== undefined && { title: body.title }),
-          ...(body.description !== undefined && { description: body.description }),
-          ...(body.status !== undefined && { status: body.status }),
-          ...(body.priority !== undefined && { priority: body.priority }),
-          ...(body.scheduled_at !== undefined && { scheduledAt: body.scheduled_at }),
-          ...(body.recurrence !== undefined && { recurrence: body.recurrence }),
-          ...(body.goal !== undefined && { goal: body.goal }),
-          ...(body.payload !== undefined && { payload: body.payload }),
-          ...(body.tags !== undefined && { tags: body.tags }),
-        };
+          ...(body.title !== undefined && { title: body.title as string }),
+          ...(body.description !== undefined && { description: body.description as string }),
+          ...(body.status !== undefined && { status: body.status as TaskStatus }),
+          ...(body.priority !== undefined && { priority: body.priority as number }),
+          ...(body.scheduled_at !== undefined && { scheduledAt: body.scheduled_at as string | null }),
+          ...(body.recurrence !== undefined && { recurrence: body.recurrence as string | null }),
+          ...(body.goal !== undefined && { goal: body.goal as string | null }),
+          ...(body.payload !== undefined && { payload: body.payload as unknown }),
+          ...(body.tags !== undefined && { tags: Array.isArray(body.tags) ? body.tags as string[] : existing.tags }),
+        } as SchedulerTask;
         store.save(updated);
         res.writeHead(200);
         res.end(JSON.stringify({ task: updated }));
@@ -3491,7 +3532,7 @@ export class DashboardServer {
         platformMsg.sessionId = sessionId;
         platformMsg.messageId = gid();
         platformMsg.sender = { userId: "debug-user", nickname: "Debug User" };
-        platformMsg.components = [{ type: ComponentType.Plain, text: message } as any];
+        platformMsg.components = [{ type: ComponentType.Plain, text: message } as unknown as import("@yachiyo/message/components.js").PlainComponent];
         platformMsg.messageStr = message;
         platformMsg.timestamp = Date.now();
 
@@ -3508,12 +3549,12 @@ export class DashboardServer {
         const responsePromise = new Promise<void>((r) => { responseResolve = r; });
 
         const event = new (class extends ME {
-          async send(components: any[]): Promise<void> {
+          async send(components: import("@yachiyo/message/components.js").MessageComponent[]): Promise<void> {
             for (const c of components) {
-              if (c.type === ComponentType.Plain) responseText += (c as any).text ?? "";
+              if (c.type === ComponentType.Plain) responseText += (c as import("@yachiyo/message/components.js").PlainComponent).text ?? "";
             }
           }
-          async sendStreaming(gen: any): Promise<void> {
+          async sendStreaming(gen: AsyncIterable<{ message?: string }>): Promise<void> {
             for await (const chunk of gen) {
               if (chunk.message) responseText += chunk.message;
             }
@@ -3568,7 +3609,7 @@ export class DashboardServer {
       const umo = `debug:webhook:${sessionId}`;
       try {
         const convId = await this.ctx.conversationManager.getCurrConversationId(umo);
-        let history: any[] = [];
+        let history: unknown[] = [];
         if (convId) {
           const conv = await this.ctx.conversationManager.getConversation(umo, convId);
           if (conv) history = JSON.parse(conv.history);
@@ -3796,14 +3837,14 @@ export class DashboardServer {
         throw new Error(`获取模型列表失败 (${response.status}): ${errBody.substring(0, 200) || response.statusText}`);
       }
 
-      const data = await response.json() as any;
+      const data = await response.json() as { data?: Array<{ id?: string }> };
       if (!Array.isArray(data.data)) {
         throw new Error(`模型列表响应格式异常: 期望 data 数组，得到 ${typeof data.data}。可能是 baseUrl 或 type 配置不匹配。`);
       }
 
       // 过滤出聊天模型，按 id 排序
       return data.data
-        .map((m: any) => m.id || "")
+        .map((m) => m.id || "")
         .filter((id: string) => !!id && !id.startsWith("babbage-") && !id.startsWith("curie-"))
         .sort();
     }
@@ -3845,15 +3886,15 @@ export class DashboardServer {
         throw new Error(`端点返回了非JSON响应。如果是 OpenAI 兼容代理，请将 Provider 类型改为 openai/openai_responses。请求URL: ${url}`);
       }
 
-      const data = JSON.parse(respText) as any;
+      const data = JSON.parse(respText) as { models?: Array<{ name?: string; supportedGenerationMethods?: string[] }> };
       if (!Array.isArray(data.models)) {
         throw new Error(`模型列表响应格式异常: 期望 models 数组，得到 ${typeof data.models}。可能是 baseUrl 或 type 配置不匹配。`);
       }
 
       // 只返回支持 generateContent 的模型
       return data.models
-        .filter((m: any) => m.supportedGenerationMethods?.includes("generateContent"))
-        .map((m: any) => m.name.replace("models/", ""))
+        .filter((m) => m.supportedGenerationMethods?.includes("generateContent"))
+        .map((m) => (m.name || "").replace("models/", ""))
         .sort();
     }
 
@@ -3875,12 +3916,12 @@ export class DashboardServer {
         throw new Error(`获取模型列表失败 (${response.status}): ${errBody.substring(0, 200) || response.statusText}`);
       }
 
-      const data = await response.json() as any;
+      const data = await response.json() as { data?: Array<{ id?: string }> };
       if (!Array.isArray(data.data)) {
         throw new Error(`模型列表响应格式异常: 期望 data 数组，得到 ${typeof data.data}。可能是 baseUrl 或 type 配置不匹配。`);
       }
 
-      return data.data.map((m: any) => m.id || "").sort();
+      return data.data.map((m) => m.id || "").sort();
     }
 
     throw new Error(`不支持的提供商类型: ${type}，暂无法获取模型列表`);
@@ -4191,8 +4232,8 @@ export class DashboardServer {
         }
 
         if (skillDirs.size === 0) {
-          const rootEntries = entries.filter((e: any) => !e.entryName.includes("/"));
-          const hasSkillMd = rootEntries.some((e: any) =>
+          const rootEntries = entries.filter((e: ZipEntry) => !e.entryName.includes("/"));
+          const hasSkillMd = rootEntries.some((e: ZipEntry) =>
             e.name.toLowerCase() === "skill.md" ||
             e.name.toLowerCase() === "skills.md" ||
             e.name.toLowerCase() === "manifest.json"
@@ -4219,9 +4260,9 @@ export class DashboardServer {
         } else {
           for (const dirName of skillDirs) {
             const dirPrefix = dirName + "/";
-            const dirEntries = entries.filter((e: any) => e.entryName.startsWith(dirPrefix));
+            const dirEntries = entries.filter((e: ZipEntry) => e.entryName.startsWith(dirPrefix));
 
-            const hasSkillMd = dirEntries.some((e: any) => {
+            const hasSkillMd = dirEntries.some((e: ZipEntry) => {
               const name = e.entryName.substring(dirPrefix.length).toLowerCase();
               return name === "skill.md" || name === "manifest.json" || name === "skills.md";
             });
@@ -4257,10 +4298,10 @@ export class DashboardServer {
   }
 
   private parseZipRootSkills(
-    zip: any,
-    entries: any[]
+    zip: ZipReader,
+    entries: ZipEntry[]
   ): Array<{ name: string; description: string; path: string; active: boolean; sourceType: string; sourceLabel: string; localExists: boolean; sandboxExists: boolean; pluginName: string; readonly: boolean }> {
-    const results: any[] = [];
+    const results: Array<{ name: string; description: string; path: string; active: boolean; sourceType: string; sourceLabel: string; localExists: boolean; sandboxExists: boolean; pluginName: string; readonly: boolean }> = [];
 
     const skillMdEntry = entries.find(e => e.name.toLowerCase() === "skill.md");
     const manifestEntry = entries.find(e => e.name.toLowerCase() === "manifest.json");
@@ -4348,9 +4389,9 @@ export class DashboardServer {
   }
 
   private parseZipSkillDir(
-    zip: any,
+    zip: ZipReader,
     dirPrefix: string,
-    _entries: any[],
+    _entries: ZipEntry[],
     dirName: string
   ): { name: string; description: string; path: string; active: boolean; sourceType: string; sourceLabel: string; localExists: boolean; sandboxExists: boolean; pluginName: string; readonly: boolean } {
     const skillMdEntry = _entries.find(e => {

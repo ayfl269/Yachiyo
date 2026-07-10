@@ -18,6 +18,8 @@ import { validateAdapterConfig, type OneBot11AdapterConfig, type AdapterConfigBa
 import { SqliteAdapterStore, ADAPTER_MIGRATIONS } from "@yachiyo/platform/sqlite-adapter-store.js";
 import { createChatProvider, createEmbeddingProvider, createRerankProvider, type ChatProviderConfig, type EmbeddingProviderConfig, type RerankProviderConfig } from "@yachiyo/provider/factory.js";
 import { callHandler as callHandlerUtil, callEventHook as callEventHookUtil } from "@yachiyo/pipeline/handler-utils.js";
+import type { StarHandlerMetadata } from "@yachiyo/plugin/handler.js";
+import type { EventType } from "@yachiyo/plugin/event-type.js";
 import { DatabaseManager } from "@yachiyo/common/database.js";
 import { CHAT_MIGRATIONS, SqliteConversationStore } from "@yachiyo/conversation/sqlite-conversation-store.js";
 import { MEMORY_MIGRATIONS, SqliteMemoryStore } from "@yachiyo/agent/sqlite-memory-store.js";
@@ -368,10 +370,10 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
     skillManager,
     memoryConsolidator,
     memoryStore: sqliteMemoryStore,
-    callHandler: async function* (event: MessageEvent, handler: any, ...args: any[]) {
+    callHandler: async function* (event: MessageEvent, handler: StarHandlerMetadata, ...args: unknown[]) {
       yield* callHandlerUtil(event, handler, ...args);
     },
-    callEventHook: async (event: MessageEvent, hookType: any, ...args: any[]) => {
+    callEventHook: async (event: MessageEvent, hookType: EventType, ...args: unknown[]) => {
       const handlers = pluginManager.getHandlerRegistry().getHandlersByEventType(hookType);
       return callEventHookUtil(event, hookType, handlers, ...args);
     },
@@ -398,8 +400,8 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
       if (adapterConfig.enabled === false) continue;
       try {
         adapterRegistry.createAdapter(adapterConfig.type, adapterConfig, eventQueue);
-      } catch (e: any) {
-        console.error(`[Bootstrap] Failed to create adapter ${adapterConfig.id}:`, e.message);
+      } catch (e: unknown) {
+        console.error(`[Bootstrap] Failed to create adapter ${adapterConfig.id}:`, e instanceof Error ? e.message : e);
       }
     }
   } else {

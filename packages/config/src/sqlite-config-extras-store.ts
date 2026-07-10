@@ -131,6 +131,37 @@ export const CONFIG_EXTRAS_MIGRATIONS: Migration[] = [
   },
 ];
 
+// ── Database row types ──
+
+interface PluginStarRow {
+  module_path: string;
+  name: string;
+  author: string;
+  description: string | null;
+  short_desc: string | null;
+  version: string | null;
+  repo: string | null;
+  activated: number;
+  config: string | null;
+  handler_full_names: string | null;
+  display_name: string | null;
+  logo_path: string | null;
+  support_platforms: string | null;
+}
+
+interface SkillRow {
+  name: string;
+  description: string | null;
+  path: string;
+  active: number;
+  source_type: string;
+  source_label: string | null;
+  local_exists: number;
+  sandbox_exists: number;
+  plugin_name: string | null;
+  readonly: number;
+}
+
 // ── Plugin Store ──
 
 export class SqlitePluginStore {
@@ -154,7 +185,7 @@ export class SqlitePluginStore {
   }
 
   getAllStars(): StarMetadata[] {
-    const rows = this.db.prepare("SELECT * FROM plugin_stars").all() as any[];
+    const rows = this.db.prepare("SELECT * FROM plugin_stars").all() as PluginStarRow[];
     return rows.map((r) => this.rowToStar(r));
   }
 
@@ -163,20 +194,20 @@ export class SqlitePluginStore {
       .run(activated ? 1 : 0, modulePath);
   }
 
-  private rowToStar(row: any): StarMetadata {
+  private rowToStar(row: PluginStarRow): StarMetadata {
     return {
       modulePath: row.module_path,
       name: row.name,
       author: row.author,
-      desc: row.description,
-      shortDesc: row.short_desc,
-      version: row.version,
-      repo: row.repo,
+      desc: row.description ?? "",
+      shortDesc: row.short_desc ?? "",
+      version: row.version ?? "",
+      repo: row.repo ?? "",
       activated: row.activated === 1,
       config: JSON.parse(row.config || "{}"),
       handlerFullNames: JSON.parse(row.handler_full_names || "[]"),
-      displayName: row.display_name,
-      logoPath: row.logo_path,
+      displayName: row.display_name ?? "",
+      logoPath: row.logo_path ?? "",
       supportPlatforms: JSON.parse(row.support_platforms || "[]"),
     };
   }
@@ -202,7 +233,7 @@ export class SqliteSkillStore {
   }
 
   getAllSkills(): SkillInfo[] {
-    const rows = this.db.prepare("SELECT * FROM skills").all() as any[];
+    const rows = this.db.prepare("SELECT * FROM skills").all() as SkillRow[];
     return rows.map((r) => this.rowToSkill(r));
   }
 
@@ -214,17 +245,17 @@ export class SqliteSkillStore {
     this.db.prepare("DELETE FROM skills WHERE name = ?").run(name);
   }
 
-  private rowToSkill(row: any): SkillInfo {
+  private rowToSkill(row: SkillRow): SkillInfo {
     return {
       name: row.name,
-      description: row.description,
+      description: row.description ?? "",
       path: row.path,
       active: row.active === 1,
       sourceType: row.source_type,
-      sourceLabel: row.source_label,
+      sourceLabel: row.source_label ?? "",
       localExists: row.local_exists === 1,
       sandboxExists: row.sandbox_exists === 1,
-      pluginName: row.plugin_name,
+      pluginName: row.plugin_name ?? "",
       readonly: row.readonly === 1,
     };
   }

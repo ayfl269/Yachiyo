@@ -26,6 +26,17 @@ export const ADAPTER_MIGRATIONS: Migration[] = [
   },
 ];
 
+// ── Database row type ──
+
+interface AdapterRow {
+  id: string;
+  type: string;
+  config: string;
+  enabled: number;
+  created_at: string;
+  updated_at: string;
+}
+
 // ── SqliteAdapterStore ──
 
 export class SqliteAdapterStore {
@@ -37,7 +48,7 @@ export class SqliteAdapterStore {
 
   /** Load all adapter configs from database */
   loadAll(): AdapterConfigBase[] {
-    const rows = this.db.prepare("SELECT * FROM adapters ORDER BY created_at ASC").all() as any[];
+    const rows = this.db.prepare("SELECT * FROM adapters ORDER BY created_at ASC").all() as AdapterRow[];
     return rows.map(row => {
       const config = typeof row.config === "string" ? JSON.parse(row.config) : row.config;
       return { ...config, id: row.id, type: row.type, enabled: row.enabled === 1 };
@@ -64,7 +75,7 @@ export class SqliteAdapterStore {
 
   /** Get a single adapter config */
   get(id: string): AdapterConfigBase | null {
-    const row = this.db.prepare("SELECT * FROM adapters WHERE id = ?").get(id) as any;
+    const row = this.db.prepare("SELECT * FROM adapters WHERE id = ?").get(id) as AdapterRow | undefined;
     if (!row) return null;
     const config = typeof row.config === "string" ? JSON.parse(row.config) : row.config;
     return { ...config, id: row.id, type: row.type, enabled: row.enabled === 1 };

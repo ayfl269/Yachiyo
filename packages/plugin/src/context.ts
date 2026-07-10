@@ -63,7 +63,7 @@ export class PluginContext {
     const syntheticEvent = {
       messageStr: "",
       messageObj: { type: "friend", groupId: "", selfId: "", sender: { userId: "plugin", nickname: "Plugin" } },
-      platformMeta: { id: "plugin", name: "PluginContext" } as any,
+      platformMeta: { id: "plugin", name: "PluginContext" },
       session,
       isWake: false,
       isAtOrWakeCommand: false,
@@ -86,9 +86,9 @@ export class PluginContext {
       getSenderName() { return "Plugin"; },
       isPrivateChat() { return true; },
       isWakeUp() { return false; },
-      setResult(_result: any) {},
+      setResult(_result: unknown) {},
       send: async () => {},
-      sendStreaming: async function* (_generator: any) {},
+      sendStreaming: async function* (_generator: AsyncGenerator<unknown>) {},
     } as unknown as MessageEvent;
     this.eventQueue.put(syntheticEvent);
   }
@@ -196,8 +196,8 @@ export class PluginContext {
           } else {
             toolResult = JSON.stringify({ error: `Tool '${toolName}' not found` });
           }
-        } catch (err: any) {
-          toolResult = JSON.stringify({ error: err?.message ?? String(err) });
+        } catch (err: unknown) {
+          toolResult = JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
         }
 
         messages.push({

@@ -143,10 +143,6 @@ interface SchedulerTagRow {
   tag: string;
 }
 
-interface SchedulerIdRow {
-  id: string;
-}
-
 interface CountRow {
   cnt: number;
 }

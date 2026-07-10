@@ -202,7 +202,7 @@ export class MemoryConsolidator {
           this.consecutiveFailures = 0;
         } else {
           result.extracted = extractionResult.count;
-          extractionSkipped = !!(extractionResult as any).skipped;
+          extractionSkipped = !!extractionResult.skipped;
           this.consecutiveFailures = 0;
         }
       } else {
@@ -444,7 +444,7 @@ ${bufferTexts.join("\n")}
               scope: "global",
               priority: cleanPriority,
               source: "consolidator",
-            } as any);
+            });
             extracted++;
           }
         }

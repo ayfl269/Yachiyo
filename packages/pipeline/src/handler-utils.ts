@@ -15,8 +15,8 @@ function isAsyncGenerator(obj: unknown): obj is AsyncGenerator<any, any> {
 export async function* callHandler(
   event: MessageEvent,
   handler: StarHandlerMetadata,
-  ...args: any[]
-): AsyncGenerator<any> {
+  ...args: unknown[]
+): AsyncGenerator<unknown> {
   try {
     const result = handler.handler(event, ...args);
     if (isAsyncGenerator(result)) {
@@ -48,7 +48,7 @@ export async function callEventHook(
   event: MessageEvent,
   hookType: EventType,
   handlers: StarHandlerMetadata[],
-  ...args: any[]
+  ...args: unknown[]
 ): Promise<boolean> {
   for (const handler of handlers) {
     for await (const _ of callHandler(event, handler, ...args)) {
