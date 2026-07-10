@@ -244,9 +244,11 @@ function extractOrderedArgs(
   const propOrder = Object.keys(params.properties as Record<string, unknown>);
   const result: unknown[] = [];
   for (const key of propOrder) {
-    if (key in toolArgs) {
-      result.push(toolArgs[key]);
-    }
+    // Push undefined for missing keys so that positional arguments in the
+    // handler stay aligned with the schema's property order. Skipping
+    // missing keys would shift subsequent arguments forward and cause
+    // silent misdispatch (e.g. timeout value received as test_url).
+    result.push(key in toolArgs ? toolArgs[key] : undefined);
   }
   // Include any extra args not in the schema
   for (const [key, value] of Object.entries(toolArgs)) {

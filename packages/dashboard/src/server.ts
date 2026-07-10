@@ -50,6 +50,7 @@ import type { SqliteMemoryStore } from "@yachiyo/agent/sqlite-memory-store.js";
 import type { SqliteSchedulerTaskStore } from "@yachiyo/agent/scheduler-task-store.js";
 import type { SkillManager } from "@yachiyo/skill/index.js";
 import { safeFetch } from "@yachiyo/common/ssrf-guard.js";
+import { proxyManager } from "@yachiyo/agent/proxy-manager.js";
 
 export interface BootstrapContext {
   eventQueue: AsyncQueue<MessageEvent>;
@@ -3596,6 +3597,72 @@ export class DashboardServer {
         res.writeHead(500);
         res.end(JSON.stringify({ error: safeClientMessage(err) }));
       }
+      return;
+    }
+
+    // ── Proxy Management ──
+
+    // GET /api/proxy — get current proxy status
+    if (pathname === "/api/proxy" && req.method === "GET") {
+      const status = proxyManager.getStatus();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(status));
+      return;
+    }
+
+    // PUT /api/proxy — set, update, or disable the proxy
+    // Body: { "url": "http://127.0.0.1:7890" } to enable,
+    //       { "url": null } to disable
+    if (pathname === "/api/proxy" && req.method === "PUT") {
+      const parsed = await this.readJsonObject(req);
+      if (!parsed.ok) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: parsed.error }));
+        return;
+      }
+      const body = parsed.value as { url?: string | null };
+      const url = body.url ?? null;
+
+      // Validate URL if non-null
+      if (url) {
+        try {
+          const normalized = /^[a-z][a-z0-9]*:\/\//i.test(url) ? url : `http://${url}`;
+          new URL(normalized);
+        } catch {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: `Invalid proxy URL: ${url}` }));
+          return;
+        }
+      }
+
+      await proxyManager.setProxy(url, "runtime");
+      const status = proxyManager.getStatus();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: true, ...status }));
+      return;
+    }
+
+    // POST /api/proxy/test — test proxy connectivity
+    // Body: { "test_url"?: "https://...", "timeout"?: 10 }
+    if (pathname === "/api/proxy/test" && req.method === "POST") {
+      let testUrl: string | undefined;
+      let timeoutSec = 10;
+      try {
+        const parsed = await this.readJsonObject(req);
+        if (parsed.ok) {
+          const body = parsed.value as { test_url?: string; timeout?: number };
+          testUrl = body.test_url;
+          if (typeof body.timeout === "number") {
+            timeoutSec = Math.min(Math.max(body.timeout, 1), 60);
+          }
+        }
+      } catch {
+        // Body parse failed — use defaults
+      }
+
+      const result = await proxyManager.testProxy(testUrl, timeoutSec * 1000);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
       return;
     }
 
