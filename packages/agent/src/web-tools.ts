@@ -9,6 +9,22 @@ import TurndownService from "turndown";
 import { randomUUID } from "crypto";
 import { safeFetch, assertSafeUrl } from "@yachiyo/common/ssrf-guard.js";
 import { isDomainAllowed, type SandboxPolicy } from "./sandbox.js";
+import { proxyManager } from "./proxy-manager.js";
+
+// ── Proxy helper for Playwright launches ──
+
+/**
+ * Build the Playwright `proxy` launch option from the current ProxyManager
+ * state. Returns an empty object when no proxy is configured so the browser
+ * uses a direct connection.
+ */
+function getProxyLaunchOption(): { proxy?: { server: string } } {
+  const url = proxyManager.url;
+  if (url) {
+    return { proxy: { server: url } };
+  }
+  return {};
+}
 
 // ── Shared Chromium browser instance ──
 //
@@ -27,6 +43,7 @@ async function getSharedBrowser(): Promise<Browser> {
       const browser = await chromium.launch({
         headless: true,
         args: ["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+        ...getProxyLaunchOption(),
       });
       sharedBrowser = browser;
       browserLaunchPromise = null;
@@ -56,6 +73,20 @@ export async function closeSharedBrowser(): Promise<void> {
     sharedBrowser = null;
   }
 }
+
+// ── Proxy change listener ──
+//
+// When the proxy URL changes (via proxyManager), close all open browser
+// instances so the next launch picks up the new proxy setting. This
+// affects both the shared browser (used by browser_* tools) and the
+// Playwright search provider browsers (used by web_search_tool).
+proxyManager.onChange((_url) => {
+  // Close the shared browser (fire-and-forget; next getSharedBrowser()
+  // call will relaunch with the updated proxy).
+  closeSharedBrowser().catch(() => { /* ignore */ });
+  // Close search provider browsers.
+  closeWebSearchProviders().catch(() => { /* ignore */ });
+});
 
 // ── Shared context type ──
 
@@ -387,6 +418,7 @@ class PlaywrightSearchProviderBase implements WebSearchProvider {
             "--no-sandbox",
             "--disable-dev-shm-usage",
           ],
+          ...getProxyLaunchOption(),
         });
         this._browser = browser;
         this._launchPromise = null;

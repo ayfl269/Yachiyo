@@ -45,6 +45,8 @@ import { MemoryConsolidator } from "@yachiyo/agent/memory-consolidator.js";
 import { createCodeSearchTool } from "@yachiyo/agent/code-search-tool.js";
 import { createConversationSearchTool } from "@yachiyo/agent/conversation-search-tool.js";
 import { createAskUserTool } from "@yachiyo/agent/ask-user-tool.js";
+import { createProxyTool } from "@yachiyo/agent/proxy-tool.js";
+import { proxyManager } from "@yachiyo/agent/proxy-manager.js";
 import { getSubAgentManagementTools } from "@yachiyo/agent/subagent-create-tool.js";
 import { SCHEDULER_MIGRATIONS, SqliteSchedulerTaskStore } from "@yachiyo/agent/scheduler-task-store.js";
 import { createSchedulerTool } from "@yachiyo/agent/scheduler-tool.js";
@@ -126,16 +128,13 @@ export interface BootstrapContext {
 }
 
 export async function bootstrap(options: BootstrapOptions): Promise<BootstrapContext> {
-  // Setup proxy if environment variables are present (Node.js global fetch uses undici)
-  const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.http_proxy || process.env.https_proxy;
-  if (proxyUrl) {
-    try {
-      const { setGlobalDispatcher, ProxyAgent } = await import("undici");
-      setGlobalDispatcher(new ProxyAgent(proxyUrl));
-      console.log(`[Proxy] Global proxy dispatcher configured with: ${proxyUrl}`);
-    } catch (e) {
-      console.warn("[Proxy] Failed to configure global proxy dispatcher:", e);
-    }
+  // Setup proxy via ProxyManager if environment variables are present.
+  // ProxyManager updates undici's global dispatcher and notifies browser
+  // launchers. The proxy can also be changed at runtime via the proxy_manage
+  // tool.
+  const envProxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.http_proxy || process.env.https_proxy;
+  if (envProxyUrl) {
+    await proxyManager.setProxy(envProxyUrl, "env");
   }
 
   // 0. 初始化 DatabaseManager 和所有 SQLite 数据库
@@ -338,6 +337,10 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
   // 注册向用户提问工具 (澄清需求、提供选项)
   const askUserTool = createAskUserTool();
   toolManager.funcList.push(askUserTool);
+
+  // 注册代理管理工具 (运行时启用/停用/修改代理)
+  const proxyTool = createProxyTool();
+  toolManager.funcList.push(proxyTool);
 
   // 注册子代理管理工具 (create/list/delete_subagent)
   for (const tool of getSubAgentManagementTools(workspaceRoot)) {

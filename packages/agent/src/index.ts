@@ -282,6 +282,16 @@ export {
 } from "./ask-user-tool.js";
 export type { AskUserToolContext, PlainMessageComponent } from "./ask-user-tool.js";
 
+// Proxy management
+export {
+  proxyManager,
+} from "./proxy-manager.js";
+export type { ProxyStatus, ProxyTestResult } from "./proxy-manager.js";
+export {
+  createProxyTool,
+} from "./proxy-tool.js";
+export type { ProxyToolContext } from "./proxy-tool.js";
+
 // Image reference utilities
 export {
   normalizeAndDedupeStrings,
