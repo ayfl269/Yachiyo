@@ -597,7 +597,7 @@ async function testConversationManager(): Promise<void> {
   // API Key operations
   await store.createApiKey({ id: "1", keyHash: "abc123hash", keyPrefix: "test", name: "Test", scopes: null, createdBy: "admin", createdAt: new Date(), lastUsedAt: null, expiresAt: null, revokedAt: null });
   const apiKey = await store.getApiKeyByHash("abc123hash");
-  console.log("  API Key 查找:", apiKey ? `found (name="${apiKey.name}")` : "not found");
+  console.log("  API Key 查找:", apiKey ? "found" : "not found");
 
   // Preference operations
   await store.insertOrUpdatePreference({ key: "theme", value: "dark", namespace: "ui" });

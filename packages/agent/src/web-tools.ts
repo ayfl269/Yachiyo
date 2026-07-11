@@ -114,24 +114,13 @@ const turndownService = new TurndownService({
   strongDelimiter: "**",
   linkStyle: "inlined",
 });
+// Let turndown (which uses a real DOM parser) remove non-content elements
+// instead of regex pre-filtering. Regex-based HTML stripping is insecure
+// (can be bypassed with nested/malformed tags) and triggers CodeQL alerts.
+turndownService.remove(["head", "script", "style", "nav", "footer", "noscript"]);
 
 function htmlToMarkdown(html: string): string {
-  // Strip non-content elements before conversion.
-  // Loop until stable to defeat nested-tag bypass tricks (e.g. "<scr<script>ipt>").
-  let cleaned = html;
-  let prev: string;
-  do {
-    prev = cleaned;
-    cleaned = cleaned
-      .replace(/<head[\s\S]*?<\/head>/gi, "")
-      .replace(/<script[\s\S]*?<\/script>/gi, "")
-      .replace(/<style[\s\S]*?<\/style>/gi, "")
-      .replace(/<nav[\s\S]*?<\/nav>/gi, "")
-      .replace(/<footer[\s\S]*?<\/footer>/gi, "")
-      .replace(/<noscript[\s\S]*?<\/noscript>/gi, "");
-  } while (cleaned !== prev);
-
-  const md = turndownService.turndown(cleaned);
+  const md = turndownService.turndown(html);
   // Collapse excessive blank lines and trim trailing whitespace.
   return md.replace(/\n{3,}/g, "\n\n").replace(/[ \t]+$/gm, "").trim();
 }
