@@ -139,7 +139,7 @@ export class RespondStage extends PipelineStage {
     event.clearResult();
   }
 
-  private isEmptyMessageChain(components: any[]): boolean {
+  private isEmptyMessageChain(components: import("@yachiyo/message/components.js").MessageComponent[]): boolean {
     if (!components.length) return true;
     return !components.some(c => {
       if (c.type === ComponentType.Plain) return Boolean((c as PlainComponent).text?.trim());

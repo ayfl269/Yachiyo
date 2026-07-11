@@ -13,14 +13,33 @@ import { safeFetch } from "./ssrf-guard.js";
 const IMAGE_COMPRESS_THRESHOLD = 60 * 1024; // 60KB
 const IMAGE_MAX_BASE64_LENGTH = 80_000; // 压缩后目标 base64 长度，适配本地网关 100KB Body 限制
 
+// sharp 类型声明与 pnpm 不兼容，使用 require 动态加载
+// 此处定义最小可用接口以避免 `any` 类型
+interface SharpChain {
+  jpeg(options?: { quality?: number; mozjpeg?: boolean }): SharpChain;
+  resize(
+    width?: number,
+    height?: number,
+    options?: { fit?: string; withoutEnlargement?: boolean },
+  ): SharpChain;
+  toBuffer(): Promise<Buffer>;
+  toBuffer(options: { resolveWithObject: true }): Promise<{
+    data: Buffer;
+    info: { size: number };
+  }>;
+}
+
+interface SharpModule {
+  (input: Buffer): SharpChain;
+}
+
 /**
  * 压缩图片文件，返回压缩后的 buffer 和 mime 类型。
  * 使用 sharp 库进行高效的图片压缩。
  */
 async function compressImage(filePath: string): Promise<{ buffer: Buffer; mimeType: string } | null> {
   try {
-    // sharp 类型声明与 pnpm 不兼容，使用 require 动态加载
-    const sharp = require("sharp") as any;
+    const sharp = require("sharp") as SharpModule;
     const bytes = await readFile(filePath);
     if (bytes.length < IMAGE_COMPRESS_THRESHOLD) return null;
 
@@ -159,7 +178,7 @@ export async function encodeImageToBase64(imageRef: string): Promise<string> {
   // Transcode unsupported formats (like gif, bmp) to jpeg using sharp
   if (mimeType !== "image/jpeg" && mimeType !== "image/png" && mimeType !== "image/webp") {
     try {
-      const sharp = require("sharp") as any;
+      const sharp = require("sharp") as SharpModule;
       const transcodedBuffer = await sharp(bytes).jpeg().toBuffer();
       const base64 = transcodedBuffer.toString("base64");
       return `data:image/jpeg;base64,${base64}`;

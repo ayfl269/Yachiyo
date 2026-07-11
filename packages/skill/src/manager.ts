@@ -112,11 +112,12 @@ export class SkillManager {
                 const parts = s.split(":").map(p => p.trim());
                 results.push({ name: parts[0], description: parts.slice(1).join(":").trim() || "" });
               } else if (typeof s === "object" && s !== null) {
+                const skillObj = s as Record<string, unknown>;
                 results.push({
-                  name: String(s.name ?? ""),
-                  description: String(s.description ?? ""),
-                  active: s.active as boolean | undefined,
-                  readonly: s.readonly as boolean | undefined,
+                  name: String(skillObj.name ?? ""),
+                  description: String(skillObj.description ?? ""),
+                  active: skillObj.active as boolean | undefined,
+                  readonly: skillObj.readonly as boolean | undefined,
                 });
               }
             }
@@ -166,15 +167,15 @@ export class SkillManager {
     return results;
   }
 
-  private parseYamlFrontmatter(yamlText: string): Record<string, string | boolean | number | any[]> {
-    const result: Record<string, string | boolean | number | any[]> = {};
+  private parseYamlFrontmatter(yamlText: string): Record<string, string | boolean | number | unknown[]> {
+    const result: Record<string, string | boolean | number | unknown[]> = {};
     for (const rawLine of yamlText.split("\n")) {
       const line = rawLine.trim();
       if (!line || line.startsWith("#")) continue;
       const colonIdx = line.indexOf(":");
       if (colonIdx < 0) continue;
       const key = line.substring(0, colonIdx).trim();
-      let value: string | boolean | number | any[] = line.substring(colonIdx + 1).trim();
+      let value: string | boolean | number | unknown[] = line.substring(colonIdx + 1).trim();
 
       if (value === "true") value = true;
       else if (value === "false") value = false;

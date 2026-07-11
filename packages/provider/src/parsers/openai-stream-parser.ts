@@ -103,7 +103,7 @@ export async function* parseOpenAIStream(
       const promptTokens = chunk.usage.prompt_tokens ?? chunk.usage.input_tokens ?? 0;
       const completionTokens = chunk.usage.completion_tokens ?? chunk.usage.output_tokens ?? 0;
       const total = chunk.usage.total_tokens ?? (promptTokens + completionTokens);
-      const promptTokensDetails = (chunk.usage as any).prompt_tokens_details;
+      const promptTokensDetails = (chunk.usage as { prompt_tokens_details?: { cached_tokens?: number } }).prompt_tokens_details;
       const cacheReadInputTokens = promptTokensDetails?.cached_tokens ?? 0;
       const usage: TokenUsage = {
         promptTokens,

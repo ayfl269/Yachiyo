@@ -115,7 +115,7 @@ export async function* parseResponsesStream(
         const d = data as { response?: { usage?: ResponsesUsage } };
         if (d.response?.usage) {
           const u = d.response.usage;
-          const promptTokensDetails = u.prompt_tokens_details as any;
+          const promptTokensDetails = u.prompt_tokens_details as { cached_tokens?: number } | undefined;
           const cacheReadInputTokens = promptTokensDetails?.cached_tokens ?? 0;
           result.usage = {
             promptTokens: u.input_tokens ?? 0,

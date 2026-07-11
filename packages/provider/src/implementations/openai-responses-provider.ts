@@ -229,7 +229,7 @@ export class OpenAIResponsesProvider implements Provider {
       if (total === 0 && inputMessages) {
         result.usage = this.estimateUsage(inputMessages, result.completionText ?? "");
       } else {
-        const promptTokensDetails = u.prompt_tokens_details as any;
+        const promptTokensDetails = u.prompt_tokens_details as { cached_tokens?: number } | undefined;
         const cacheReadInputTokens = promptTokensDetails?.cached_tokens ?? 0;
         result.usage = {
           promptTokens,

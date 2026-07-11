@@ -40,10 +40,13 @@ const TRANSIENT_NETWORK_CODES = new Set([
  *   handshake failures as `TypeError: fetch failed` / `Failed to fetch`.
  * - Node surfaces the same conditions via `err.code` (errno).
  */
-function isTransientNetworkError(err: any): boolean {
+function isTransientNetworkError(err: unknown): boolean {
   if (err instanceof TypeError) return true;
-  if (typeof err.code === "string" && TRANSIENT_NETWORK_CODES.has(err.code)) {
-    return true;
+  if (err !== null && typeof err === "object" && "code" in err) {
+    const code = (err as { code?: unknown }).code;
+    if (typeof code === "string" && TRANSIENT_NETWORK_CODES.has(code)) {
+      return true;
+    }
   }
   return false;
 }
@@ -60,12 +63,13 @@ export async function withRetry<T>(
 
     try {
       return await fn();
-    } catch (err: any) {
-      lastError = err;
+    } catch (err: unknown) {
+      lastError = err instanceof Error ? err : new Error(String(err));
 
-      const statusCode = err.statusCode ?? err.status;
+      const errObj = err !== null && typeof err === "object" ? err as Record<string, unknown> : null;
+      const statusCode = errObj?.statusCode ?? errObj?.status;
       const isRetryableStatus =
-        statusCode != null && config.retryableStatusCodes.includes(statusCode);
+        statusCode != null && config.retryableStatusCodes.includes(statusCode as number);
       // Network errors (DNS failures, connection resets, TLS handshake
       // failures, etc.) carry no status code and would otherwise bypass
       // retry entirely — even though they are the most transient errors.
@@ -83,12 +87,13 @@ export async function withRetry<T>(
       );
 
       let waitMs = delay;
-      if (statusCode === 429 && err.retryAfterMs) {
+      const retryAfterMs = errObj?.retryAfterMs;
+      if (statusCode === 429 && typeof retryAfterMs === "number") {
         // Cap Retry-After to maxDelayMs. A malicious or misconfigured server
         // could otherwise send `Retry-After: 86400` (24 hours) and stall the
         // caller indefinitely. Capping to maxDelayMs (default 30s) keeps
         // backoff responsive while still honoring reasonable rate-limit hints.
-        waitMs = Math.min(err.retryAfterMs, config.maxDelayMs);
+        waitMs = Math.min(retryAfterMs, config.maxDelayMs);
       }
 
       // Abortable sleep: reject immediately if the caller signals abort

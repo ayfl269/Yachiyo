@@ -269,7 +269,7 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
 
     // Check for HandoffTool
     if ("agent" in tool && tool.agent != null) {
-      console.log(`[ToolExecutor] ${tool.name} -> HandoffTool (agent=${(tool as any).agent?.name})`);
+      console.log(`[ToolExecutor] ${tool.name} -> HandoffTool (agent=${(tool as { agent?: { name?: string } }).agent?.name})`);
       const isBg = Boolean(toolArgs.background_task);
       delete toolArgs.background_task;
       if (isBg) {

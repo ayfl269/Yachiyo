@@ -238,7 +238,7 @@ const PROVIDER_TYPE_CLASS_MAP: Record<string, string> = {
  */
 export async function dynamicImportProviderModule(
   type: string
-): Promise<(new (config: any) => any) | null> {
+): Promise<(new (config: unknown) => unknown) | null> {
   const modulePath = PROVIDER_TYPE_MODULE_MAP[type];
   if (!modulePath) {
     console.warn(`[ProviderFactory] Unknown provider type for dynamic import: ${type}`);

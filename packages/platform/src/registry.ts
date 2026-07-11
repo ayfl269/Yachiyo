@@ -1,7 +1,7 @@
 import type { AsyncQueue } from "@yachiyo/common/async-queue.js";
 import type { MessageEvent } from "@yachiyo/message/event.js";
 import { PlatformAdapter } from "./adapter.js";
-import type { OneBot11AdapterConfig, QQOfficialAdapterConfig, WeixinOCAdapterConfig } from "./config.js";
+import type { AdapterConfigBase, OneBot11AdapterConfig, QQOfficialAdapterConfig, WeixinOCAdapterConfig } from "./config.js";
 import type { SqliteAdapterStore } from "./sqlite-adapter-store.js";
 import { OneBot11Adapter } from "./implementations/onebot11-adapter.js";
 import { QQOfficialAdapter } from "./implementations/qqofficial-adapter.js";
@@ -41,7 +41,7 @@ export class AdapterRegistry {
     if (store) {
       adapter.onConfigUpdate = (updatedConfig: Record<string, unknown>) => {
         try {
-          store.save(updatedConfig as any);
+          store.save(updatedConfig as unknown as AdapterConfigBase);
         } catch (e) {
           console.warn(`[AdapterRegistry] Failed to persist config for ${adapter.meta().id}:`, e);
         }

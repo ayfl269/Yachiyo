@@ -43,7 +43,7 @@ function decodeHtmlEntities(str: string): string {
 
 interface OB11MessageSegment {
   type: string;
-  data: Record<string, any>;
+  data: Record<string, unknown>;
 }
 
 interface OB11MessageEvent {
@@ -73,7 +73,7 @@ interface OB11MessageEvent {
 class OneBot11Event extends MessageEvent {
   private ws: WebSocket | null = null;
   private adapter: OneBot11Adapter | null = null;
-  private apiResponseResolve: ((data: any) => void) | null = null;
+  private apiResponseResolve: ((data: unknown) => void) | null = null;
   private echo: string = "";
   private _umo: string;
 
@@ -136,7 +136,7 @@ class OneBot11Event extends MessageEvent {
       ? "send_group_msg"
       : "send_private_msg";
 
-    const params: Record<string, any> = {};
+    const params: Record<string, unknown> = {};
     if (this.messageObj.type === MessageType.GROUP_MESSAGE) {
       const gid = this.getExtra<number>("group_id");
       if (!gid) {
@@ -176,7 +176,7 @@ class OneBot11Event extends MessageEvent {
     // No-op
   }
 
-  private callApi(action: string, params: Record<string, any>, ws: WebSocket): void {
+  private callApi(action: string, params: Record<string, unknown>, ws: WebSocket): void {
     if (ws.readyState !== WebSocket.OPEN) {
       console.warn(`[OneBot11] Cannot call API ${action}: WS not open`);
       return;
@@ -208,7 +208,7 @@ class OneBot11Event extends MessageEvent {
           break;
         }
         case ComponentType.Reply:
-          segments.push({ type: "reply", data: { id: (comp as any).messageId ?? "" } });
+          segments.push({ type: "reply", data: { id: (comp as { messageId?: string }).messageId ?? "" } });
           break;
         default:
           segments.push({ type: "text", data: { text: JSON.stringify(comp.toDict()) } });
@@ -353,7 +353,7 @@ export class OneBot11Adapter extends PlatformAdapter {
     }
 
     const action = typeStr === "group" ? "send_group_msg" : "send_private_msg";
-    const params: Record<string, any> =
+    const params: Record<string, unknown> =
       typeStr === "group" ? { group_id: id } : { user_id: id };
     params.message = this.componentsToOB11(components);
 
@@ -367,7 +367,7 @@ export class OneBot11Adapter extends PlatformAdapter {
   }
 
   /** 调用 OneBot 11 API（适配器级别，供主动推送使用） */
-  private callApi(action: string, params: Record<string, any>, ws: WebSocket): void {
+  private callApi(action: string, params: Record<string, unknown>, ws: WebSocket): void {
     if (ws.readyState !== WebSocket.OPEN) {
       console.warn(`[OneBot11] Cannot call API ${action}: WS not open`);
       return;
@@ -516,7 +516,7 @@ export class OneBot11Adapter extends PlatformAdapter {
     });
   }
 
-  private handleOb11Data(data: any, ws: WebSocket): void {
+  private handleOb11Data(data: Record<string, unknown>, ws: WebSocket): void {
     // Handle API responses (echo)
     if (data.echo && data.retcode !== undefined) {
       // This is an API response, ignore for now
@@ -535,7 +535,7 @@ export class OneBot11Adapter extends PlatformAdapter {
       return;
     }
 
-    const msgEvent = data as OB11MessageEvent;
+    const msgEvent = data as unknown as OB11MessageEvent;
     this.processMessageEvent(msgEvent, ws);
   }
 
@@ -595,20 +595,21 @@ export class OneBot11Adapter extends PlatformAdapter {
     const components: MessageComponent[] = [];
 
     for (const seg of segments) {
+      const data = seg.data as Record<string, unknown>;
       switch (seg.type) {
         case "text":
           components.push({
             type: ComponentType.Plain,
-            text: seg.data.text ?? "",
-            toDict() { return { type: "text", data: { text: seg.data.text ?? "" } }; },
+            text: (data.text as string) ?? "",
+            toDict() { return { type: "text", data: { text: data.text ?? "" } }; },
           } as PlainComponent);
           break;
 
         case "image": {
           // 解码 URL 中的 HTML 实体（如 &amp; → &）
-          const rawUrl = seg.data.url ?? "";
+          const rawUrl = (data.url as string) ?? "";
           const url = decodeHtmlEntities(rawUrl);
-          const file = seg.data.file ?? "";
+          const file = (data.file as string) ?? "";
           components.push({
             type: ComponentType.Image,
             url: url || file,
@@ -621,7 +622,7 @@ export class OneBot11Adapter extends PlatformAdapter {
         case "at":
           components.push({
             type: ComponentType.At,
-            qq: seg.data.qq ?? "all",
+            qq: (data.qq as string | number) ?? "all",
             toDict() { return { type: "at", data: seg.data }; },
           } as AtComponent);
           break;
@@ -629,32 +630,32 @@ export class OneBot11Adapter extends PlatformAdapter {
         case "reply":
           components.push({
             type: ComponentType.Reply,
-            messageId: String(seg.data.id ?? ""),
+            messageId: String(data.id ?? ""),
             toDict() { return { type: "reply", data: seg.data }; },
-          } as any);
+          } as unknown as MessageComponent);
           break;
 
         case "face":
           components.push({
             type: ComponentType.Face,
-            faceId: String(seg.data.id ?? ""),
+            faceId: String(data.id ?? ""),
             toDict() { return { type: "face", data: seg.data }; },
-          } as any);
+          } as unknown as MessageComponent);
           break;
 
         case "record":
           components.push({
             type: ComponentType.Record,
-            url: seg.data.url ?? seg.data.file ?? "",
+            url: (data.url as string) ?? (data.file as string) ?? "",
             toDict() { return { type: "record", data: seg.data }; },
-          } as any);
+          } as unknown as MessageComponent);
           break;
 
         default:
           components.push({
             type: ComponentType.Unknown,
             toDict() { return { type: seg.type, data: seg.data }; },
-          } as any);
+          } as unknown as MessageComponent);
           break;
       }
     }

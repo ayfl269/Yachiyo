@@ -1,6 +1,7 @@
 import type { Provider } from "./provider.js";
 import type { ProviderType } from "./types.js";
 import type { SqliteProviderStore } from "./sqlite-provider-store.js";
+import type { ChatProviderConfig, EmbeddingProviderConfig, RerankProviderConfig, TTSProviderConfigMap, STTProviderConfigMap } from "./factory.js";
 
 export type AnyProvider = Provider | STTProvider | TTSProvider | EmbeddingProvider | RerankProvider;
 
@@ -453,7 +454,7 @@ export class ProviderManager {
    * Dynamically import a provider class by type string.
    * Returns the constructor, or null if the type is unknown.
    */
-  async dynamicImportProvider(type: string): Promise<(new (config: any) => any) | null> {
+  async dynamicImportProvider(type: string): Promise<(new (config: Record<string, unknown>) => unknown) | null> {
     const { dynamicImportProviderModule } = await import("./factory.js");
     return dynamicImportProviderModule(type);
   }
@@ -777,7 +778,7 @@ export class ProviderManager {
     const sttTypes = new Set(["openai_stt"]);
 
     if (chatTypes.has(type)) {
-      const provider = await dynamicCreateChatProvider(type, config as any);
+      const provider = await dynamicCreateChatProvider(type, config as unknown as ChatProviderConfig);
       if (provider) {
         this.providerInsts.push(provider);
         this.instMap.set(id, provider);
@@ -786,7 +787,7 @@ export class ProviderManager {
         throw new Error(`[ProviderManager] Failed to create chat provider of type: ${type}`);
       }
     } else if (embeddingTypes.has(type)) {
-      const provider = await dynamicCreateEmbeddingProvider(type, config as any);
+      const provider = await dynamicCreateEmbeddingProvider(type, config as unknown as EmbeddingProviderConfig);
       if (provider) {
         this.embeddingInsts.push(provider);
         this.instMap.set(id, provider);
@@ -795,7 +796,7 @@ export class ProviderManager {
         throw new Error(`[ProviderManager] Failed to create embedding provider of type: ${type}`);
       }
     } else if (rerankTypes.has(type)) {
-      const provider = await dynamicCreateRerankProvider(type, config as any);
+      const provider = await dynamicCreateRerankProvider(type, config as unknown as RerankProviderConfig);
       if (provider) {
         this.rerankInsts.push(provider);
         this.instMap.set(id, provider);
@@ -804,7 +805,7 @@ export class ProviderManager {
         throw new Error(`[ProviderManager] Failed to create rerank provider of type: ${type}`);
       }
     } else if (ttsTypes.has(type)) {
-      const provider = await dynamicCreateTtsProvider(type, config as any);
+      const provider = await dynamicCreateTtsProvider(type, config as unknown as TTSProviderConfigMap);
       if (provider) {
         this.ttsInsts.push(provider);
         this.instMap.set(id, provider);
@@ -813,7 +814,7 @@ export class ProviderManager {
         throw new Error(`[ProviderManager] Failed to create TTS provider of type: ${type}`);
       }
     } else if (sttTypes.has(type)) {
-      const provider = await dynamicCreateSttProvider(type, config as any);
+      const provider = await dynamicCreateSttProvider(type, config as unknown as STTProviderConfigMap);
       if (provider) {
         this.sttInsts.push(provider);
         this.instMap.set(id, provider);
@@ -825,12 +826,12 @@ export class ProviderManager {
       // Try dynamic import as fallback for unknown types
       const cls = await dynamicImportProviderModule(type);
       if (cls) {
-        const instance = new cls(config);
+        const instance = new cls(config) as Record<string, unknown>;
         // Default to chat provider registration
         if ("textChat" in instance) {
-          this.providerInsts.push(instance);
+          this.providerInsts.push(instance as unknown as Provider);
         }
-        this.instMap.set(id, instance);
+        this.instMap.set(id, instance as unknown as AnyProvider);
         console.info(`[ProviderManager] Dynamically loaded unknown provider type: ${type}`);
       } else {
         throw new Error(`[ProviderManager] Unknown provider type: ${type}`);

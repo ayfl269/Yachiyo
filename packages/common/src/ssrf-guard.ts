@@ -37,8 +37,8 @@ export async function safeFetch(
     await assertSafeUrl(currentUrl);
 
     // Fetch with manual redirect mode to intercept and count hops
-    const fetchInit: RequestInit = { ...currentInit, redirect: "manual" };
-    delete (fetchInit as any).allowedContentTypes;
+    const fetchInit: RequestInit & { allowedContentTypes?: unknown } = { ...currentInit, redirect: "manual" };
+    delete fetchInit.allowedContentTypes;
 
     const response = await fetch(currentUrl, fetchInit);
 

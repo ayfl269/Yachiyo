@@ -195,8 +195,8 @@ function maskSecret(value: unknown): string {
  * with the masked sentinel. Returns a shallow copy so the caller's original
  * object (which may hold the real key for internal use) is untouched.
  */
-function maskProviderSecrets<T extends Record<string, any>>(config: T): T {
-  const out: Record<string, any> = { ...config };
+function maskProviderSecrets<T extends Record<string, unknown>>(config: T): T {
+  const out: Record<string, unknown> = { ...config };
   if ("key" in out) out.key = maskSecret(out.key);
   if ("apiKey" in out) out.apiKey = maskSecret(out.apiKey);
   return out as T;
@@ -1638,7 +1638,7 @@ export class DashboardServer {
     if (pathname === "/api/tools/list" && req.method === "GET") {
       try {
         const toolMgr = this.ctx.toolManager;
-        const mcpClientDict = toolMgr?.mcpClientDict as Map<string, any> | undefined;
+        const mcpClientDict = toolMgr?.mcpClientDict as Map<string, unknown> | undefined;
         const tools: Array<{ name: string; description: string; origin: string; active: boolean; readonly: boolean }> = [];
 
         // Collect from funcList (all registered tools, including MCP tools)
@@ -1661,7 +1661,8 @@ export class DashboardServer {
         // (e.g. mid-connection race). This is a defensive fallback.
         if (mcpClientDict) {
           for (const [serverName, client] of mcpClientDict.entries()) {
-            const mcpTools = client?.tools || [];
+            const mcpClient = client as { tools?: Array<{ name?: string; description?: string }> } | null;
+            const mcpTools = mcpClient?.tools || [];
             for (const tool of mcpTools) {
               if (!tools.find(t => t.name === tool.name)) {
                 tools.push({
@@ -2030,7 +2031,7 @@ export class DashboardServer {
         });
 
         // 构建元数据映射（简化版）
-        const modelMetadata: Record<string, any> = {};
+        const modelMetadata: Record<string, unknown> = {};
         for (const model of models) {
           modelMetadata[model] = {
             modalities: { input: ["text", "image"] },
@@ -3822,9 +3823,9 @@ export class DashboardServer {
    * 若用户使用 OpenAI 兼容代理（如 one-api）代理 Gemini 模型，
    * 应将 Provider 类型选为 openai/openai_responses 以使用对应格式获取列表。
    */
-  private async fetchModelsFromProvider(type: string, config: Record<string, any>): Promise<string[]> {
-    const apiKey = config.apiKey;
-    const rawBaseUrl = (config.baseUrl || "").replace(/\/+$/, "");
+  private async fetchModelsFromProvider(type: string, config: Record<string, unknown>): Promise<string[]> {
+    const apiKey = (config.apiKey as string) ?? "";
+    const rawBaseUrl = ((config.baseUrl as string | undefined) || "").replace(/\/+$/, "");
 
     // OpenAI 兼容接口 (openai, openai_responses)
     if (type === "openai" || type === "openai_responses") {
@@ -3942,7 +3943,7 @@ export class DashboardServer {
   /**
    * 构建提供商模板配置，用于前端"添加供应商源"对话框
    */
-  private buildProviderTemplates(): Record<string, any> {
+  private buildProviderTemplates(): Record<string, unknown> {
     return {
       openai: {
         id: "openai",

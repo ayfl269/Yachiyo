@@ -390,8 +390,8 @@ export class MCPClient {
           "@modelcontextprotocol/sdk/client/streamableHttp.js"
         );
         const transport = new StreamableHTTPClientTransport(
-          new URL(url) as any,
-          { headers } as any,
+          new URL(url) as unknown as ConstructorParameters<typeof StreamableHTTPClientTransport>[0],
+          { headers } as unknown as ConstructorParameters<typeof StreamableHTTPClientTransport>[1],
         );
         const client = new Client(
           { name: `agent-mcp-${_name}`, version: "1.0.0" },
@@ -405,8 +405,8 @@ export class MCPClient {
           "@modelcontextprotocol/sdk/client/sse.js"
         );
         const transport = new SSEClientTransport(
-          new URL(url) as any,
-          { headers } as any,
+          new URL(url) as unknown as ConstructorParameters<typeof SSEClientTransport>[0],
+          { headers } as unknown as ConstructorParameters<typeof SSEClientTransport>[1],
         );
         const client = new Client(
           { name: `agent-mcp-${_name}`, version: "1.0.0" },

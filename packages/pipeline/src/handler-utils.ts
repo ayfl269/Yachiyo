@@ -3,13 +3,13 @@ import type { StarHandlerMetadata } from "@yachiyo/plugin/handler.js";
 import type { EventType } from "@yachiyo/plugin/event-type.js";
 import { EventResult } from "@yachiyo/message/event-result.js";
 
-function isAsyncGenerator(obj: unknown): obj is AsyncGenerator<any, any> {
+function isAsyncGenerator(obj: unknown): obj is AsyncGenerator<unknown, unknown> {
   return obj != null &&
     typeof obj === "object" &&
     Symbol.asyncIterator in obj &&
     typeof obj[Symbol.asyncIterator] === "function" &&
     "next" in obj &&
-    typeof (obj as AsyncGenerator<any, any>).next === "function";
+    typeof (obj as AsyncGenerator<unknown, unknown>).next === "function";
 }
 
 export async function* callHandler(

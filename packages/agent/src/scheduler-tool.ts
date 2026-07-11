@@ -50,7 +50,7 @@ function getToolContext(_ctx: unknown): SchedulerToolContext {
   // When called from the pipeline, `ctx` is a MessageEvent instance that has
   // `unifiedMsgOrigin` (getter), `sessionId`, and `platformMeta` directly on
   // it — not nested under an `event` key. Normalize both shapes.
-  const maybeEvent = ctx as any;
+  const maybeEvent = ctx as { unifiedMsgOrigin?: string; sessionId?: string; platformMeta?: { id?: string } };
   if (maybeEvent.unifiedMsgOrigin && typeof maybeEvent.unifiedMsgOrigin === "string") {
     return {
       event: {

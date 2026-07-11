@@ -127,14 +127,14 @@ export class AnthropicProvider implements Provider {
     if (funcTool && !funcTool.empty()) {
       const tools = funcTool.anthropicSchema();
       if (enableCaching && tools.length > 0) {
-        const lastTool = tools[tools.length - 1] as any;
+        const lastTool = tools[tools.length - 1] as Record<string, unknown>;
         lastTool.cache_control = { type: "ephemeral" };
       }
       body.tools = tools;
     }
 
     if (enableCaching && messages.length > 0) {
-      const setCacheControlOnMessage = (msg: any) => {
+      const setCacheControlOnMessage = (msg: { content: unknown }) => {
         if (typeof msg.content === "string") {
           msg.content = [
             {
@@ -144,8 +144,8 @@ export class AnthropicProvider implements Provider {
             },
           ];
         } else if (Array.isArray(msg.content) && msg.content.length > 0) {
-          const lastBlock = msg.content[msg.content.length - 1];
-          (lastBlock as any).cache_control = { type: "ephemeral" };
+          const lastBlock = msg.content[msg.content.length - 1] as Record<string, unknown>;
+          lastBlock.cache_control = { type: "ephemeral" };
         }
       };
       // Set cache control on the last message

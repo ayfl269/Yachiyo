@@ -186,8 +186,8 @@ export class OpenAIProvider implements Provider {
         } else if (Array.isArray(rawContent)) {
           // Extract text from array-format content parts
           const textParts = rawContent
-            .filter((p: any) => p?.type === "text" && p?.text)
-            .map((p: any) => p.text as string);
+            .filter((p: { type?: string; text?: string }) => p?.type === "text" && p?.text)
+            .map((p: { type?: string; text?: string }) => p.text as string);
           result.completionText = textParts.length > 0 ? textParts.join("") : undefined;
         } else {
           result.completionText = String(rawContent);
@@ -235,7 +235,7 @@ export class OpenAIProvider implements Provider {
         const estimated = this.estimateUsage(inputMessages, result.completionText ?? "");
         result.usage = estimated;
       } else {
-        const promptTokensDetails = u.prompt_tokens_details as any;
+        const promptTokensDetails = u.prompt_tokens_details as { cached_tokens?: number } | undefined;
         const cacheReadInputTokens = promptTokensDetails?.cached_tokens ?? 0;
         result.usage = {
           promptTokens,

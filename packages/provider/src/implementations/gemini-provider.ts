@@ -99,9 +99,9 @@ export class GeminiProvider implements Provider {
   // Map to store active context caches
   private activeCaches = new Map<string, {
     cacheName: string;
-    cachedContents: any[];
-    cachedSystemInstruction?: any;
-    cachedTools?: any;
+    cachedContents: unknown[];
+    cachedSystemInstruction?: unknown;
+    cachedTools?: unknown;
     expireTime: number; // timestamp in ms
   }>();
 
@@ -146,15 +146,15 @@ export class GeminiProvider implements Provider {
 
   private async createContextCache(
     useModel: string,
-    contents: any[],
-    systemInstruction: any,
-    tools: any[] | undefined,
+    contents: unknown[],
+    systemInstruction: unknown,
+    tools: unknown[] | undefined,
     ttlStr: string
   ): Promise<{ name: string; expireTime: string } | null> {
     const modelName = useModel.startsWith("models/") ? useModel : `models/${useModel}`;
     const url = `${this.baseUrl}/cachedContents`;
 
-    const body: Record<string, any> = {
+    const body: Record<string, unknown> = {
       model: modelName,
       contents,
       ttl: ttlStr,
@@ -191,7 +191,7 @@ export class GeminiProvider implements Provider {
   private async prepareRequest(
     params: ProviderChatParams,
     isStream: boolean
-  ): Promise<{ body: Record<string, unknown>; url: string; sanitized: any[] }> {
+  ): Promise<{ body: Record<string, unknown>; url: string; sanitized: unknown[] }> {
     const { contexts, funcTool, model } = params;
     const useModel = model ?? this.model;
 
@@ -228,7 +228,7 @@ export class GeminiProvider implements Provider {
       body.generationConfig = generationConfig;
     }
 
-    let tools: any[] | undefined = undefined;
+    let tools: unknown[] | undefined = undefined;
     if (funcTool && !funcTool.empty()) {
       tools = [funcTool.googleSchema()];
     }
