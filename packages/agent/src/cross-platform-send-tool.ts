@@ -12,13 +12,23 @@
 
 import { createFunctionTool, type FunctionTool } from "./tool.js";
 import type { ContextWrapper, CallToolResult } from "./types.js";
-import { ComponentType } from "@yachiyo/message/components.js";
-import type { MessageComponent } from "@yachiyo/message/components.js";
+
+// ── Minimal message component type ──
+// Avoids a direct dependency on @yachiyo/message (not in agent's package.json).
+// Used only for constructing plain-text components locally.
+
+interface PlainMessageComponent {
+  type: string;
+  text: string;
+  toDict(): Record<string, unknown>;
+}
 
 // ── Minimal adapter lookup interface ──
 // Avoids a direct dependency on @yachiyo/platform (which would create a
 // circular import since platform already depends on agent/types).
 // The real AdapterRegistry satisfies this interface structurally.
+// components is typed as unknown[] to avoid importing MessageComponent
+// from @yachiyo/message (the real adapter accepts the concrete type).
 
 export interface AdapterInfo {
   id: string;
@@ -33,7 +43,7 @@ export interface AdapterLookup {
     isRunning: boolean;
     sendProactiveMessage(
       target: { umo: string; sessionId: string; platformId: string },
-      components: MessageComponent[],
+      components: unknown[],
     ): Promise<boolean>;
   }>;
   getAdapter(id: string): {
@@ -41,7 +51,7 @@ export interface AdapterLookup {
     isRunning: boolean;
     sendProactiveMessage(
       target: { umo: string; sessionId: string; platformId: string },
-      components: MessageComponent[],
+      components: unknown[],
     ): Promise<boolean>;
   } | undefined;
 }
@@ -249,14 +259,14 @@ async function handleSend(
   }
 
   // Build message components
-  const components: MessageComponent[] = [
+  const components: PlainMessageComponent[] = [
     {
-      type: ComponentType.Plain,
+      type: "Plain",
       text: message,
       toDict() {
         return { type: "text", data: { text: message } };
       },
-    } as MessageComponent,
+    },
   ];
 
   const target = {
