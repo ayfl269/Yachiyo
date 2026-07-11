@@ -301,7 +301,13 @@ class BingSearchProvider implements WebSearchProvider {
       const titleMatch = titleRegex.exec(block);
       if (!titleMatch) continue;
 
-      const resultUrl = titleMatch[1].replace(/&amp;/g, "&");
+      const resultUrl = titleMatch[1]
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, "\"")
+        .replace(/&#0?39;/g, "'")
+        .replace(/&nbsp;/g, " ");
       const title = titleMatch[2].replace(/<[^>]*>/g, "").trim();
 
       // Skip Bing internal links
