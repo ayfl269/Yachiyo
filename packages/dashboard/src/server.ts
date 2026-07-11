@@ -332,7 +332,7 @@ export class DashboardServer {
   constructor(ctx: BootstrapContext, options: DashboardServerOptions = {}) {
     this.ctx = ctx;
     this.port = options.port ?? 8000;
-    this.host = options.host ?? "127.0.0.1";
+    this.host = options.host ?? "0.0.0.0";
     this.debugChatEnabled = options.debugChatEnabled === true;
     this.allowedOrigins = options.allowedOrigins ? new Set(options.allowedOrigins) : undefined;
   }

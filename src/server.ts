@@ -23,7 +23,7 @@ async function main() {
   const webhookHost = process.env.WEBHOOK_HOST ?? "0.0.0.0";
   const dashboardEnabled = process.env.DASHBOARD_ENABLED !== "false";
   const dashboardPort = parseInt(process.env.DASHBOARD_PORT ?? "8000", 10);
-  const dashboardHost = process.env.DASHBOARD_HOST ?? "127.0.0.1";
+  const dashboardHost = process.env.DASHBOARD_HOST ?? "0.0.0.0";
 
 
   console.log(`[Server] Starting${providerType ? ` with provider: ${providerType}, model: ${model}` : " without LLM provider"}`);
