@@ -52,6 +52,7 @@ import { proxyManager } from "@yachiyo/agent/proxy-manager.js";
 import { getSubAgentManagementTools } from "@yachiyo/agent/subagent-create-tool.js";
 import { SCHEDULER_MIGRATIONS, SqliteSchedulerTaskStore } from "@yachiyo/agent/scheduler-task-store.js";
 import { createSchedulerTool } from "@yachiyo/agent/scheduler-tool.js";
+import { createCrossPlatformSendTool } from "@yachiyo/agent/cross-platform-send-tool.js";
 import { TaskScheduler } from "@yachiyo/pipeline/task-scheduler.js";
 import { ProviderType } from "@yachiyo/provider/types.js";
 import type { DashboardServer } from "@yachiyo/dashboard/server.js";
@@ -354,6 +355,11 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
   const schedulerTool = createSchedulerTool({ sqliteStore: sqliteSchedulerTaskStore });
   toolManager.funcList.push(schedulerTool);
   const taskScheduler = new TaskScheduler(sqliteSchedulerTaskStore);
+
+  // 注册跨平台消息发送工具
+  const crossPlatformSendTool = createCrossPlatformSendTool({ adapterLookup: adapterRegistry });
+  toolManager.funcList.push(crossPlatformSendTool);
+
   // 6. 创建管线调度器
   const pipelineContext: PipelineContext = {
     get config() { return configManager.getActiveConfig() ?? defaultConfig; },

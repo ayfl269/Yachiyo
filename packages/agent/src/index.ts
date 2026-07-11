@@ -240,6 +240,15 @@ export {
 } from "./scheduler-tool.js";
 export type { SchedulerToolContext, CreateSchedulerToolOptions } from "./scheduler-tool.js";
 
+// Cross-platform message sending tool
+export { createCrossPlatformSendTool } from "./cross-platform-send-tool.js";
+export type {
+  CrossPlatformSendToolContext,
+  CreateCrossPlatformSendToolOptions,
+  AdapterLookup,
+  AdapterInfo,
+} from "./cross-platform-send-tool.js";
+
 // Memory store
 export {
   SqliteMemoryStore,
