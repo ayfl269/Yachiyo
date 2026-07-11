@@ -22,15 +22,21 @@ import type { OneBot11AdapterConfig } from "../config.js";
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer, type Server, type IncomingMessage } from "http";
 
-/** 解码常见的 HTML 实体（CQ 码中 &amp; 等） */
+/** 解码常见的 HTML 实体（CQ 码中 &amp; 等）— 单次扫描避免双重解码 */
 function decodeHtmlEntities(str: string): string {
   if (!str) return str;
-  return str
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'");
+  return str.replace(/&(amp|lt|gt|quot|#0?39|nbsp);/g, (_match, entity: string) => {
+    switch (entity) {
+      case "amp": return "&";
+      case "lt": return "<";
+      case "gt": return ">";
+      case "quot": return '"';
+      case "39":
+      case "039": return "'";
+      case "nbsp": return " ";
+      default: return _match;
+    }
+  });
 }
 
 // ── OneBot 11 Protocol Types ──

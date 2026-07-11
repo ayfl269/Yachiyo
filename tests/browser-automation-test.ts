@@ -144,7 +144,7 @@ async function runTests(): Promise<void> {
   {
     const result = await callTool(createBrowserGetTextTool(), pageId, "a", "href");
     const text = getText(result);
-    logResult("提取链接 href", text.includes("example.com") || text.includes("iana.org"), text.slice(0, 80));
+    logResult("提取链接 href", /(?:example\.com|iana\.org)/.test(text), text.slice(0, 80));
   }
 
   // ── 9. browser_execute_script ──

@@ -8,6 +8,8 @@ on:
 
 jobs:
   backend-checks:
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -48,6 +50,8 @@ jobs:
         run: pnpm run test:windows
 
   security-audit:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
 
     steps:
@@ -73,6 +77,8 @@ jobs:
         # were found, making the security audit ineffective.
 
   frontend-checks:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
 
     steps:

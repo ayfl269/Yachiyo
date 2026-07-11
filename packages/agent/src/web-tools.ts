@@ -117,17 +117,57 @@ const turndownService = new TurndownService({
 
 function htmlToMarkdown(html: string): string {
   // Strip non-content elements before conversion.
+  // Loop until stable to defeat nested-tag bypass tricks (e.g. "<scr<script>ipt>").
   let cleaned = html;
-  cleaned = cleaned.replace(/<head[\s\S]*?<\/head>/gi, "");
-  cleaned = cleaned.replace(/<script[\s\S]*?<\/script>/gi, "");
-  cleaned = cleaned.replace(/<style[\s\S]*?<\/style>/gi, "");
-  cleaned = cleaned.replace(/<nav[\s\S]*?<\/nav>/gi, "");
-  cleaned = cleaned.replace(/<footer[\s\S]*?<\/footer>/gi, "");
-  cleaned = cleaned.replace(/<noscript[\s\S]*?<\/noscript>/gi, "");
+  let prev: string;
+  do {
+    prev = cleaned;
+    cleaned = cleaned
+      .replace(/<head[\s\S]*?<\/head>/gi, "")
+      .replace(/<script[\s\S]*?<\/script>/gi, "")
+      .replace(/<style[\s\S]*?<\/style>/gi, "")
+      .replace(/<nav[\s\S]*?<\/nav>/gi, "")
+      .replace(/<footer[\s\S]*?<\/footer>/gi, "")
+      .replace(/<noscript[\s\S]*?<\/noscript>/gi, "");
+  } while (cleaned !== prev);
 
   const md = turndownService.turndown(cleaned);
   // Collapse excessive blank lines and trim trailing whitespace.
   return md.replace(/\n{3,}/g, "\n\n").replace(/[ \t]+$/gm, "").trim();
+}
+
+/**
+ * Strip all HTML tags from a string, looping until stable to prevent
+ * bypass via nested constructs (e.g. "<scr<script>ipt>").
+ */
+function stripHtmlTags(html: string): string {
+  let result = html;
+  let prev: string;
+  do {
+    prev = result;
+    result = result.replace(/<[^>]*>/g, "");
+  } while (result !== prev);
+  return result;
+}
+
+/**
+ * Decode common HTML entities in a single pass to avoid double-unescaping.
+ * Handles: &amp; &lt; &gt; &quot; &#39; &#0?39; &nbsp;
+ */
+function decodeHtmlEntitiesOnce(str: string): string {
+  if (!str) return str;
+  return str.replace(/&(amp|lt|gt|quot|#0?39|nbsp);/g, (_match, entity: string) => {
+    switch (entity) {
+      case "amp": return "&";
+      case "lt": return "<";
+      case "gt": return ">";
+      case "quot": return '"';
+      case "39":
+      case "039": return "'";
+      case "nbsp": return " ";
+      default: return _match;
+    }
+  });
 }
 
 // ── Web Fetch Tool ──
@@ -301,14 +341,8 @@ class BingSearchProvider implements WebSearchProvider {
       const titleMatch = titleRegex.exec(block);
       if (!titleMatch) continue;
 
-      const resultUrl = titleMatch[1]
-        .replace(/&amp;/g, "&")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/&quot;/g, "\"")
-        .replace(/&#0?39;/g, "'")
-        .replace(/&nbsp;/g, " ");
-      const title = titleMatch[2].replace(/<[^>]*>/g, "").trim();
+      const resultUrl = decodeHtmlEntitiesOnce(titleMatch[1]);
+      const title = stripHtmlTags(titleMatch[2]).trim();
 
       // Skip Bing internal links
       if (!resultUrl || resultUrl.startsWith("/") || resultUrl.includes("bing.com/search")) continue;
@@ -319,14 +353,14 @@ class BingSearchProvider implements WebSearchProvider {
       // Pattern 1: <p class="b_lineclamp...">
       const snippet1 = /<p[^>]*class="[^"]*b_lineclamp[^"]*"[^>]*>([\s\S]*?)<\/p>/i.exec(block);
       if (snippet1) {
-        snippet = snippet1[1].replace(/<[^>]*>/g, "").trim();
+        snippet = stripHtmlTags(snippet1[1]).trim();
       }
 
       // Pattern 2: <div class="b_caption"><p>...</p></div>
       if (!snippet) {
         const snippet2 = /<div[^>]*class="[^"]*b_caption[^"]*"[^>]*>[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/i.exec(block);
         if (snippet2) {
-          snippet = snippet2[1].replace(/<[^>]*>/g, "").trim();
+          snippet = stripHtmlTags(snippet2[1]).trim();
         }
       }
 
@@ -334,7 +368,7 @@ class BingSearchProvider implements WebSearchProvider {
       if (!snippet) {
         const snippet3 = /class="[^"]*b_caption[^"]*"[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/i.exec(block);
         if (snippet3) {
-          snippet = snippet3[1].replace(/<[^>]*>/g, "").trim();
+          snippet = stripHtmlTags(snippet3[1]).trim();
         }
       }
 
@@ -382,14 +416,14 @@ class GoogleSearchProvider implements WebSearchProvider {
       } catch {
         resultUrl = titleMatch[1];
       }
-      const title = titleMatch[2].replace(/<[^>]*>/g, "").trim();
+      const title = stripHtmlTags(titleMatch[2]).trim();
 
       // Extract snippet
       let snippet = "";
       const snippetRegex = /<div[^>]*class="[^"]*(?:VwiC3b|IsZvec)[^"]*"[^>]*>([\s\S]*?)<\/div>/i;
       const snippetMatch = snippetRegex.exec(block);
       if (snippetMatch) {
-        snippet = snippetMatch[1].replace(/<[^>]*>/g, "").trim();
+        snippet = stripHtmlTags(snippetMatch[1]).trim();
       }
 
       if (title && resultUrl && !resultUrl.startsWith("/")) {

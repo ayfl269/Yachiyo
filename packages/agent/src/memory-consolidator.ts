@@ -651,7 +651,9 @@ ${bufferTexts.join("\n")}
     // "mo" (month) MUST appear before "m" (minute) in the alternation, otherwise
     // "1month" would match as "1m" (= 1 minute) due to leftmost-first matching.
     // Approximate units: 1mo = 30 days, 1y = 365 days, 1w = 7 days.
-    const regex = /(\d+)\s*(mo|y|w|d|h|m|s)/gi;
+    // Limit digit count to {1,10} to prevent polynomial backtracking on
+    // extremely long digit sequences (ReDoS mitigation).
+    const regex = /(\d{1,10})\s*(mo|y|w|d|h|m|s)/gi;
     let totalMs = 0;
     let match: RegExpExecArray | null;
     while ((match = regex.exec(trimmed)) !== null) {
