@@ -619,7 +619,7 @@ export class DashboardServer {
       }
 
       const db = this.ctx.dbManager.getDb("config");
-      const user = db.prepare("SELECT * FROM dashboard_users WHERE username = ?").get(username) as { username: string; password_hash: string; is_first_login: number } | undefined;
+      const user = db.prepare("SELECT username, password_hash, is_first_login, created_at, updated_at FROM dashboard_users WHERE username = ?").get(username) as { username: string; password_hash: string; is_first_login: number } | undefined;
 
       if (!user || !verifyPassword(password, user.password_hash)) {
         res.writeHead(401);
@@ -785,7 +785,7 @@ export class DashboardServer {
       }
 
       const db = this.ctx.dbManager.getDb("config");
-      const user = db.prepare("SELECT * FROM dashboard_users WHERE username = ?").get(session.username) as { username: string; password_hash: string; is_first_login: number } | undefined;
+      const user = db.prepare("SELECT username, password_hash, is_first_login, created_at, updated_at FROM dashboard_users WHERE username = ?").get(session.username) as { username: string; password_hash: string; is_first_login: number } | undefined;
       if (!user || !verifyPassword(currentPassword, user.password_hash)) {
         res.writeHead(401);
         res.end(JSON.stringify({ error: "Unauthorized", message: "当前密码错误" }));

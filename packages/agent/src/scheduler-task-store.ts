@@ -197,7 +197,7 @@ export class SqliteSchedulerTaskStore {
   }
 
   get(id: string): SchedulerTask | null {
-    const row = this.db.prepare("SELECT * FROM scheduler_tasks WHERE id = ?").get(id) as SchedulerTaskRow | undefined;
+    const row = this.db.prepare("SELECT id, type, title, description, status, priority, scheduled_at, recurrence, goal, plan, current_step, umo, session_id, platform_id, payload, last_fired_at, next_fire_at, created_at, updated_at FROM scheduler_tasks WHERE id = ?").get(id) as SchedulerTaskRow | undefined;
     if (!row) return null;
     return this.rowToTask(row);
   }
@@ -232,7 +232,7 @@ export class SqliteSchedulerTaskStore {
     }
 
     const rows = this.db.prepare(
-      `SELECT * FROM scheduler_tasks${whereClause} ORDER BY priority DESC, created_at DESC LIMIT ?`
+      `SELECT id, type, title, description, status, priority, scheduled_at, recurrence, goal, plan, current_step, umo, session_id, platform_id, payload, last_fired_at, next_fire_at, created_at, updated_at FROM scheduler_tasks${whereClause} ORDER BY priority DESC, created_at DESC LIMIT ?`
     ).all(...params, limit) as SchedulerTaskRow[];
 
     return rows.map((r) => this.rowToTask(r));
@@ -262,7 +262,7 @@ export class SqliteSchedulerTaskStore {
     }
 
     const rows = this.db.prepare(
-      `SELECT * FROM scheduler_tasks${whereClause} ORDER BY priority DESC, updated_at DESC LIMIT ?`
+      `SELECT id, type, title, description, status, priority, scheduled_at, recurrence, goal, plan, current_step, umo, session_id, platform_id, payload, last_fired_at, next_fire_at, created_at, updated_at FROM scheduler_tasks${whereClause} ORDER BY priority DESC, updated_at DESC LIMIT ?`
     ).all(...params, limit) as SchedulerTaskRow[];
 
     return rows.map((r) => this.rowToTask(r));
@@ -275,7 +275,7 @@ export class SqliteSchedulerTaskStore {
   getDueTasks(now: Date): SchedulerTask[] {
     const nowIso = now.toISOString();
     const rows = this.db.prepare(`
-      SELECT * FROM scheduler_tasks
+      SELECT id, type, title, description, status, priority, scheduled_at, recurrence, goal, plan, current_step, umo, session_id, platform_id, payload, last_fired_at, next_fire_at, created_at, updated_at FROM scheduler_tasks
       WHERE next_fire_at IS NOT NULL
         AND next_fire_at <= ?
         AND status IN ('pending', 'active')

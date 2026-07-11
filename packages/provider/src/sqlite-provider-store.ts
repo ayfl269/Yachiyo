@@ -214,12 +214,12 @@ export class SqliteProviderStore {
   }
 
   getProviderConfig(id: string): StoredProviderConfig | null {
-    const row = this.db.prepare("SELECT * FROM provider_configs WHERE id = ?").get(id) as ProviderConfigRow | undefined;
+    const row = this.db.prepare("SELECT id, type, config, is_default, is_fallback, sort_order, created_at, updated_at FROM provider_configs WHERE id = ?").get(id) as ProviderConfigRow | undefined;
     return row ? this.rowToProviderConfig(row) : null;
   }
 
   getAllProviderConfigs(): StoredProviderConfig[] {
-    const rows = this.db.prepare("SELECT * FROM provider_configs ORDER BY sort_order, created_at").all() as ProviderConfigRow[];
+    const rows = this.db.prepare("SELECT id, type, config, is_default, is_fallback, sort_order, created_at, updated_at FROM provider_configs ORDER BY sort_order, created_at").all() as ProviderConfigRow[];
     return rows.map((r) => this.rowToProviderConfig(r));
   }
 
@@ -274,7 +274,7 @@ export class SqliteProviderStore {
   }
 
   getAllMcpServerConfigs(): StoredMcpServerConfig[] {
-    const rows = this.db.prepare("SELECT * FROM mcp_server_configs").all() as McpServerConfigRow[];
+    const rows = this.db.prepare("SELECT server_name, config, created_at, updated_at FROM mcp_server_configs").all() as McpServerConfigRow[];
     return rows.map((r) => ({
       serverName: r.server_name,
       config: JSON.parse(r.config),
@@ -337,13 +337,13 @@ export class SqliteProviderStore {
 
   getProviderSource(id: string): StoredProviderSource | null {
     this.ensureProviderSourcesTable();
-    const row = this.db.prepare("SELECT * FROM provider_sources WHERE id = ?").get(id) as ProviderSourceRow | undefined;
+    const row = this.db.prepare("SELECT id, type, provider_type, provider, key, api_base, enable, extra_config, created_at, updated_at FROM provider_sources WHERE id = ?").get(id) as ProviderSourceRow | undefined;
     return row ? this.rowToProviderSource(row) : null;
   }
 
   getAllProviderSources(): StoredProviderSource[] {
     this.ensureProviderSourcesTable();
-    const rows = this.db.prepare("SELECT * FROM provider_sources ORDER BY created_at").all() as ProviderSourceRow[];
+    const rows = this.db.prepare("SELECT id, type, provider_type, provider, key, api_base, enable, extra_config, created_at, updated_at FROM provider_sources ORDER BY created_at").all() as ProviderSourceRow[];
     return rows.map((r) => this.rowToProviderSource(r));
   }
 

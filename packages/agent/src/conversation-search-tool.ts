@@ -35,6 +35,11 @@ export interface ConversationSearchStore {
     platformIds?: string[];
     searchQuery?: string;
   }): Promise<[ConversationRecord[], number]>;
+  getConversationById(id: string): Promise<ConversationRecord | null>;
+  searchConversationsByContent(
+    query: string,
+    options: { platformIds?: string[]; limit?: number; offset?: number },
+  ): Promise<{ conversationId: string; titleMatched: boolean; contentMatched: boolean; snippet: string }[]>;
 }
 
 /** Minimal conversation record shape needed by the search tool. */
@@ -62,21 +67,6 @@ interface HistoryMessage {
   content: string;
 }
 
-interface SearchMatch {
-  conversation: ConversationRecord;
-  titleMatched: boolean;
-  /** Messages that contain the query, with surrounding context. */
-  messageExcerpts: MessageExcerpt[];
-}
-
-interface MessageExcerpt {
-  role: string;
-  /** A snippet of the message content around the match, or the full message if short. */
-  snippet: string;
-  /** True if this message directly contains the query. */
-  matched: boolean;
-}
-
 // ── Helpers ──
 
 /** Parse the history JSON string into an array of messages. */
@@ -88,30 +78,6 @@ function parseHistory(historyJson: string): HistoryMessage[] {
     // ignore parse errors
   }
   return [];
-}
-
-/**
- * Create a text snippet around the first occurrence of `query` in `text`.
- * Returns the full text if it's shorter than the snippet window.
- */
-function makeSnippet(text: string, query: string, contextChars = 100): string {
-  const trimmed = text.trim();
-  if (trimmed.length <= contextChars * 2 + 20) return trimmed;
-
-  const lowerText = trimmed.toLowerCase();
-  const lowerQuery = query.toLowerCase();
-  const idx = lowerText.indexOf(lowerQuery);
-
-  if (idx === -1) {
-    // No match in this message — return beginning
-    return trimmed.slice(0, contextChars) + "...";
-  }
-
-  const start = Math.max(0, idx - contextChars);
-  const end = Math.min(trimmed.length, idx + query.length + contextChars);
-  const prefix = start > 0 ? "..." : "";
-  const suffix = end < trimmed.length ? "..." : "";
-  return prefix + trimmed.slice(start, end) + suffix;
 }
 
 /** Format a date for display. */
@@ -181,84 +147,12 @@ export function createConversationSearchTool(
       }
 
       try {
-        // Fetch conversations, optionally filtered by platform.
-        // Use getFilteredConversations with a large page size to get all conversations,
-        // then search through history content in JavaScript.
         const platformIds = platformId ? [platformId] : undefined;
 
-        // Fetch in pages to avoid loading everything at once if there are many conversations.
-        const allMatches: SearchMatch[] = [];
-        const pageSize = 100;
-        let page = 1;
-        let total = Infinity;
+        // Use FTS5 search to find matching conversations by title and message content.
+        const ftsResults = await store.searchConversationsByContent(query, { platformIds, limit });
 
-        while (allMatches.length < limit && page <= Math.ceil(total / pageSize) + 1) {
-          const [conversations, totalCount] = await store.getFilteredConversations({
-            page,
-            pageSize,
-            platformIds,
-          });
-          total = totalCount;
-
-          for (const conv of conversations) {
-            const titleMatched = conv.title.toLowerCase().includes(query.toLowerCase());
-
-            // Search through message history
-            const messages = parseHistory(conv.history);
-            const messageExcerpts: MessageExcerpt[] = [];
-            let contentMatched = false;
-
-            if (includeExcerpts) {
-              // Collect excerpts: include matched messages + their immediate context
-              for (let i = 0; i < messages.length; i++) {
-                const msg = messages[i];
-                const isMatch = msg.content.toLowerCase().includes(query.toLowerCase());
-
-                if (isMatch) {
-                  contentMatched = true;
-                  messageExcerpts.push({
-                    role: msg.role,
-                    snippet: makeSnippet(msg.content, query),
-                    matched: true,
-                  });
-                  // Also include the previous message for context (if not already matched)
-                  if (i > 0 && !messages[i - 1].content.toLowerCase().includes(query.toLowerCase())) {
-                    messageExcerpts.push({
-                      role: messages[i - 1].role,
-                      snippet: makeSnippet(messages[i - 1].content, query),
-                      matched: false,
-                    });
-                  }
-                }
-              }
-            } else {
-              // Just check if any message matches, no excerpts
-              contentMatched = messages.some(
-                (m) => m.content.toLowerCase().includes(query.toLowerCase()),
-              );
-            }
-
-            if (titleMatched || contentMatched) {
-              allMatches.push({
-                conversation: conv,
-                titleMatched,
-                messageExcerpts: includeExcerpts
-                  ? messageExcerpts.slice(0, 5) // Limit to 5 excerpts per conversation
-                  : [],
-              });
-            }
-
-            if (allMatches.length >= limit) break;
-          }
-
-          if (allMatches.length >= limit) break;
-          page++;
-
-          // Safety: don't scan more than 10 pages (1000 conversations)
-          if (page > 10) break;
-        }
-
-        if (allMatches.length === 0) {
+        if (ftsResults.length === 0) {
           return {
             content: [{
               type: "text",
@@ -268,17 +162,19 @@ export function createConversationSearchTool(
           };
         }
 
-        // Format results
+        // Format results — fetch full records for display metadata
         const lines: string[] = [];
-        lines.push(`Found ${allMatches.length} conversation(s) matching "${query}":`);
+        lines.push(`Found ${ftsResults.length} conversation(s) matching "${query}":`);
         lines.push("");
 
-        for (let i = 0; i < allMatches.length; i++) {
-          const match = allMatches[i];
-          const conv = match.conversation;
+        for (let i = 0; i < ftsResults.length; i++) {
+          const result = ftsResults[i];
+          const conv = await store.getConversationById(result.conversationId);
+          if (!conv) continue;
+
           const matchTypes: string[] = [];
-          if (match.titleMatched) matchTypes.push("title");
-          if (match.messageExcerpts.length > 0 || !includeExcerpts) matchTypes.push("content");
+          if (result.titleMatched) matchTypes.push("title");
+          if (result.contentMatched) matchTypes.push("content");
           const msgCount = parseHistory(conv.history).length;
 
           lines.push(`── ${i + 1}. ${conv.title || "(untitled)"} ──`);
@@ -288,12 +184,9 @@ export function createConversationSearchTool(
           lines.push(`   Updated: ${formatDate(conv.updatedAt)}`);
           lines.push(`   Matched: ${matchTypes.join(", ")}`);
 
-          if (includeExcerpts && match.messageExcerpts.length > 0) {
-            lines.push("   Excerpts:");
-            for (const excerpt of match.messageExcerpts) {
-              const marker = excerpt.matched ? ">>>" : "   ";
-              lines.push(`   ${marker} [${excerpt.role}] ${excerpt.snippet}`);
-            }
+          if (includeExcerpts && result.snippet) {
+            lines.push("   Excerpt:");
+            lines.push(`   >>> ${result.snippet}`);
           }
           lines.push("");
         }

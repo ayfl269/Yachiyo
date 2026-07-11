@@ -270,7 +270,7 @@ export class SqliteMemoryStore {
    * Recall a memory by key. Increments access_count.
    */
   recall(key: string): MemoryEntry | null {
-    const row = this.db.prepare("SELECT * FROM memories WHERE key = ?").get(key) as MemoryRow;
+    const row = this.db.prepare("SELECT key, value, created_at, updated_at, memory_type, scope, scope_id, priority, access_count, last_accessed_at, expires_at FROM memories WHERE key = ?").get(key) as MemoryRow;
     if (!row) return null;
 
     // Update access stats
@@ -279,7 +279,7 @@ export class SqliteMemoryStore {
     `).run(new Date().toISOString(), key);
 
     // Re-read to get updated access_count
-    const updatedRow = this.db.prepare("SELECT * FROM memories WHERE key = ?").get(key) as MemoryRow;
+    const updatedRow = this.db.prepare("SELECT key, value, created_at, updated_at, memory_type, scope, scope_id, priority, access_count, last_accessed_at, expires_at FROM memories WHERE key = ?").get(key) as MemoryRow;
     return this.rowToEntry(updatedRow);
   }
 
@@ -344,7 +344,7 @@ export class SqliteMemoryStore {
 
     const placeholders = keys.map(() => "?").join(",");
     const rows = this.db.prepare(`
-      SELECT * FROM memories WHERE key IN (${placeholders})${whereClause} ORDER BY priority DESC, updated_at DESC LIMIT ?
+      SELECT key, value, created_at, updated_at, memory_type, scope, scope_id, priority, access_count, last_accessed_at, expires_at FROM memories WHERE key IN (${placeholders})${whereClause} ORDER BY priority DESC, updated_at DESC LIMIT ?
     `).all(...keys, ...params, limit) as MemoryRow[];
 
     return rows.map((r) => this.rowToEntry(r));
@@ -383,7 +383,7 @@ export class SqliteMemoryStore {
     }
 
     const rows = this.db.prepare(`
-      SELECT * FROM memories WHERE 1=1${whereClause} ORDER BY priority DESC, updated_at DESC LIMIT ?
+      SELECT key, value, created_at, updated_at, memory_type, scope, scope_id, priority, access_count, last_accessed_at, expires_at FROM memories WHERE 1=1${whereClause} ORDER BY priority DESC, updated_at DESC LIMIT ?
     `).all(...params, limit) as MemoryRow[];
 
     return rows.map((r) => this.rowToEntry(r));
@@ -575,7 +575,7 @@ export class SqliteMemoryStore {
     const prefix = key.split("_").slice(0, -1).join("_");
     if (prefix) {
       const prefixRows = this.db.prepare(`
-        SELECT * FROM memories WHERE key LIKE ? ESCAPE '\\' AND key != ? AND key NOT LIKE 'system_%' LIMIT ?
+        SELECT key, value, created_at, updated_at, memory_type, scope, scope_id, priority, access_count, last_accessed_at, expires_at FROM memories WHERE key LIKE ? ESCAPE '\\' AND key != ? AND key NOT LIKE 'system_%' LIMIT ?
       `).all(`${escapeLike(prefix)}%`, key, limit) as MemoryRow[];
       for (const r of prefixRows) {
         if (!similarKeys.has(r.key)) {
@@ -589,7 +589,7 @@ export class SqliteMemoryStore {
     if (results.length < limit && tags.length > 0) {
       const tagPlaceholders = tags.map(() => "?").join(",");
       const tagRows = this.db.prepare(`
-        SELECT m.* FROM memories m
+        SELECT m.key, m.value, m.created_at, m.updated_at, m.memory_type, m.scope, m.scope_id, m.priority, m.access_count, m.last_accessed_at, m.expires_at FROM memories m
         JOIN memory_tags mt ON m.key = mt.memory_key
         WHERE mt.tag IN (${tagPlaceholders}) AND m.key != ? AND m.key NOT LIKE 'system_%'
         GROUP BY m.key
@@ -613,8 +613,8 @@ export class SqliteMemoryStore {
    * `access_count` as a side effect of the merge.
    */
   merge(targetKey: string, sourceKey: string, mergedValue: string): boolean {
-    const targetRow = this.db.prepare("SELECT * FROM memories WHERE key = ?").get(targetKey) as MemoryRow | undefined;
-    const sourceRow = this.db.prepare("SELECT * FROM memories WHERE key = ?").get(sourceKey) as MemoryRow | undefined;
+    const targetRow = this.db.prepare("SELECT key, value, created_at, updated_at, memory_type, scope, scope_id, priority, access_count, last_accessed_at, expires_at FROM memories WHERE key = ?").get(targetKey) as MemoryRow | undefined;
+    const sourceRow = this.db.prepare("SELECT key, value, created_at, updated_at, memory_type, scope, scope_id, priority, access_count, last_accessed_at, expires_at FROM memories WHERE key = ?").get(sourceKey) as MemoryRow | undefined;
     if (!targetRow || !sourceRow) return false;
     const target = this.rowToEntry(targetRow);
     const source = this.rowToEntry(sourceRow);
@@ -672,7 +672,7 @@ export class SqliteMemoryStore {
    */
   listConversationIndices(limit: number = 50): ConversationIndexEntry[] {
     const rows = this.db.prepare(`
-      SELECT * FROM conversation_indices ORDER BY timestamp DESC LIMIT ?
+      SELECT id, title, topics, conversation_id, timestamp, created_at FROM conversation_indices ORDER BY timestamp DESC LIMIT ?
     `).all(limit) as ConversationIndexRow[];
     return rows.map(r => this.rowToIndexEntry(r));
   }
@@ -683,7 +683,7 @@ export class SqliteMemoryStore {
   searchConversationIndices(query: string, limit: number = 20): ConversationIndexEntry[] {
     const likeQuery = `%${escapeLike(query)}%`;
     const rows = this.db.prepare(`
-      SELECT * FROM conversation_indices
+      SELECT id, title, topics, conversation_id, timestamp, created_at FROM conversation_indices
       WHERE title LIKE ? ESCAPE '\\' OR topics LIKE ? ESCAPE '\\'
       ORDER BY timestamp DESC LIMIT ?
     `).all(likeQuery, likeQuery, limit) as ConversationIndexRow[];

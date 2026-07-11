@@ -141,17 +141,17 @@ export class SqliteKBMetadataStore {
   }
 
   getKb(id: string): KnowledgeBase | null {
-    const row = this.db.prepare("SELECT * FROM knowledge_bases WHERE id = ?").get(id) as KbMetadataRow;
+    const row = this.db.prepare("SELECT id, name, description, emoji, embedding_provider_id, rerank_provider_id, chunk_size, chunk_overlap, top_k_dense, top_k_sparse, top_m_final, created_at FROM knowledge_bases WHERE id = ?").get(id) as KbMetadataRow;
     return row ? this.rowToKb(row) : null;
   }
 
   getKbByName(name: string): KnowledgeBase | null {
-    const row = this.db.prepare("SELECT * FROM knowledge_bases WHERE name = ?").get(name) as KbMetadataRow;
+    const row = this.db.prepare("SELECT id, name, description, emoji, embedding_provider_id, rerank_provider_id, chunk_size, chunk_overlap, top_k_dense, top_k_sparse, top_m_final, created_at FROM knowledge_bases WHERE name = ?").get(name) as KbMetadataRow;
     return row ? this.rowToKb(row) : null;
   }
 
   getAllKbs(): KnowledgeBase[] {
-    const rows = this.db.prepare("SELECT * FROM knowledge_bases ORDER BY name").all() as KbMetadataRow[];
+    const rows = this.db.prepare("SELECT id, name, description, emoji, embedding_provider_id, rerank_provider_id, chunk_size, chunk_overlap, top_k_dense, top_k_sparse, top_m_final, created_at FROM knowledge_bases ORDER BY name").all() as KbMetadataRow[];
     return rows.map((r) => this.rowToKb(r));
   }
 
@@ -169,7 +169,7 @@ export class SqliteKBMetadataStore {
   }
 
   getDocumentsByKb(kbId: string): KBDocument[] {
-    const rows = this.db.prepare("SELECT * FROM kb_documents WHERE kb_id = ?").all(kbId) as KbDocumentRow[];
+    const rows = this.db.prepare("SELECT id, kb_id, name, url, type, chunk_count, created_at FROM kb_documents WHERE kb_id = ?").all(kbId) as KbDocumentRow[];
     return rows.map((r) => this.rowToDoc(r));
   }
 

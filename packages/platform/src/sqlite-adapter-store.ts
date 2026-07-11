@@ -48,7 +48,7 @@ export class SqliteAdapterStore {
 
   /** Load all adapter configs from database */
   loadAll(): AdapterConfigBase[] {
-    const rows = this.db.prepare("SELECT * FROM adapters ORDER BY created_at ASC").all() as AdapterRow[];
+    const rows = this.db.prepare("SELECT id, type, config, enabled, created_at, updated_at FROM adapters ORDER BY created_at ASC").all() as AdapterRow[];
     return rows.map(row => {
       const config = typeof row.config === "string" ? JSON.parse(row.config) : row.config;
       return { ...config, id: row.id, type: row.type, enabled: row.enabled === 1 };
@@ -75,7 +75,7 @@ export class SqliteAdapterStore {
 
   /** Get a single adapter config */
   get(id: string): AdapterConfigBase | null {
-    const row = this.db.prepare("SELECT * FROM adapters WHERE id = ?").get(id) as AdapterRow | undefined;
+    const row = this.db.prepare("SELECT id, type, config, enabled, created_at, updated_at FROM adapters WHERE id = ?").get(id) as AdapterRow | undefined;
     if (!row) return null;
     const config = typeof row.config === "string" ? JSON.parse(row.config) : row.config;
     return { ...config, id: row.id, type: row.type, enabled: row.enabled === 1 };

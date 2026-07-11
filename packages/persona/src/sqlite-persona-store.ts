@@ -75,7 +75,7 @@ export class SqlitePersonaStore extends PersonaStore {
   }
 
   async getPersona(personaId: string): Promise<Personality | null> {
-    const row = this.db.prepare("SELECT * FROM personas WHERE id = ?").get(personaId) as PersonaRow | undefined;
+    const row = this.db.prepare("SELECT id, name, prompt, begin_dialogs, mood_imitation_dialogs, tools, skills, custom_error_message, created_at, updated_at FROM personas WHERE id = ?").get(personaId) as PersonaRow | undefined;
     return row ? this.rowToPersonality(row) : null;
   }
 
@@ -102,7 +102,7 @@ export class SqlitePersonaStore extends PersonaStore {
   }
 
   async getAllPersonas(): Promise<Map<string, Personality>> {
-    const rows = this.db.prepare("SELECT * FROM personas").all() as PersonaRow[];
+    const rows = this.db.prepare("SELECT id, name, prompt, begin_dialogs, mood_imitation_dialogs, tools, skills, custom_error_message, created_at, updated_at FROM personas").all() as PersonaRow[];
     const map = new Map<string, Personality>();
     for (const row of rows) {
       map.set(row.id, this.rowToPersonality(row));
@@ -111,7 +111,7 @@ export class SqlitePersonaStore extends PersonaStore {
   }
 
   async getFolder(folderId: string): Promise<PersonaFolder | null> {
-    const row = this.db.prepare("SELECT * FROM persona_folders WHERE id = ?").get(folderId) as PersonaFolderRow | undefined;
+    const row = this.db.prepare("SELECT id, name, parent_id, description, sort_order, created_at FROM persona_folders WHERE id = ?").get(folderId) as PersonaFolderRow | undefined;
     return row ? this.rowToFolder(row) : null;
   }
 
@@ -128,7 +128,7 @@ export class SqlitePersonaStore extends PersonaStore {
   }
 
   async getAllFolders(): Promise<Map<string, PersonaFolder>> {
-    const rows = this.db.prepare("SELECT * FROM persona_folders ORDER BY sort_order").all() as PersonaFolderRow[];
+    const rows = this.db.prepare("SELECT id, name, parent_id, description, sort_order, created_at FROM persona_folders ORDER BY sort_order").all() as PersonaFolderRow[];
     const map = new Map<string, PersonaFolder>();
     for (const row of rows) {
       map.set(row.id, this.rowToFolder(row));

@@ -185,7 +185,7 @@ export class SqlitePluginStore {
   }
 
   getAllStars(): StarMetadata[] {
-    const rows = this.db.prepare("SELECT * FROM plugin_stars").all() as PluginStarRow[];
+    const rows = this.db.prepare("SELECT module_path, name, author, description, short_desc, version, repo, activated, config, handler_full_names, display_name, logo_path, support_platforms, created_at FROM plugin_stars").all() as PluginStarRow[];
     return rows.map((r) => this.rowToStar(r));
   }
 
@@ -233,7 +233,7 @@ export class SqliteSkillStore {
   }
 
   getAllSkills(): SkillInfo[] {
-    const rows = this.db.prepare("SELECT * FROM skills").all() as SkillRow[];
+    const rows = this.db.prepare("SELECT name, description, path, active, source_type, source_label, local_exists, sandbox_exists, plugin_name, readonly, created_at FROM skills").all() as SkillRow[];
     return rows.map((r) => this.rowToSkill(r));
   }
 

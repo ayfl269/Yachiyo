@@ -238,6 +238,62 @@ export class JsonFileConversationStore extends ConversationStore {
     }
   }
 
+  async searchConversationsByContent(
+    query: string,
+    options: { platformIds?: string[]; limit?: number; offset?: number },
+  ): Promise<{ conversationId: string; titleMatched: boolean; contentMatched: boolean; snippet: string }[]> {
+    const limit = options.limit ?? 10;
+    const offset = options.offset ?? 0;
+    const lowerQuery = query.toLowerCase();
+
+    let results = [...this.cache.values()];
+    if (options.platformIds?.length) {
+      results = results.filter((c) => options.platformIds!.includes(c.platformId));
+    }
+
+    const matches: { conversationId: string; titleMatched: boolean; contentMatched: boolean; snippet: string; updatedAt: Date }[] = [];
+
+    for (const conv of results) {
+      const titleMatched = conv.title.toLowerCase().includes(lowerQuery);
+      let contentMatched = false;
+      let snippet = "";
+
+      try {
+        const messages = JSON.parse(conv.history);
+        if (Array.isArray(messages)) {
+          for (const msg of messages) {
+            const content = typeof msg.content === "string" ? msg.content : "";
+            if (content.toLowerCase().includes(lowerQuery)) {
+              contentMatched = true;
+              if (!snippet) {
+                const idx = content.toLowerCase().indexOf(lowerQuery);
+                const start = Math.max(0, idx - 40);
+                const end = Math.min(content.length, idx + lowerQuery.length + 40);
+                const prefix = start > 0 ? "..." : "";
+                const suffix = end < content.length ? "..." : "";
+                snippet = prefix + content.slice(start, end) + suffix;
+              }
+            }
+          }
+        }
+      } catch {
+        // ignore parse errors
+      }
+
+      if (titleMatched || contentMatched) {
+        matches.push({ conversationId: conv.id, titleMatched, contentMatched, snippet, updatedAt: conv.updatedAt });
+      }
+    }
+
+    matches.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+    return matches.slice(offset, offset + limit).map(({ conversationId, titleMatched, contentMatched, snippet }) => ({
+      conversationId,
+      titleMatched,
+      contentMatched,
+      snippet,
+    }));
+  }
+
   async insertPlatformMessageHistory(record: PlatformMessageHistory): Promise<void> {
     this.platformMessageHistory.push(record);
     this.markAuxDirty();

@@ -23,6 +23,17 @@ import {
 } from "./store.js";
 import { escapeLike, type Migration } from "@yachiyo/common/database.js";
 
+// ── Helpers ──
+
+/**
+ * Escape a user query for FTS5 phrase matching.
+ * Wraps the query in double quotes (phrase query) and escapes internal double
+ * quotes by doubling them, so special characters like *, : are treated literally.
+ */
+export function escapeFtsQuery(query: string): string {
+  return '"' + query.replace(/"/g, '""') + '"';
+}
+
 // ── Migrations ──
 
 export const CHAT_MIGRATIONS: Migration[] = [
@@ -147,6 +158,28 @@ export const CHAT_MIGRATIONS: Migration[] = [
         ON api_keys(key_hash);
     `,
   },
+  {
+    version: 2,
+    name: "conversations_fts",
+    up: `
+      CREATE VIRTUAL TABLE IF NOT EXISTS conversations_fts USING fts5(
+        conversation_id UNINDEXED,
+        title,
+        content,
+        tokenize = 'unicode61'
+      );
+
+      INSERT INTO conversations_fts (conversation_id, title, content)
+      SELECT
+        c.id,
+        c.title,
+        COALESCE((
+          SELECT group_concat(json_extract(v.value, '$.content'), ' ')
+          FROM json_each(c.history) v
+        ), '')
+      FROM conversations c;
+    `,
+  },
 ];
 
 // ── Row Types ──
@@ -268,6 +301,13 @@ interface CountRow {
   cnt: number;
 }
 
+/** Row type for FTS content search results. */
+interface FtsSearchRow {
+  conversation_id: string;
+  title: string;
+  snippet: string;
+}
+
 // ── SqliteConversationStore ──
 
 export class SqliteConversationStore extends ConversationStore {
@@ -289,30 +329,33 @@ export class SqliteConversationStore extends ConversationStore {
   // === Conversation ===
 
   async createConversation(conversation: ConversationRecord): Promise<void> {
-    this.db.prepare(`
-      INSERT OR REPLACE INTO conversations
-        (id, unified_msg_origin, persona_id, history, platform_id, title, token_usage, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      conversation.id,
-      conversation.unifiedMsgOrigin,
-      conversation.personaId,
-      conversation.history,
-      conversation.platformId,
-      conversation.title,
-      conversation.tokenUsage,
-      conversation.createdAt.toISOString(),
-      conversation.updatedAt.toISOString(),
-    );
+    this.db.transaction(() => {
+      this.db.prepare(`
+        INSERT OR REPLACE INTO conversations
+          (id, unified_msg_origin, persona_id, history, platform_id, title, token_usage, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        conversation.id,
+        conversation.unifiedMsgOrigin,
+        conversation.personaId,
+        conversation.history,
+        conversation.platformId,
+        conversation.title,
+        conversation.tokenUsage,
+        conversation.createdAt.toISOString(),
+        conversation.updatedAt.toISOString(),
+      );
+      this.syncConversationFts(conversation.id, conversation.title, conversation.history);
+    })();
   }
 
   async getConversationById(id: string): Promise<ConversationRecord | null> {
-    const row = this.db.prepare("SELECT * FROM conversations WHERE id = ?").get(id) as ConversationRow;
+    const row = this.db.prepare("SELECT id, unified_msg_origin, persona_id, history, platform_id, title, token_usage, created_at, updated_at FROM conversations WHERE id = ?").get(id) as ConversationRow;
     return row ? this.rowToConversation(row) : null;
   }
 
   async getAllConversations(): Promise<ConversationRecord[]> {
-    const rows = this.db.prepare("SELECT * FROM conversations ORDER BY updated_at DESC").all() as ConversationRow[];
+    const rows = this.db.prepare("SELECT id, unified_msg_origin, persona_id, history, platform_id, title, token_usage, created_at, updated_at FROM conversations ORDER BY updated_at DESC").all() as ConversationRow[];
     return rows.map((r) => this.rowToConversation(r));
   }
 
@@ -365,7 +408,7 @@ export class SqliteConversationStore extends ConversationStore {
     const offset = (page - 1) * pageSize;
 
     const rows = this.db.prepare(
-      `SELECT * FROM conversations ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`
+      `SELECT id, unified_msg_origin, persona_id, history, platform_id, title, token_usage, created_at, updated_at FROM conversations ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`
     ).all(...params, pageSize, offset) as ConversationRow[];
 
     return [rows.map((r) => this.rowToConversation(r)), total];
@@ -389,11 +432,25 @@ export class SqliteConversationStore extends ConversationStore {
     if (setClauses.length === 0) return;
     params.push(id);
 
-    this.db.prepare(`UPDATE conversations SET ${setClauses.join(", ")} WHERE id = ?`).run(...params);
+    const needsFtsResync = updates.title !== undefined || updates.history !== undefined;
+
+    this.db.transaction(() => {
+      this.db.prepare(`UPDATE conversations SET ${setClauses.join(", ")} WHERE id = ?`).run(...params);
+
+      if (needsFtsResync) {
+        const row = this.db.prepare("SELECT title, history FROM conversations WHERE id = ?").get(id) as { title: string; history: string } | undefined;
+        if (row) {
+          this.syncConversationFts(id, row.title, row.history);
+        }
+      }
+    })();
   }
 
   async deleteConversation(id: string): Promise<void> {
-    this.db.prepare("DELETE FROM conversations WHERE id = ?").run(id);
+    this.db.transaction(() => {
+      this.db.prepare("DELETE FROM conversations_fts WHERE conversation_id = ?").run(id);
+      this.db.prepare("DELETE FROM conversations WHERE id = ?").run(id);
+    })();
   }
 
   // === Platform Message History ===
@@ -422,7 +479,7 @@ export class SqliteConversationStore extends ConversationStore {
   }): Promise<PlatformMessageHistory[]> {
     const limit = options.limit ?? 100;
     const rows = this.db.prepare(`
-      SELECT * FROM platform_message_history
+      SELECT id, platform_id, user_id, sender_id, sender_name, content, llm_checkpoint_id, created_at FROM platform_message_history
       WHERE platform_id = ? AND user_id = ?
       ORDER BY created_at DESC LIMIT ?
     `).all(options.platformId, options.userId, limit) as PlatformMessageHistoryRow[];
@@ -462,7 +519,7 @@ export class SqliteConversationStore extends ConversationStore {
   }
 
   async getWebchatThread(threadId: string): Promise<WebchatThread | null> {
-    const row = this.db.prepare("SELECT * FROM webchat_threads WHERE id = ?").get(threadId) as WebchatThreadRow;
+    const row = this.db.prepare("SELECT id, session_id, title, created_at FROM webchat_threads WHERE id = ?").get(threadId) as WebchatThreadRow;
     if (!row) return null;
     return { id: row.id, sessionId: row.session_id, title: row.title, createdAt: new Date(row.created_at) };
   }
@@ -481,7 +538,7 @@ export class SqliteConversationStore extends ConversationStore {
   }
 
   async getAttachment(id: string): Promise<Attachment | null> {
-    const row = this.db.prepare("SELECT * FROM attachments WHERE id = ?").get(id) as AttachmentRow;
+    const row = this.db.prepare("SELECT id, url, name, size, type, created_at FROM attachments WHERE id = ?").get(id) as AttachmentRow;
     if (!row) return null;
     return { id: row.id, url: row.url, name: row.name, size: row.size, type: row.type, createdAt: new Date(row.created_at) };
   }
@@ -508,12 +565,12 @@ export class SqliteConversationStore extends ConversationStore {
   }
 
   async listApiKeys(): Promise<ApiKey[]> {
-    const rows = this.db.prepare("SELECT * FROM api_keys ORDER BY created_at DESC").all() as ApiKeyRow[];
+    const rows = this.db.prepare("SELECT id, key_hash, key_prefix, name, scopes, created_by, created_at, last_used_at, expires_at, revoked_at FROM api_keys ORDER BY created_at DESC").all() as ApiKeyRow[];
     return rows.map((r) => this.rowToApiKey(r));
   }
 
   async getApiKeyByHash(keyHash: string): Promise<ApiKey | null> {
-    const row = this.db.prepare("SELECT * FROM api_keys WHERE key_hash = ?").get(keyHash) as ApiKeyRow;
+    const row = this.db.prepare("SELECT id, key_hash, key_prefix, name, scopes, created_by, created_at, last_used_at, expires_at, revoked_at FROM api_keys WHERE key_hash = ?").get(keyHash) as ApiKeyRow;
     return row ? this.rowToApiKey(row) : null;
   }
 
@@ -530,7 +587,7 @@ export class SqliteConversationStore extends ConversationStore {
   }
 
   async getPreference(key: string): Promise<Preference | null> {
-    const row = this.db.prepare("SELECT * FROM preferences WHERE key = ?").get(key) as PreferenceRow;
+    const row = this.db.prepare("SELECT key, value, namespace FROM preferences WHERE key = ?").get(key) as PreferenceRow;
     if (!row) return null;
     return { key: row.key, value: row.value, namespace: row.namespace };
   }
@@ -542,7 +599,7 @@ export class SqliteConversationStore extends ConversationStore {
   // === Command Config ===
 
   async getCommandConfig(commandName: string): Promise<CommandConfig | null> {
-    const row = this.db.prepare("SELECT * FROM command_configs WHERE command_name = ?").get(commandName) as CommandConfigRow;
+    const row = this.db.prepare("SELECT command_name, config FROM command_configs WHERE command_name = ?").get(commandName) as CommandConfigRow;
     if (!row) return null;
     return { commandName: row.command_name, config: JSON.parse(row.config) };
   }
@@ -571,7 +628,7 @@ export class SqliteConversationStore extends ConversationStore {
   }
 
   async getPlatformSession(sessionId: string): Promise<PlatformSession | null> {
-    const row = this.db.prepare("SELECT * FROM platform_sessions WHERE session_id = ?").get(sessionId) as PlatformSessionRow;
+    const row = this.db.prepare("SELECT id, platform_id, session_id, provider_id, persona_id, config, created_at FROM platform_sessions WHERE session_id = ?").get(sessionId) as PlatformSessionRow;
     if (!row) return null;
     return {
       id: row.id,
@@ -635,13 +692,13 @@ export class SqliteConversationStore extends ConversationStore {
     const limit = options?.limit ?? 1000;
     const rows = options?.since
       ? this.db.prepare(`
-        SELECT * FROM provider_stats
+        SELECT id, provider_id, model, token_input_other, token_input_cached, token_output, start_time, end_time, time_to_first_token, created_at FROM provider_stats
         WHERE created_at >= ?
         ORDER BY created_at DESC
         LIMIT ?
       `).all(options.since.toISOString(), limit)
       : this.db.prepare(`
-        SELECT * FROM provider_stats
+        SELECT id, provider_id, model, token_input_other, token_input_cached, token_output, start_time, end_time, time_to_first_token, created_at FROM provider_stats
         ORDER BY created_at DESC
         LIMIT ?
       `).all(limit);
@@ -667,6 +724,82 @@ export class SqliteConversationStore extends ConversationStore {
 
   async deleteSessionConversation(umo: string): Promise<void> {
     this.db.prepare("DELETE FROM session_conversations WHERE unified_msg_origin = ?").run(umo);
+  }
+
+  // ── FTS5 Full-Text Search ──
+
+  /**
+   * Synchronize the FTS index for a single conversation.
+   * Parses the history JSON, concatenates all message contents into plain text,
+   * then replaces the FTS row for this conversation_id.
+   * Must be called within a transaction.
+   */
+  private syncConversationFts(id: string, title: string, historyJson: string): void {
+    let content = "";
+    try {
+      const parsed = JSON.parse(historyJson);
+      if (Array.isArray(parsed)) {
+        content = parsed
+          .map((m: { content?: string }) => (typeof m.content === "string" ? m.content : ""))
+          .join(" ");
+      }
+    } catch {
+      // ignore parse errors — index with empty content
+    }
+
+    this.db.prepare("DELETE FROM conversations_fts WHERE conversation_id = ?").run(id);
+    this.db.prepare(
+      "INSERT INTO conversations_fts (conversation_id, title, content) VALUES (?, ?, ?)"
+    ).run(id, title, content);
+  }
+
+  /**
+   * Search conversations by content using FTS5.
+   * Searches both conversation titles and full message content.
+   * Returns matching conversation IDs with context snippets.
+   */
+  async searchConversationsByContent(
+    query: string,
+    options: { platformIds?: string[]; limit?: number; offset?: number },
+  ): Promise<{ conversationId: string; titleMatched: boolean; contentMatched: boolean; snippet: string }[]> {
+    const limit = options.limit ?? 10;
+    const offset = options.offset ?? 0;
+    const ftsQuery = escapeFtsQuery(query);
+    const lowerQuery = query.toLowerCase();
+
+    const conditions: string[] = ["conversations_fts MATCH ?"];
+    const params: unknown[] = [ftsQuery];
+
+    if (options.platformIds?.length) {
+      const placeholders = options.platformIds.map(() => "?").join(",");
+      conditions.push(`c.platform_id IN (${placeholders})`);
+      params.push(...options.platformIds);
+    }
+
+    const where = conditions.join(" AND ");
+
+    const rows = this.db.prepare(
+      `SELECT
+         f.conversation_id as conversation_id,
+         c.title as title,
+         snippet(conversations_fts, 2, '>>>', '<<<', '...', 20) as snippet
+       FROM conversations_fts f
+       JOIN conversations c ON c.id = f.conversation_id
+       WHERE ${where}
+       ORDER BY c.updated_at DESC
+       LIMIT ? OFFSET ?`
+    ).all(...params, limit, offset) as FtsSearchRow[];
+
+    return rows.map((r) => {
+      const titleMatched = r.title.toLowerCase().includes(lowerQuery);
+      const contentMatched = r.snippet.includes(">>>");
+      return {
+        conversationId: r.conversation_id,
+        titleMatched,
+        contentMatched,
+        snippet: r.snippet,
+      };
+    });
   }
 
   // ── Row Mapping Helpers ──
