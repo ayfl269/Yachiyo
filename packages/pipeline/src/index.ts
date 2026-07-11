@@ -4,6 +4,7 @@ export { PipelineScheduler, STAGES_ORDER } from "./scheduler.js";
 export { EventBus, type ConfigManagerLike, type PipelineConfigInfo } from "./event-bus.js";
 export { SessionLockManager } from "./session-lock.js";
 export { SessionServiceManager } from "./stages/session-status-check.js";
+export { ContentSafetyStrategySelector, KeywordsStrategy, type ContentSafetyCheckResult } from "./stages/content-safety-check.js";
 export { ActiveEventRegistry, activeEventRegistry } from "./active-event-registry.js";
 export { registerActiveRunner, unregisterActiveRunner, tryCaptureFollowUp, prepareFollowUpCapture, finishFollowUpTurn, type FollowUpTicket, type FollowUpCapture } from "./follow-up.js";
 export { callHandler, callEventHook } from "./handler-utils.js";
