@@ -181,6 +181,162 @@ export interface Ob11GroupMemberInfo {
   shut_up_timestamp?: number;
 }
 
+// ── Phase 7 Extended API Types (napcat / go-cqhttp) ──
+
+/** 合并转发消息节点 (用于 send_forward_msg) */
+export interface Ob11ForwardMsgNode {
+  /** 直接指定消息内容 */
+  content?: OB11MessageSegment[];
+  /** 引用已有消息 */
+  id?: string;
+  /** 自定义发送者 QQ */
+  user_id?: number;
+  /** 自定义发送者昵称 */
+  nickname?: string;
+  /** 合并转发嵌套 */
+  uin?: string;
+  name?: string;
+}
+
+/** send_forward_msg 返回 */
+export interface Ob11ForwardMsgResult {
+  message_id: number;
+  /** napcat 扩展：转发消息的 resId */
+  resid?: string;
+}
+
+/** get_group_msg_history 返回的消息项 */
+export interface Ob11GroupMsgHistoryItem {
+  time: number;
+  message_type: "private" | "group";
+  message_id: number;
+  real_id?: number;
+  sender: { user_id: number; nickname: string; card?: string };
+  message: OB11MessageSegment[] | string;
+  raw_message: string;
+  group_id?: number;
+  user_id: number;
+  self_id: number;
+}
+
+/** get_group_msg_history 返回 */
+export interface Ob11GroupMsgHistoryResult {
+  messages: Ob11GroupMsgHistoryItem[];
+}
+
+/** ocr_image 返回的文本块 */
+export interface Ob11OcrTextDetection {
+  text: string;
+  confidence: number;
+  coordinates: [[number, number], [number, number], [number, number], [number, number]];
+}
+
+/** ocr_image 返回 */
+export interface Ob11OcrResult {
+  texts: Ob11OcrTextDetection[];
+  language: string;
+}
+
+/** get_group_file_url 返回 */
+export interface Ob11GroupFileUrlResult {
+  url: string;
+}
+
+/** download_file 返回 */
+export interface Ob11DownloadFileResult {
+  file?: string;
+  file_path?: string;
+  url?: string;
+  file_size?: number;
+}
+
+/** check_url_safely 返回 */
+export interface Ob11CheckUrlSafelyResult {
+  level: number;
+  keyword?: string;
+}
+
+/** get_group_at_all_remain 返回 */
+export interface Ob11GroupAtAllRemainResult {
+  can_at_all: boolean;
+  remain_at_all_count: number;
+  remain_at_all_count_for_group: number;
+}
+
+/** get_group_honor_info 返回 */
+export interface Ob11GroupHonorInfo {
+  group_id: number;
+  current_talkative?: { user_id: number; nickname: string; avatar?: string; day_count?: number };
+  talkative_list?: Array<{ user_id: number; nickname: string; avatar?: string; day_count?: number; description?: string }>;
+  performer_list?: Array<{ user_id: number; nickname: string; avatar?: string; description?: string }>;
+  legend_list?: Array<{ user_id: number; nickname: string; avatar?: string; description?: string }>;
+  strong_newbie_list?: Array<{ user_id: number; nickname: string; avatar?: string; description?: string }>;
+  emotion_list?: Array<{ user_id: number; nickname: string; avatar?: string; description?: string }>;
+}
+
+/** 群文件信息 */
+export interface Ob11GroupFile {
+  group_id?: number;
+  file_id: string;
+  file_name: string;
+  busid?: number;
+  file_size?: number;
+  upload_time?: number;
+  dead_time?: number;
+  modify_time?: number;
+  download_times?: number;
+  uploader?: number;
+  uploader_name?: string;
+  /** 文件夹类型时为 "folder" */
+  is_folder?: boolean;
+}
+
+/** get_group_root_files / get_group_files_by_folder 返回 */
+export interface Ob11GroupFileListResult {
+  files: Ob11GroupFile[];
+  folders: Ob11GroupFile[];
+}
+
+/** get_group_file_system_info 返回 */
+export interface Ob11GroupFileSystemInfo {
+  file_count: number;
+  limit_count: number;
+  used_space: number;
+  total_space: number;
+}
+
+/** 精华消息 */
+export interface Ob11EssenceMsg {
+  sender_id: number;
+  sender_nick: string;
+  sender_time: number;
+  operator_id: number;
+  operator_nick: string;
+  operator_time: number;
+  message_id: number;
+}
+
+/** get_essence_msg_list 返回 */
+export interface Ob11EssenceMsgListResult {
+  data: Ob11EssenceMsg[];
+}
+
+/** 群公告 */
+export interface Ob11GroupNotice {
+  notice_id: string;
+  sender_id: number;
+  publish_time: number;
+  message: {
+    text: string;
+    images?: Array<{ height: string; width: string; id: string }>;
+  };
+}
+
+/** _get_group_notice 返回 */
+export interface Ob11GroupNoticeListResult {
+  notices: Ob11GroupNotice[];
+}
+
 // ── OneBot11Event ──
 
 class OneBot11Event extends MessageEvent {
@@ -327,6 +483,62 @@ class OneBot11Event extends MessageEvent {
   /** 获取合并转发消息内容 */
   async getForwardMsg(resId: string): Promise<Ob11GetForwardMsgResult> {
     return this.adapter!.callApiWithResponse("get_forward_msg", { id: resId }) as Promise<Ob11GetForwardMsgResult>;
+  }
+
+  // ── Phase 7 Event-level convenience methods ──
+
+  /** 给当前消息设置表情回复 (napcat: set_msg_emoji_like) */
+  async setMsgEmojiLike(emojiId: number | string): Promise<void> {
+    const messageId = this.getExtra<number>("message_id") ?? this.messageObj.messageId;
+    if (!messageId) {
+      console.warn("[OneBot11] setMsgEmojiLike: no message_id available");
+      return;
+    }
+    await this.adapter!.callApiWithResponse("set_msg_emoji_like", {
+      message_id: Number(messageId),
+      emoji_id: String(emojiId),
+    });
+  }
+
+  /** 给当前消息发送者点赞 (send_like) */
+  async sendLike(times: number = 1): Promise<void> {
+    const userId = this.getExtra<number>("user_id") ?? Number(this.messageObj.sender.userId);
+    if (!userId) {
+      console.warn("[OneBot11] sendLike: no user_id available");
+      return;
+    }
+    await this.adapter!.callApiWithResponse("send_like", { user_id: userId, times });
+  }
+
+  /** 获取群消息历史记录 (get_group_msg_history) */
+  async getGroupMsgHistory(
+    options: { messageSeq?: number; count?: number; reverseOrder?: boolean } = {},
+  ): Promise<Ob11GroupMsgHistoryResult> {
+    const groupId = this.getExtra<number>("group_id");
+    if (!groupId) {
+      throw new Error("getGroupMsgHistory: current event is not a group message");
+    }
+    const params: Record<string, unknown> = { group_id: groupId };
+    if (options.messageSeq !== undefined) params.message_seq = options.messageSeq;
+    if (options.count !== undefined) params.count = options.count;
+    if (options.reverseOrder !== undefined) params.reverseOrder = options.reverseOrder;
+    return this.adapter!.callApiWithResponse("get_group_msg_history", params) as Promise<Ob11GroupMsgHistoryResult>;
+  }
+
+  /** OCR 识别图片 (ocr_image) */
+  async ocrImage(image: string): Promise<Ob11OcrResult | Ob11OcrResult[]> {
+    return this.adapter!.callApiWithResponse("ocr_image", { image }) as Promise<Ob11OcrResult | Ob11OcrResult[]>;
+  }
+
+  /** 戳一戳当前消息发送者 (napcat: group_poke / friend_poke) */
+  async pokeSender(): Promise<void> {
+    const userId = this.getExtra<number>("user_id") ?? Number(this.messageObj.sender.userId);
+    const groupId = this.getExtra<number>("group_id");
+    if (groupId) {
+      await this.adapter!.callApiWithResponse("group_poke", { group_id: groupId, user_id: userId });
+    } else {
+      await this.adapter!.callApiWithResponse("friend_poke", { user_id: userId });
+    }
   }
 
   private componentsToOB11(components: MessageComponent[]): OB11MessageSegment[] {
@@ -1121,6 +1333,326 @@ export class OneBot11Adapter extends PlatformAdapter {
   /** 获取陌生人信息 */
   async getStrangerInfo(userId: number): Promise<{ user_id: number; nickname: string; sex: string; age: number }> {
     return this.callApiWithResponse("get_stranger_info", { user_id: userId }) as Promise<{ user_id: number; nickname: string; sex: string; age: number }>;
+  }
+
+  // ── Extended Message APIs (Phase 7.2) ──
+
+  /** 发送好友赞 (send_like) */
+  async sendLike(userId: number, times: number = 1): Promise<void> {
+    await this.callApiWithResponse("send_like", { user_id: userId, times });
+  }
+
+  /** 设置消息的表情回复 (napcat: set_msg_emoji_like) */
+  async setMsgEmojiLike(messageId: number | string, emojiId: number | string): Promise<void> {
+    await this.callApiWithResponse("set_msg_emoji_like", {
+      message_id: Number(messageId),
+      emoji_id: String(emojiId),
+    });
+  }
+
+  /**
+   * 发送合并转发 (napcat: send_forward_msg)
+   * @param targetType "group" | "private"
+   * @param targetId 群号或 QQ 号
+   * @param nodes 转发节点列表
+   */
+  async sendForwardMsg(
+    targetType: "group" | "private",
+    targetId: number,
+    nodes: Ob11ForwardMsgNode[],
+  ): Promise<Ob11ForwardMsgResult> {
+    const params: Record<string, unknown> = {
+      target_type: targetType,
+      target_id: targetId,
+      messages: nodes,
+    };
+    return this.callApiWithResponse("send_forward_msg", params) as Promise<Ob11ForwardMsgResult>;
+  }
+
+  /** 发送合并转发 (群聊) (go-cqhttp: send_group_forward_msg) */
+  async sendGroupForwardMsg(groupId: number, nodes: Ob11ForwardMsgNode[]): Promise<Ob11ForwardMsgResult> {
+    return this.callApiWithResponse("send_group_forward_msg", {
+      group_id: groupId,
+      messages: nodes,
+    }) as Promise<Ob11ForwardMsgResult>;
+  }
+
+  /** 发送合并转发 (私聊) (go-cqhttp: send_private_forward_msg) */
+  async sendPrivateForwardMsg(userId: number, nodes: Ob11ForwardMsgNode[]): Promise<Ob11ForwardMsgResult> {
+    return this.callApiWithResponse("send_private_forward_msg", {
+      user_id: userId,
+      messages: nodes,
+    }) as Promise<Ob11ForwardMsgResult>;
+  }
+
+  /** 获取群消息历史记录 (get_group_msg_history) */
+  async getGroupMsgHistory(
+    groupId: number,
+    options: { messageSeq?: number; count?: number; reverseOrder?: boolean } = {},
+  ): Promise<Ob11GroupMsgHistoryResult> {
+    const params: Record<string, unknown> = { group_id: groupId };
+    if (options.messageSeq !== undefined) params.message_seq = options.messageSeq;
+    if (options.count !== undefined) params.count = options.count;
+    if (options.reverseOrder !== undefined) params.reverseOrder = options.reverseOrder;
+    return this.callApiWithResponse("get_group_msg_history", params) as Promise<Ob11GroupMsgHistoryResult>;
+  }
+
+  // ── Extended File APIs (Phase 7.3) ──
+
+  /** 上传群文件 (upload_group_file) */
+  async uploadGroupFile(groupId: number, file: string, name: string, folder?: string): Promise<void> {
+    const params: Record<string, unknown> = { group_id: groupId, file, name };
+    if (folder) params.folder = folder;
+    await this.callApiWithResponse("upload_group_file", params);
+  }
+
+  /** 上传私聊文件 (upload_private_file) */
+  async uploadPrivateFile(userId: number, file: string, name: string): Promise<void> {
+    await this.callApiWithResponse("upload_private_file", { user_id: userId, file, name });
+  }
+
+  /** 获取群文件资源链接 (get_group_file_url) */
+  async getGroupFileUrl(groupId: number, fileId: string, busid?: number): Promise<Ob11GroupFileUrlResult> {
+    const params: Record<string, unknown> = { group_id: groupId, file_id: fileId };
+    if (busid !== undefined) params.busid = busid;
+    return this.callApiWithResponse("get_group_file_url", params) as Promise<Ob11GroupFileUrlResult>;
+  }
+
+  /** 下载文件到缓存目录 (download_file) */
+  async downloadFile(
+    url: string,
+    options: { threadCnt?: number; headers?: string | string[] } = {},
+  ): Promise<Ob11DownloadFileResult> {
+    const params: Record<string, unknown> = { url };
+    if (options.threadCnt !== undefined) params.thread_cnt = options.threadCnt;
+    if (options.headers !== undefined) params.headers = options.headers;
+    return this.callApiWithResponse("download_file", params) as Promise<Ob11DownloadFileResult>;
+  }
+
+  /** 删除群文件 (delete_group_file) */
+  async deleteGroupFile(groupId: number, fileId: string, busid: number = 0): Promise<void> {
+    await this.callApiWithResponse("delete_group_file", { group_id: groupId, file_id: fileId, busid });
+  }
+
+  /** 创建群文件文件夹 (create_group_file_folder) */
+  async createGroupFileFolder(groupId: number, folderName: string, parentId: string = "/"): Promise<void> {
+    await this.callApiWithResponse("create_group_file_folder", {
+      group_id: groupId,
+      name: folderName,
+      parent_id: parentId,
+    });
+  }
+
+  /** 删除群文件文件夹 (delete_group_folder) */
+  async deleteGroupFolder(groupId: number, folderId: string, busid: number = 0): Promise<void> {
+    await this.callApiWithResponse("delete_group_folder", { group_id: groupId, folder_id: folderId, busid });
+  }
+
+  /** 获取群文件系统信息 (get_group_file_system_info) */
+  async getGroupFileSystemInfo(groupId: number): Promise<Ob11GroupFileSystemInfo> {
+    return this.callApiWithResponse("get_group_file_system_info", { group_id: groupId }) as Promise<Ob11GroupFileSystemInfo>;
+  }
+
+  /** 获取群根目录文件列表 (get_group_root_files) */
+  async getGroupRootFiles(groupId: number): Promise<Ob11GroupFileListResult> {
+    return this.callApiWithResponse("get_group_root_files", { group_id: groupId }) as Promise<Ob11GroupFileListResult>;
+  }
+
+  /** 获取群子目录文件列表 (get_group_files_by_folder) */
+  async getGroupFilesByFolder(groupId: number, folderId: string): Promise<Ob11GroupFileListResult> {
+    return this.callApiWithResponse("get_group_files_by_folder", {
+      group_id: groupId,
+      folder_id: folderId,
+    }) as Promise<Ob11GroupFileListResult>;
+  }
+
+  // ── Utility APIs (Phase 7.4) ──
+
+  /** 图片 OCR 识别 (ocr_image) */
+  async ocrImage(image: string): Promise<Ob11OcrResult | Ob11OcrResult[]> {
+    return this.callApiWithResponse("ocr_image", { image }) as Promise<Ob11OcrResult | Ob11OcrResult[]>;
+  }
+
+  /** 检查链接安全性 (check_url_safely) */
+  async checkUrlSafely(url: string): Promise<Ob11CheckUrlSafelyResult> {
+    return this.callApiWithResponse("check_url_safely", { url }) as Promise<Ob11CheckUrlSafelyResult>;
+  }
+
+  /** 标记所有消息为已读 (napcat: mark_all_as_read) */
+  async markAllAsRead(): Promise<void> {
+    await this.callApiWithResponse("mark_all_as_read", {});
+  }
+
+  /** 标记私聊消息为已读 (napcat: mark_private_msg_as_read) */
+  async markPrivateMsgAsRead(userId: number): Promise<void> {
+    await this.callApiWithResponse("mark_private_msg_as_read", { user_id: userId });
+  }
+
+  /** 标记群消息为已读 (napcat: mark_group_msg_as_read) */
+  async markGroupMsgAsRead(groupId: number): Promise<void> {
+    await this.callApiWithResponse("mark_group_msg_as_read", { group_id: groupId });
+  }
+
+  /** 获取群 @全体成员 剩余次数 (get_group_at_all_remain) */
+  async getGroupAtAllRemain(groupId: number): Promise<Ob11GroupAtAllRemainResult> {
+    return this.callApiWithResponse("get_group_at_all_remain", { group_id: groupId }) as Promise<Ob11GroupAtAllRemainResult>;
+  }
+
+  /** 获取群荣誉信息 (get_group_honor_info) */
+  async getGroupHonorInfo(
+    groupId: number,
+    honorType: "talkative" | "performer" | "legend" | "strong_newbie" | "emotion" | "all" = "all",
+  ): Promise<Ob11GroupHonorInfo> {
+    return this.callApiWithResponse("get_group_honor_info", {
+      group_id: groupId,
+      type: honorType,
+    }) as Promise<Ob11GroupHonorInfo>;
+  }
+
+  /** 获取群系统消息 (get_group_system_msg) */
+  async getGroupSystemMsg(): Promise<unknown> {
+    return this.callApiWithResponse("get_group_system_msg", {});
+  }
+
+  // ── Group Management Extended APIs (Phase 7.5) ──
+
+  /** 设置精华消息 (set_essence_msg) */
+  async setEssenceMsg(messageId: number | string): Promise<void> {
+    await this.callApiWithResponse("set_essence_msg", { message_id: Number(messageId) });
+  }
+
+  /** 移出精华消息 (delete_essence_msg) */
+  async deleteEssenceMsg(messageId: number | string): Promise<void> {
+    await this.callApiWithResponse("delete_essence_msg", { message_id: Number(messageId) });
+  }
+
+  /** 获取精华消息列表 (get_essence_msg_list) */
+  async getEssenceMsgList(groupId: number, options: { page?: number; pageSize?: number } = {}): Promise<Ob11EssenceMsgListResult> {
+    const params: Record<string, unknown> = { group_id: groupId };
+    if (options.page !== undefined) params.page = options.page;
+    if (options.pageSize !== undefined) params.page_size = options.pageSize;
+    return this.callApiWithResponse("get_essence_msg_list", params) as Promise<Ob11EssenceMsgListResult>;
+  }
+
+  /** 发送群公告 (_send_group_notice) */
+  async sendGroupNotice(groupId: number, content: string, image?: string): Promise<void> {
+    const params: Record<string, unknown> = { group_id: groupId, content };
+    if (image) params.image = image;
+    await this.callApiWithResponse("_send_group_notice", params);
+  }
+
+  /** 获取群公告 (_get_group_notice) */
+  async getGroupNotice(groupId: number): Promise<Ob11GroupNoticeListResult> {
+    return this.callApiWithResponse("_get_group_notice", { group_id: groupId }) as Promise<Ob11GroupNoticeListResult>;
+  }
+
+  /** 群内戳一戳 (napcat: group_poke) */
+  async groupPoke(groupId: number, userId: number): Promise<void> {
+    await this.callApiWithResponse("group_poke", { group_id: groupId, user_id: userId });
+  }
+
+  /** 好友戳一戳 (napcat: friend_poke) */
+  async friendPoke(userId: number): Promise<void> {
+    await this.callApiWithResponse("friend_poke", { user_id: userId });
+  }
+
+  /** 设置群头像 (set_group_portrait) */
+  async setGroupPortrait(groupId: number, file: string): Promise<void> {
+    await this.callApiWithResponse("set_group_portrait", { group_id: groupId, file });
+  }
+
+  /** 群打卡 (send_group_sign) */
+  async sendGroupSign(groupId: number): Promise<void> {
+    await this.callApiWithResponse("send_group_sign", { group_id: groupId });
+  }
+
+  /** 转发单条消息到群聊 (napcat: forward_group_single_msg) */
+  async forwardGroupSingleMsg(messageId: number | string, groupId: number): Promise<void> {
+    await this.callApiWithResponse("forward_group_single_msg", {
+      message_id: Number(messageId),
+      group_id: groupId,
+    });
+  }
+
+  /** 转发单条消息到私聊 (napcat: forward_friend_single_msg) */
+  async forwardFriendSingleMsg(messageId: number | string, userId: number): Promise<void> {
+    await this.callApiWithResponse("forward_friend_single_msg", {
+      message_id: Number(messageId),
+      user_id: userId,
+    });
+  }
+
+  // ── Account & Friend APIs (Phase 7.5 ext) ──
+
+  /** 设置登录号资料 (set_qq_profile) */
+  async setQqProfile(profile: {
+    nickname?: string;
+    company?: string;
+    email?: string;
+    college?: string;
+    personal_note?: string;
+  }): Promise<void> {
+    await this.callApiWithResponse("set_qq_profile", profile);
+  }
+
+  /** 删除好友 (delete_friend) */
+  async deleteFriend(userId: number): Promise<void> {
+    await this.callApiWithResponse("delete_friend", { user_id: userId });
+  }
+
+  /** 设置头像 (napcat: set_qq_avatar) */
+  async setQqAvatar(file: string): Promise<void> {
+    await this.callApiWithResponse("set_qq_avatar", { file });
+  }
+
+  /** 设置在线状态 (napcat: set_online_status) */
+  async setOnlineStatus(status: number, extStatus: number, batteryStatus: number = 0): Promise<void> {
+    await this.callApiWithResponse("set_online_status", {
+      status,
+      ext_status: extStatus,
+      battery_status: batteryStatus,
+    });
+  }
+
+  /** 获取好友分类列表 (napcat: get_friends_with_category) */
+  async getFriendsWithCategory(): Promise<unknown> {
+    return this.callApiWithResponse("get_friends_with_category", {});
+  }
+
+  /** 获取运行状态 (get_status) */
+  async getStatus(): Promise<unknown> {
+    return this.callApiWithResponse("get_status", {});
+  }
+
+  /** 获取版本信息 (get_version_info) */
+  async getVersionInfo(): Promise<unknown> {
+    return this.callApiWithResponse("get_version_info", {});
+  }
+
+  /** 清理缓存 (clean_cache) */
+  async cleanCache(): Promise<void> {
+    await this.callApiWithResponse("clean_cache", {});
+  }
+
+  // ── AI APIs (napcat, Phase 7.5 ext) ──
+
+  /** AI 文本转图片 (napcat: ai_text_to_image) */
+  async aiTextToImage(chatType: number, prompt: string, modelIndex: number = 0): Promise<unknown> {
+    return this.callApiWithResponse("ai_text_to_image", {
+      chat_type: chatType,
+      prompt,
+      model_index: modelIndex,
+    });
+  }
+
+  /** AI 总结聊天记录 (napcat: ai_summarize_chat) */
+  async aiSummarizeChat(groupId: number): Promise<unknown> {
+    return this.callApiWithResponse("ai_summarize_chat", { group_id: groupId });
+  }
+
+  /** AI 语音转文字 (napcat: ai_voice_to_text) */
+  async aiVoiceToText(fileId: string): Promise<unknown> {
+    return this.callApiWithResponse("ai_voice_to_text", { file_id: fileId });
   }
 
   private ob11ToComponents(segments: OB11MessageSegment[]): MessageComponent[] {
