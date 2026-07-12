@@ -68,6 +68,119 @@ interface OB11MessageEvent {
   };
 }
 
+// ── OneBot 11 API Result Types ──
+
+/** get_file / get_image / get_record 返回 */
+export interface Ob11FileResult {
+  file?: string;
+  url?: string;
+  file_name?: string;
+  file_size?: number;
+  filename?: string;
+  size?: number;
+  base64?: string;
+}
+
+/** get_msg 返回 */
+export interface Ob11GetMsgResult {
+  message_id: number;
+  real_id?: number;
+  message_type: "private" | "group";
+  sender: { user_id: number; nickname: string; card?: string };
+  message: OB11MessageSegment[] | string;
+  raw_message: string;
+  time: number;
+  group_id?: number;
+  user_id: number;
+  self_id: number;
+}
+
+/** get_forward_msg 返回 */
+export interface Ob11GetForwardMsgResult {
+  messages: OB11MessageSegment[];
+}
+
+/** send_group_msg / send_private_msg 返回 */
+export interface Ob11SendMsgResult {
+  message_id: number;
+}
+
+/** get_login_info 返回 */
+export interface Ob11LoginInfo {
+  user_id: number;
+  nickname: string;
+}
+
+// ── Request / Notice Event Types ──
+
+/** 加好友请求事件 */
+export interface Ob11FriendRequestEvent {
+  post_type: "request";
+  request_type: "friend";
+  user_id: number;
+  comment: string;
+  flag: string;
+  time: number;
+  self_id: number;
+}
+
+/** 加群请求/邀请事件 */
+export interface Ob11GroupRequestEvent {
+  post_type: "request";
+  request_type: "group";
+  sub_type: "add" | "invite";
+  group_id: number;
+  user_id: number;
+  comment: string;
+  flag: string;
+  time: number;
+  self_id: number;
+}
+
+/** 通知事件 (通用) */
+export interface Ob11NoticeEvent {
+  post_type: "notice";
+  notice_type: string;
+  time: number;
+  self_id: number;
+  group_id?: number;
+  user_id?: number;
+  operator_id?: number;
+  sub_type?: string;
+  // group_recall
+  message_id?: number;
+  // group_upload
+  file?: { id: string; name: string; size: number; busid?: number };
+  // group_mute
+  duration?: number;
+  // poke
+  target_id?: number;
+  // group_admin
+  set?: boolean;
+  // group_increase/decrease
+  member_id?: number;
+}
+
+// ── Group Info Types (for Phase 5/6) ──
+
+export interface Ob11GroupInfo {
+  group_id: number;
+  group_name: string;
+  member_count: number;
+  max_member_count: number;
+}
+
+export interface Ob11GroupMemberInfo {
+  user_id: number;
+  nickname: string;
+  card?: string;
+  role: "owner" | "admin" | "member";
+  join_time?: number;
+  last_sent_time?: number;
+  title?: string;
+  shut_up_timestamp?: number;
+}
+
 // ── OneBot11Event ──
 
 class OneBot11Event extends MessageEvent {
@@ -151,7 +264,15 @@ class OneBot11Event extends MessageEvent {
 
     params.message = this.componentsToOB11(components);
 
-    this.callApi(action, params, ws);
+    // Use response-awaited call to get message_id; fall back to fire-and-forget
+    try {
+      const result = await this.adapter?.callApiWithResponse(action, params);
+      if (result && typeof result === "object" && "message_id" in result) {
+        this.setExtra("sent_message_id", (result as Ob11SendMsgResult).message_id);
+      }
+    } catch (e) {
+      console.warn(`[OneBot11] send() response await failed, message may still have been sent:`, e);
+    }
   }
 
   async sendStreaming(generator: AsyncGenerator<MessageChain, void>): Promise<void> {
@@ -176,18 +297,36 @@ class OneBot11Event extends MessageEvent {
     // No-op
   }
 
-  private callApi(action: string, params: Record<string, unknown>, ws: WebSocket): void {
-    if (ws.readyState !== WebSocket.OPEN) {
-      console.warn(`[OneBot11] Cannot call API ${action}: WS not open`);
-      return;
-    }
-    const echo = generateId();
-    const payload = { action, params, echo };
-    try {
-      ws.send(JSON.stringify(payload));
-    } catch (e) {
-      console.error(`[OneBot11] Failed to send API call ${action}:`, e);
-    }
+  // ── API convenience methods (delegate to adapter) ──
+
+  /** 获取收到的文件信息（file_id → URL） */
+  async getFile(fileId: string): Promise<Ob11FileResult> {
+    return this.adapter!.callApiWithResponse("get_file", { file_id: fileId }) as Promise<Ob11FileResult>;
+  }
+
+  /** 获取图片信息 */
+  async getImage(file: string): Promise<Ob11FileResult> {
+    return this.adapter!.callApiWithResponse("get_image", { file }) as Promise<Ob11FileResult>;
+  }
+
+  /** 获取语音转码 */
+  async getRecord(file: string, outFormat: string = "mp3"): Promise<Ob11FileResult> {
+    return this.adapter!.callApiWithResponse("get_record", { file, out_format: outFormat }) as Promise<Ob11FileResult>;
+  }
+
+  /** 撤回消息 */
+  async deleteMsg(messageId: string | number): Promise<void> {
+    await this.adapter!.callApiWithResponse("delete_msg", { message_id: Number(messageId) });
+  }
+
+  /** 获取消息详情 */
+  async getMsg(messageId: string | number): Promise<Ob11GetMsgResult> {
+    return this.adapter!.callApiWithResponse("get_msg", { message_id: Number(messageId) }) as Promise<Ob11GetMsgResult>;
+  }
+
+  /** 获取合并转发消息内容 */
+  async getForwardMsg(resId: string): Promise<Ob11GetForwardMsgResult> {
+    return this.adapter!.callApiWithResponse("get_forward_msg", { id: resId }) as Promise<Ob11GetForwardMsgResult>;
   }
 
   private componentsToOB11(components: MessageComponent[]): OB11MessageSegment[] {
@@ -228,6 +367,16 @@ export class OneBot11Adapter extends PlatformAdapter {
   private reverseReconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private startTime: number = 0;
 
+  // ── API Response Correlation (echo-based) ──
+  /** Pending API requests waiting for echo responses */
+  private pendingRequests = new Map<string, {
+    resolve: (data: unknown) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
+  /** Default timeout for API calls (30s) */
+  static readonly API_TIMEOUT_MS = 30_000;
+
   constructor(config: OneBot11AdapterConfig, eventQueue: AsyncQueue<MessageEvent>) {
     super(config as unknown as Record<string, unknown>, eventQueue);
     this.config = config;
@@ -250,6 +399,9 @@ export class OneBot11Adapter extends PlatformAdapter {
 
   async stop(): Promise<void> {
     this._status = "stopping";
+
+    // Reject all pending API requests
+    this.rejectAllPending("Adapter is stopping");
 
     if (this.reverseReconnectTimer) {
       clearTimeout(this.reverseReconnectTimer);
@@ -358,7 +510,7 @@ export class OneBot11Adapter extends PlatformAdapter {
     params.message = this.componentsToOB11(components);
 
     try {
-      this.callApi(action, params, ws);
+      await this.callApiWithResponse(action, params);
       return true;
     } catch (e) {
       console.error(`[OneBot11] Proactive message failed:`, e);
@@ -366,9 +518,50 @@ export class OneBot11Adapter extends PlatformAdapter {
     }
   }
 
-  /** 调用 OneBot 11 API（适配器级别，供主动推送使用） */
-  private callApi(action: string, params: Record<string, unknown>, ws: WebSocket): void {
-    if (ws.readyState !== WebSocket.OPEN) {
+  // ── API Call Infrastructure ──
+
+  /**
+   * 调用 OneBot 11 API 并等待响应。
+   * 使用 echo 字段关联请求和响应，超时自动 reject。
+   */
+  async callApiWithResponse(
+    action: string,
+    params: Record<string, unknown>,
+    timeoutMs: number = OneBot11Adapter.API_TIMEOUT_MS,
+  ): Promise<unknown> {
+    const ws = this.getActiveWs();
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      throw new Error(`Cannot call API ${action}: no active WS connection`);
+    }
+
+    const echo = generateId();
+    const payload = { action, params, echo };
+
+    return new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(echo);
+        reject(new Error(`API call '${action}' timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      this.pendingRequests.set(echo, { resolve, reject, timer });
+
+      try {
+        ws.send(JSON.stringify(payload));
+      } catch (e) {
+        this.pendingRequests.delete(echo);
+        clearTimeout(timer);
+        reject(new Error(`Failed to send API call '${action}': ${e instanceof Error ? e.message : String(e)}`));
+      }
+    });
+  }
+
+  /**
+   * 调用 OneBot 11 API（fire-and-forget，不等待响应）。
+   * 保留用于不需要返回值的场景。
+   */
+  callApiFireAndForget(action: string, params: Record<string, unknown>): void {
+    const ws = this.getActiveWs();
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
       console.warn(`[OneBot11] Cannot call API ${action}: WS not open`);
       return;
     }
@@ -379,6 +572,57 @@ export class OneBot11Adapter extends PlatformAdapter {
     } catch (e) {
       console.error(`[OneBot11] Failed to send API call ${action}:`, e);
     }
+  }
+
+  /** 拒绝所有等待中的 API 请求（在断开连接/停止时调用） */
+  private rejectAllPending(reason: string): void {
+    for (const [, pending] of this.pendingRequests) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(reason));
+    }
+    this.pendingRequests.clear();
+  }
+
+  // ── OneBot 11 Standard API Methods ──
+
+  /** 获取收到的文件信息（file_id → URL）— napcat 扩展 */
+  async getFile(fileId: string): Promise<Ob11FileResult> {
+    return this.callApiWithResponse("get_file", { file_id: fileId }) as Promise<Ob11FileResult>;
+  }
+
+  /** 获取图片信息（file → URL/路径） */
+  async getImage(file: string): Promise<Ob11FileResult> {
+    return this.callApiWithResponse("get_image", { file }) as Promise<Ob11FileResult>;
+  }
+
+  /** 获取语音转码（file → 目标格式文件路径） */
+  async getRecord(file: string, outFormat: string = "mp3"): Promise<Ob11FileResult> {
+    return this.callApiWithResponse("get_record", { file, out_format: outFormat }) as Promise<Ob11FileResult>;
+  }
+
+  /** 撤回消息 */
+  async deleteMsg(messageId: string | number): Promise<void> {
+    await this.callApiWithResponse("delete_msg", { message_id: Number(messageId) });
+  }
+
+  /** 获取消息详情 */
+  async getMsg(messageId: string | number): Promise<Ob11GetMsgResult> {
+    return this.callApiWithResponse("get_msg", { message_id: Number(messageId) }) as Promise<Ob11GetMsgResult>;
+  }
+
+  /** 获取合并转发消息内容 */
+  async getForwardMsg(resId: string): Promise<Ob11GetForwardMsgResult> {
+    return this.callApiWithResponse("get_forward_msg", { id: resId }) as Promise<Ob11GetForwardMsgResult>;
+  }
+
+  /** 获取登录号信息 */
+  async getLoginInfo(): Promise<Ob11LoginInfo> {
+    return this.callApiWithResponse("get_login_info", {}) as Promise<Ob11LoginInfo>;
+  }
+
+  /** 标记消息已读 (go-cqhttp 扩展) */
+  async markMsgAsRead(messageId: string | number): Promise<void> {
+    await this.callApiWithResponse("mark_msg_as_read", { message_id: Number(messageId) });
   }
 
   /** 将消息组件转换为 OneBot 11 消息段 */
@@ -517,26 +761,54 @@ export class OneBot11Adapter extends PlatformAdapter {
   }
 
   private handleOb11Data(data: Record<string, unknown>, ws: WebSocket): void {
-    // Handle API responses (echo)
+    // Handle API responses (echo) — resolve pending requests
     if (data.echo && data.retcode !== undefined) {
-      // This is an API response, ignore for now
-      return;
-    }
-
-    // Only handle message events
-    if (data.post_type !== "message") {
-      // Meta events, notice events etc. - log but don't process
-      if (data.post_type === "meta_event") {
-        // Respond to heartbeat if needed
-        if (data.meta_event_type === "heartbeat") {
-          // OneBot implementations handle their own heartbeat
+      const echo = data.echo as string;
+      const pending = this.pendingRequests.get(echo);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pendingRequests.delete(echo);
+        if (data.retcode === 0) {
+          pending.resolve(data.data);
+        } else {
+          pending.reject(new Error(
+            `API call failed: ${data.msg ?? "unknown error"} (retcode=${data.retcode})`,
+          ));
         }
       }
       return;
     }
 
-    const msgEvent = data as unknown as OB11MessageEvent;
-    this.processMessageEvent(msgEvent, ws);
+    const postType = data.post_type as string;
+
+    // Handle message events
+    if (postType === "message") {
+      const msgEvent = data as unknown as OB11MessageEvent;
+      this.processMessageEvent(msgEvent, ws);
+      return;
+    }
+
+    // Handle request events (friend/group join requests)
+    if (postType === "request") {
+      this.processRequestEvent(data as unknown as Ob11FriendRequestEvent | Ob11GroupRequestEvent);
+      return;
+    }
+
+    // Handle notice events
+    if (postType === "notice") {
+      this.processNoticeEvent(data as unknown as Ob11NoticeEvent, ws);
+      return;
+    }
+
+    // Handle meta events
+    if (postType === "meta_event") {
+      const metaEventType = data.meta_event_type as string;
+      if (metaEventType === "lifecycle") {
+        console.info(`[OneBot11] Lifecycle event: ${data.sub_type ?? "unknown"}`);
+      }
+      // heartbeat is handled by OneBot implementations
+      return;
+    }
   }
 
   private processMessageEvent(msg: OB11MessageEvent, ws: WebSocket): void {
@@ -589,6 +861,266 @@ export class OneBot11Adapter extends PlatformAdapter {
     event.setExtra("message_id", msg.message_id);
 
     this.commitEvent(event);
+  }
+
+  // ── Request Event Processing (Phase 3) ──
+
+  private async processRequestEvent(
+    event: Ob11FriendRequestEvent | Ob11GroupRequestEvent,
+  ): Promise<void> {
+    if (event.request_type === "friend") {
+      const friendReq = event as Ob11FriendRequestEvent;
+      console.info(`[OneBot11] Friend request from ${friendReq.user_id}: ${friendReq.comment || "(no comment)"}`);
+
+      const shouldApprove = this.config.autoApproveFriend ?? false;
+      try {
+        await this.setFriendAddRequest(friendReq.flag, shouldApprove);
+        console.info(`[OneBot11] Friend request ${shouldApprove ? "approved" : "rejected"}: ${friendReq.user_id}`);
+      } catch (e) {
+        console.error(`[OneBot11] Failed to handle friend request:`, e);
+      }
+      return;
+    }
+
+    if (event.request_type === "group") {
+      const groupReq = event as Ob11GroupRequestEvent;
+      const action = groupReq.sub_type === "add" ? "加群请求" : "加群邀请";
+      console.info(`[OneBot11] ${action} from ${groupReq.user_id} for group ${groupReq.group_id}: ${groupReq.comment || "(no comment)"}`);
+
+      const shouldApprove = this.config.autoApproveGroup ?? false;
+      const reason = shouldApprove ? "" : (this.config.autoRejectReason ?? "");
+      try {
+        await this.setGroupAddRequest(groupReq.flag, groupReq.sub_type, shouldApprove, reason);
+        console.info(`[OneBot11] Group request ${shouldApprove ? "approved" : "rejected"}: group=${groupReq.group_id}`);
+      } catch (e) {
+        console.error(`[OneBot11] Failed to handle group request:`, e);
+      }
+      return;
+    }
+  }
+
+  /** 处理好友请求 */
+  async setFriendAddRequest(flag: string, approve: boolean, remark?: string): Promise<void> {
+    const params: Record<string, unknown> = { flag, approve };
+    if (remark) params.remark = remark;
+    await this.callApiWithResponse("set_friend_add_request", params);
+  }
+
+  /** 处理加群请求/邀请 */
+  async setGroupAddRequest(flag: string, subType: string, approve: boolean, reason?: string): Promise<void> {
+    const params: Record<string, unknown> = { flag, sub_type: subType, approve };
+    if (reason) params.reason = reason;
+    await this.callApiWithResponse("set_group_add_request", params);
+  }
+
+  // ── Notice Event Processing (Phase 4) ──
+
+  private processNoticeEvent(event: Ob11NoticeEvent, ws: WebSocket): void {
+    switch (event.notice_type) {
+      case "group_recall": {
+        console.info(`[OneBot11] Group recall: group=${event.group_id}, msg=${event.message_id}, operator=${event.operator_id}`);
+        break;
+      }
+      case "friend_recall": {
+        console.info(`[OneBot11] Friend recall: user=${event.user_id}, msg=${event.message_id}`);
+        break;
+      }
+      case "poke": {
+        // Both group and private pokes
+        if (event.user_id === event.self_id) return; // self poke, ignore
+        const pokeToMessage = this.config.pokeToMessage ?? true;
+        if (pokeToMessage) {
+          const isGroup = !!event.group_id;
+          const sessionId = isGroup ? `group_${event.group_id}` : `private_${event.user_id}`;
+          const pokerName = `用户${event.user_id}`;
+          const targetName = event.target_id === event.self_id ? "我" : `用户${event.target_id}`;
+          const text = `[戳一戳] ${pokerName} 戳了 ${targetName}`;
+          this.createSyntheticMessageEvent(text, sessionId, isGroup, event.user_id!, pokerName, ws);
+        }
+        break;
+      }
+      case "group_increase": {
+        const subType = event.sub_type ?? "approve";
+        console.info(`[OneBot11] Group member joined: group=${event.group_id}, user=${event.user_id}, sub_type=${subType}`);
+        const memberJoinToMessage = this.config.memberJoinToMessage ?? false;
+        if (memberJoinToMessage) {
+          const sessionId = `group_${event.group_id}`;
+          const text = `[群成员变动] 用户${event.user_id} 加入了群聊`;
+          this.createSyntheticMessageEvent(text, sessionId, true, event.user_id!, `用户${event.user_id}`, ws);
+        }
+        break;
+      }
+      case "group_decrease": {
+        const subType = event.sub_type ?? "leave";
+        const action = subType === "kick" ? "被踢出" : "离开";
+        console.info(`[OneBot11] Group member left: group=${event.group_id}, user=${event.user_id}, ${action}, operator=${event.operator_id}`);
+        break;
+      }
+      case "group_upload": {
+        const fileName = event.file?.name ?? "unknown";
+        const fileSize = event.file?.size ?? 0;
+        console.info(`[OneBot11] Group file upload: group=${event.group_id}, user=${event.user_id}, file=${fileName} (${fileSize} bytes)`);
+        const groupUploadToMessage = this.config.groupUploadToMessage ?? true;
+        if (groupUploadToMessage && event.group_id) {
+          const sessionId = `group_${event.group_id}`;
+          const text = `[群文件上传] 用户${event.user_id} 上传了文件: ${fileName} (${this.formatFileSize(fileSize)})`;
+          this.createSyntheticMessageEvent(text, sessionId, true, event.user_id!, `用户${event.user_id}`, ws, {
+            type: ComponentType.File,
+            file: event.file?.id,
+            name: fileName,
+            url: undefined,
+            toDict() { return { type: "file", data: { file_id: event.file?.id, name: fileName } }; },
+          } as FileComponent);
+        }
+        break;
+      }
+      case "group_admin": {
+        const action = event.set ? "成为管理员" : "被取消管理员";
+        console.info(`[OneBot11] Group admin change: group=${event.group_id}, user=${event.user_id}, ${action}`);
+        break;
+      }
+      case "group_mute": {
+        const action = event.duration === 0 ? "被解除禁言" : `被禁言 ${event.duration}秒`;
+        console.info(`[OneBot11] Group mute: group=${event.group_id}, user=${event.user_id}, ${action}, operator=${event.operator_id}`);
+        break;
+      }
+      case "notify": {
+        // Sub-types: poke (already handled above for standard poke), lucky_king, honor, etc.
+        if (event.sub_type === "poke") {
+          // Some implementations send poke as notice_type=notify, sub_type=poke
+          // Re-dispatch as poke
+          this.processNoticeEvent({ ...event, notice_type: "poke" }, ws);
+        }
+        break;
+      }
+      default:
+        // Unknown notice type, log and ignore
+        console.info(`[OneBot11] Unhandled notice: ${event.notice_type} sub_type=${event.sub_type ?? "none"}`);
+        break;
+    }
+  }
+
+  /** 创建合成消息事件 (用于将 notice 转为 pipeline 可处理的消息) */
+  private createSyntheticMessageEvent(
+    text: string,
+    sessionId: string,
+    isGroup: boolean,
+    userId: number,
+    nickname: string,
+    ws: WebSocket,
+    extraComponent?: MessageComponent,
+  ): void {
+    const platformMsg = new PlatformMessage();
+    platformMsg.type = isGroup ? MessageType.GROUP_MESSAGE : MessageType.FRIEND_MESSAGE;
+    platformMsg.selfId = this.meta().id;
+    platformMsg.sessionId = sessionId;
+    platformMsg.messageId = `synthetic_${Date.now()}`;
+    platformMsg.sender = { userId: String(userId), nickname };
+    platformMsg.messageStr = text;
+
+    const components: MessageComponent[] = [{
+      type: ComponentType.Plain,
+      text,
+      toDict() { return { type: "text", data: { text } }; },
+    } as PlainComponent];
+    if (extraComponent) {
+      components.push(extraComponent);
+    }
+    platformMsg.components = components;
+    platformMsg.timestamp = Date.now();
+
+    const event = new OneBot11Event(text, platformMsg, sessionId, this.meta());
+    event.setWebSocket(ws);
+    event.setAdapter(this);
+
+    if (isGroup) {
+      const groupId = Number(sessionId.replace("group_", ""));
+      event.setExtra("group_id", groupId);
+    }
+    event.setExtra("user_id", userId);
+
+    this.commitEvent(event);
+  }
+
+  private formatFileSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  }
+
+  // ── Group Management APIs (Phase 5) ──
+
+  /** 踢出群成员 */
+  async setGroupKick(groupId: number, userId: number, rejectAddRequest: boolean = false): Promise<void> {
+    await this.callApiWithResponse("set_group_kick", { group_id: groupId, user_id: userId, reject_add_request: rejectAddRequest });
+  }
+
+  /** 禁言群成员 (duration 秒, 0 表示解除禁言) */
+  async setGroupBan(groupId: number, userId: number, duration: number = 1800): Promise<void> {
+    await this.callApiWithResponse("set_group_ban", { group_id: groupId, user_id: userId, duration });
+  }
+
+  /** 全员禁言 */
+  async setGroupWholeBan(groupId: number, enable: boolean = true): Promise<void> {
+    await this.callApiWithResponse("set_group_whole_ban", { group_id: groupId, enable });
+  }
+
+  /** 设置群名片 */
+  async setGroupCard(groupId: number, userId: number, card: string): Promise<void> {
+    await this.callApiWithResponse("set_group_card", { group_id: groupId, user_id: userId, card });
+  }
+
+  /** 设置群名 */
+  async setGroupName(groupId: number, name: string): Promise<void> {
+    await this.callApiWithResponse("set_group_name", { group_id: groupId, group_name: name });
+  }
+
+  /** 退出群聊 (isDismiss=true 时解散群) */
+  async setGroupLeave(groupId: number, isDismiss: boolean = false): Promise<void> {
+    await this.callApiWithResponse("set_group_leave", { group_id: groupId, is_dismiss: isDismiss });
+  }
+
+  /** 设置群管理员 */
+  async setGroupAdmin(groupId: number, userId: number, enable: boolean = true): Promise<void> {
+    await this.callApiWithResponse("set_group_admin", { group_id: groupId, user_id: userId, enable });
+  }
+
+  /** 设置群专属头衔 */
+  async setGroupSpecialTitle(groupId: number, userId: number, specialTitle: string): Promise<void> {
+    await this.callApiWithResponse("set_group_special_title", { group_id: groupId, user_id: userId, special_title: specialTitle });
+  }
+
+  // ── Info Query APIs (Phase 6) ──
+
+  /** 获取好友列表 */
+  async getFriendList(): Promise<Array<{ user_id: number; nickname: string; remark: string }>> {
+    return this.callApiWithResponse("get_friend_list", {}) as Promise<Array<{ user_id: number; nickname: string; remark: string }>>;
+  }
+
+  /** 获取群列表 */
+  async getGroupList(): Promise<Ob11GroupInfo[]> {
+    return this.callApiWithResponse("get_group_list", {}) as Promise<Ob11GroupInfo[]>;
+  }
+
+  /** 获取群信息 */
+  async getGroupInfo(groupId: number): Promise<Ob11GroupInfo> {
+    return this.callApiWithResponse("get_group_info", { group_id: groupId }) as Promise<Ob11GroupInfo>;
+  }
+
+  /** 获取群成员信息 */
+  async getGroupMemberInfo(groupId: number, userId: number): Promise<Ob11GroupMemberInfo> {
+    return this.callApiWithResponse("get_group_member_info", { group_id: groupId, user_id: userId }) as Promise<Ob11GroupMemberInfo>;
+  }
+
+  /** 获取群成员列表 */
+  async getGroupMemberList(groupId: number): Promise<Ob11GroupMemberInfo[]> {
+    return this.callApiWithResponse("get_group_member_list", { group_id: groupId }) as Promise<Ob11GroupMemberInfo[]>;
+  }
+
+  /** 获取陌生人信息 */
+  async getStrangerInfo(userId: number): Promise<{ user_id: number; nickname: string; sex: string; age: number }> {
+    return this.callApiWithResponse("get_stranger_info", { user_id: userId }) as Promise<{ user_id: number; nickname: string; sex: string; age: number }>;
   }
 
   private ob11ToComponents(segments: OB11MessageSegment[]): MessageComponent[] {

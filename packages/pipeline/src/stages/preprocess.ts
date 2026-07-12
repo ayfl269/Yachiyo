@@ -40,7 +40,8 @@ export class PreProcessStage extends PipelineStage {
     // 3. Annotate message with received file/image/video info
     //    This lets the agent know about files and their URLs so it can
     //    save them using the save_platform_file tool.
-    this.annotateReceivedFiles(event);
+    //    If file URLs are missing, try to resolve them via platform API (e.g. getFile).
+    await this.annotateReceivedFiles(event);
 
     // 4. STT (speech-to-text)
     if (this.sttEnabled) {
@@ -71,15 +72,42 @@ export class PreProcessStage extends PipelineStage {
    * Collect file/image/record/video components and:
    * 1. Store them in event extra as "received_files" (structured data for tools)
    * 2. Append a text annotation to messageStr so the agent is aware of the files
+   *
+   * If file URLs are missing (common for OneBot11 group files), attempt to
+   * resolve them via platform-specific APIs (getFile/getImage/getRecord)
+   * using duck typing on the event object.
    */
-  private annotateReceivedFiles(event: MessageEvent): void {
+  private async annotateReceivedFiles(event: MessageEvent): Promise<void> {
     const receivedFiles: ReceivedFile[] = [];
+
+    // Duck-type check for OneBot11 API methods on the event
+    const eventWithApi = event as unknown as {
+      getFile?: (fileId: string) => Promise<{ url?: string; file_name?: string }>;
+      getImage?: (file: string) => Promise<{ url?: string }>;
+      getRecord?: (file: string) => Promise<{ url?: string; file?: string }>;
+    };
 
     for (const comp of event.messageObj.components) {
       switch (comp.type) {
         case ComponentType.File: {
           const fc = comp as FileComponent;
-          const url = fc.url ?? fc.file;
+          let url = fc.url ?? fc.file;
+          const fileId = fc.file;
+
+          // If no direct URL but has file_id, try to resolve via getFile API
+          if (!url && fileId && typeof eventWithApi.getFile === "function") {
+            try {
+              const result = await eventWithApi.getFile(fileId);
+              if (result?.url) {
+                url = result.url;
+                (fc as { url?: string }).url = url;
+              }
+              if (result?.file_name && !fc.name) {
+                fc.name = result.file_name;
+              }
+            } catch { /* ignore resolution errors */ }
+          }
+
           if (url) {
             receivedFiles.push({ type: "file", url, name: fc.name, file: fc.file });
           }
@@ -87,7 +115,20 @@ export class PreProcessStage extends PipelineStage {
         }
         case ComponentType.Image: {
           const ic = comp as ImageComponent;
-          const url = ic.url ?? ic.file;
+          let url = ic.url ?? ic.file;
+          const fileId = ic.file;
+
+          // If no direct URL but has file_id, try to resolve via getImage API
+          if (!url && fileId && typeof eventWithApi.getImage === "function") {
+            try {
+              const result = await eventWithApi.getImage(fileId);
+              if (result?.url) {
+                url = result.url;
+                (ic as { url?: string }).url = url;
+              }
+            } catch { /* ignore resolution errors */ }
+          }
+
           if (url) {
             receivedFiles.push({ type: "image", url, file: ic.file });
           }
@@ -95,7 +136,21 @@ export class PreProcessStage extends PipelineStage {
         }
         case ComponentType.Record: {
           const rc = comp as RecordComponent;
-          const url = rc.url ?? rc.file;
+          let url = rc.url ?? rc.file;
+          const fileId = rc.file;
+
+          // If no direct URL but has file_id, try to resolve via getRecord API
+          if (!url && fileId && typeof eventWithApi.getRecord === "function") {
+            try {
+              const result = await eventWithApi.getRecord(fileId);
+              if (result?.url) {
+                url = result.url;
+              } else if (result?.file) {
+                url = result.file;
+              }
+            } catch { /* ignore resolution errors */ }
+          }
+
           if (url) {
             receivedFiles.push({ type: "record", url, file: rc.file });
           }

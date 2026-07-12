@@ -25,6 +25,18 @@ export interface OneBot11AdapterConfig extends AdapterConfigBase {
   reconnectInterval?: number;
   /** 鉴权 Token (可选) */
   accessToken?: string;
+  /** 自动通过好友请求 (默认 false) */
+  autoApproveFriend?: boolean;
+  /** 自动通过加群请求/邀请 (默认 false) */
+  autoApproveGroup?: boolean;
+  /** 自动拒绝时的理由 (可选) */
+  autoRejectReason?: string;
+  /** 将戳一戳(poke)事件转为消息送入 pipeline (默认 true) */
+  pokeToMessage?: boolean;
+  /** 将群文件上传通知转为文件消息送入 pipeline (默认 true) */
+  groupUploadToMessage?: boolean;
+  /** 将成员入群通知转为消息送入 pipeline (默认 false) */
+  memberJoinToMessage?: boolean;
 }
 
 export interface QQOfficialAdapterConfig extends AdapterConfigBase {
