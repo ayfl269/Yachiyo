@@ -11,7 +11,7 @@ import { PlatformAdapter } from "../adapter.js";
 import type { PlatformMetadata } from "../metadata.js";
 import type { AsyncQueue } from "@yachiyo/common/async-queue.js";
 import { MessageEvent } from "@yachiyo/message/event.js";
-import type { MessageComponent, PlainComponent, ImageComponent, AtComponent } from "@yachiyo/message/components.js";
+import type { MessageComponent, PlainComponent, ImageComponent, AtComponent, FileComponent } from "@yachiyo/message/components.js";
 import { ComponentType } from "@yachiyo/message/components.js";
 import { PlatformMessage } from "@yachiyo/message/platform-message.js";
 import { MessageType } from "@yachiyo/message/types.js";
@@ -650,6 +650,33 @@ export class OneBot11Adapter extends PlatformAdapter {
             toDict() { return { type: "record", data: seg.data }; },
           } as unknown as MessageComponent);
           break;
+
+        case "file": {
+          const rawFileUrl = (data.url as string) ?? "";
+          const fileUrl = rawFileUrl ? decodeHtmlEntities(rawFileUrl) : "";
+          const fileId = (data.file as string) ?? (data.file_id as string) ?? "";
+          const fileName = (data.name as string) ?? (data.filename as string) ?? fileId;
+          components.push({
+            type: ComponentType.File,
+            url: fileUrl || undefined,
+            file: fileId || undefined,
+            name: fileName || undefined,
+            toDict() { return { type: "file", data: seg.data }; },
+          } as FileComponent);
+          break;
+        }
+
+        case "video": {
+          const rawVideoUrl = (data.url as string) ?? "";
+          const videoUrl = rawVideoUrl ? decodeHtmlEntities(rawVideoUrl) : "";
+          const videoFile = (data.file as string) ?? "";
+          components.push({
+            type: ComponentType.Video,
+            file: videoFile || videoUrl,
+            toDict() { return { type: "video", data: seg.data }; },
+          } as unknown as MessageComponent);
+          break;
+        }
 
         default:
           components.push({

@@ -1,7 +1,14 @@
 import { PipelineStage, registerStage } from "../stage.js";
 import type { PipelineContext } from "../context.js";
 import type { MessageEvent } from "@yachiyo/message/event.js";
-import { ComponentType, type RecordComponent, type FileComponent, type PlainComponent } from "@yachiyo/message/components.js";
+import { ComponentType, type RecordComponent, type FileComponent, type PlainComponent, type ImageComponent, type VideoComponent } from "@yachiyo/message/components.js";
+
+export interface ReceivedFile {
+  type: "file" | "image" | "record" | "video";
+  url?: string;
+  name?: string;
+  file?: string;
+}
 
 @registerStage
 export class PreProcessStage extends PipelineStage {
@@ -30,7 +37,12 @@ export class PreProcessStage extends PipelineStage {
       }
     }
 
-    // 3. STT (speech-to-text)
+    // 3. Annotate message with received file/image/video info
+    //    This lets the agent know about files and their URLs so it can
+    //    save them using the save_platform_file tool.
+    this.annotateReceivedFiles(event);
+
+    // 4. STT (speech-to-text)
     if (this.sttEnabled) {
       const sttProvider = this.ctx.providerManager.getUsingSttProvider(event.unifiedMsgOrigin);
       if (sttProvider) {
@@ -52,6 +64,73 @@ export class PreProcessStage extends PipelineStage {
           }
         }
       }
+    }
+  }
+
+  /**
+   * Collect file/image/record/video components and:
+   * 1. Store them in event extra as "received_files" (structured data for tools)
+   * 2. Append a text annotation to messageStr so the agent is aware of the files
+   */
+  private annotateReceivedFiles(event: MessageEvent): void {
+    const receivedFiles: ReceivedFile[] = [];
+
+    for (const comp of event.messageObj.components) {
+      switch (comp.type) {
+        case ComponentType.File: {
+          const fc = comp as FileComponent;
+          const url = fc.url ?? fc.file;
+          if (url) {
+            receivedFiles.push({ type: "file", url, name: fc.name, file: fc.file });
+          }
+          break;
+        }
+        case ComponentType.Image: {
+          const ic = comp as ImageComponent;
+          const url = ic.url ?? ic.file;
+          if (url) {
+            receivedFiles.push({ type: "image", url, file: ic.file });
+          }
+          break;
+        }
+        case ComponentType.Record: {
+          const rc = comp as RecordComponent;
+          const url = rc.url ?? rc.file;
+          if (url) {
+            receivedFiles.push({ type: "record", url, file: rc.file });
+          }
+          break;
+        }
+        case ComponentType.Video: {
+          const vc = comp as VideoComponent;
+          const url = vc.file || vc.path;
+          if (url) {
+            receivedFiles.push({ type: "video", url, file: vc.file });
+          }
+          break;
+        }
+      }
+    }
+
+    if (receivedFiles.length === 0) return;
+
+    // Store structured data for tools to access
+    event.setExtra("received_files", receivedFiles);
+
+    // Append text annotation so the agent knows about the files
+    const annotations: string[] = [];
+    for (const f of receivedFiles) {
+      const label =
+        f.type === "file" ? "文件" :
+        f.type === "image" ? "图片" :
+        f.type === "record" ? "语音" :
+        "视频";
+      const namePart = f.name ? ` ${f.name}` : "";
+      annotations.push(`[收到${label}${namePart} (URL: ${f.url})]`);
+    }
+    const annotationText = annotations.join(" ");
+    if (annotationText) {
+      event.messageStr = `${event.messageStr} ${annotationText}`.trim();
     }
   }
 

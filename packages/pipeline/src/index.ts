@@ -5,6 +5,7 @@ export { EventBus, type ConfigManagerLike, type PipelineConfigInfo } from "./eve
 export { SessionLockManager } from "./session-lock.js";
 export { SessionServiceManager } from "./stages/session-status-check.js";
 export { ContentSafetyStrategySelector, KeywordsStrategy, type ContentSafetyCheckResult } from "./stages/content-safety-check.js";
+export { type ReceivedFile } from "./stages/preprocess.js";
 export { ActiveEventRegistry, activeEventRegistry } from "./active-event-registry.js";
 export { registerActiveRunner, unregisterActiveRunner, tryCaptureFollowUp, prepareFollowUpCapture, finishFollowUpTurn, type FollowUpTicket, type FollowUpCapture } from "./follow-up.js";
 export { callHandler, callEventHook } from "./handler-utils.js";

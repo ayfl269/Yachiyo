@@ -11,7 +11,7 @@
     "dev": "tsx watch src/server.ts",
     "lint": "eslint \"src/**/*.ts\" \"tests/**/*.ts\" \"packages/*/src/**/*.ts\"",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && tsx tests/test.ts && tsx tests/message-processing-test.ts && tsx tests/platform-adapter-test.ts && tsx tests/context-system-test.ts && tsx tests/memory-system-test.ts && tsx tests/provider-caching-test.ts && tsx tests/provider-manager-test.ts && tsx tests/pipeline-stages-test.ts",
+    "test": "tsc && tsx tests/test.ts && tsx tests/message-processing-test.ts && tsx tests/platform-adapter-test.ts && tsx tests/context-system-test.ts && tsx tests/memory-system-test.ts && tsx tests/provider-caching-test.ts && tsx tests/provider-manager-test.ts && tsx tests/pipeline-stages-test.ts && tsx tests/save-platform-file-test.ts",
     "test:windows": "tsx tests/windows-sandbox-test.ts",
     "test:browser": "tsx tests/browser-automation-test.ts",
     "test:interactive-shell": "tsx tests/interactive-shell-test.ts",

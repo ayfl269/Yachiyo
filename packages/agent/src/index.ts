@@ -249,6 +249,13 @@ export type {
   AdapterInfo,
 } from "./cross-platform-send-tool.js";
 
+// Save platform file tool (download files received from message platforms)
+export { createSavePlatformFileTool } from "./save-platform-file-tool.js";
+export type {
+  SavePlatformFileToolContext,
+  CreateSavePlatformFileToolOptions,
+} from "./save-platform-file-tool.js";
+
 // Memory store
 export {
   SqliteMemoryStore,

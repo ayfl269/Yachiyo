@@ -53,6 +53,7 @@ import { getSubAgentManagementTools } from "@yachiyo/agent/subagent-create-tool.
 import { SCHEDULER_MIGRATIONS, SqliteSchedulerTaskStore } from "@yachiyo/agent/scheduler-task-store.js";
 import { createSchedulerTool } from "@yachiyo/agent/scheduler-tool.js";
 import { createCrossPlatformSendTool } from "@yachiyo/agent/cross-platform-send-tool.js";
+import { createSavePlatformFileTool } from "@yachiyo/agent/save-platform-file-tool.js";
 import { TaskScheduler } from "@yachiyo/pipeline/task-scheduler.js";
 import { ProviderType } from "@yachiyo/provider/types.js";
 import type { DashboardServer } from "@yachiyo/dashboard/server.js";
@@ -359,6 +360,12 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
   // 注册跨平台消息发送工具
   const crossPlatformSendTool = createCrossPlatformSendTool({ adapterLookup: adapterRegistry });
   toolManager.funcList.push(crossPlatformSendTool);
+
+  // 注册平台文件保存工具 (从消息平台下载文件到本地)
+  const savePlatformFileTool = createSavePlatformFileTool({
+    filesRoot: join(dataDir, "received_files"),
+  });
+  toolManager.funcList.push(savePlatformFileTool);
 
   // 6. 创建管线调度器
   const pipelineContext: PipelineContext = {
