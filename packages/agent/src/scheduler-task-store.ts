@@ -471,12 +471,15 @@ export function computeInitialNextFireAt(
   now: Date,
 ): string | null {
   if (scheduledAt) {
+    const scheduledDate = new Date(scheduledAt);
+    // Normalize to UTC ISO string for consistent SQLite string comparison
+    const scheduledUtc = scheduledDate.toISOString();
     // If scheduled time has already passed and it's recurring, compute next
-    if (recurrence && new Date(scheduledAt).getTime() < now.getTime()) {
+    if (recurrence && scheduledDate.getTime() < now.getTime()) {
       const next = computeNextFireAt(recurrence, now);
-      return next?.toISOString() ?? scheduledAt;
+      return next?.toISOString() ?? scheduledUtc;
     }
-    return scheduledAt;
+    return scheduledUtc;
   }
   if (recurrence) {
     return computeNextFireAt(recurrence, now)?.toISOString() ?? null;

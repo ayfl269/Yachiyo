@@ -1812,13 +1812,30 @@ export class QQOfficialAdapter extends PlatformAdapter {
     return this.msgSeqCounter;
   }
 
-  /** Build the JSON body for an extended send-message request. */
+  /**
+   * Build the JSON body for an extended send-message request.
+   *
+   * NOTE on `msg_id`: per QQ Bot API spec
+   * (https://bot.qq.com/wiki/develop/api-v2/server-inter/message/send-receive/send.html),
+   * `msg_id` is OPTIONAL and is used only for passive replies (within the
+   * 5-minute group / 60-minute C2C reply window). For proactive messages
+   * the field MUST be omitted entirely — sending `msg_id: ""` causes the
+   * API to reject the request with code 12002 (RequestInvalid) or similar,
+   * which is the root cause of scheduled reminders never being delivered.
+   * C2C proactive messages may instead set `is_wakeup: true` to use the
+   * 互动召回 quota (4 periods within 30 days of last user interaction).
+   */
   private buildSendBody(options: QQOfficialSendOptions, msgId?: string): Record<string, unknown> {
     const body: Record<string, unknown> = {
       msg_type: options.msg_type ?? 0,
-      msg_id: options.msg_id ?? msgId ?? "",
       msg_seq: this.nextMsgSeq(),
     };
+    // Only include msg_id when we actually have one (passive reply). For
+    // proactive messages, omit the field so the API treats it as主动消息.
+    const effectiveMsgId = options.msg_id ?? msgId;
+    if (effectiveMsgId && typeof effectiveMsgId === "string" && effectiveMsgId.length > 0) {
+      body.msg_id = effectiveMsgId;
+    }
     if (options.content !== undefined) body.content = options.content;
     if (options.markdown) body.markdown = options.markdown;
     if (options.ark) body.ark = options.ark;
@@ -2183,40 +2200,67 @@ export class QQOfficialAdapter extends PlatformAdapter {
 
   /**
    * 主动推送消息到指定会话。
-   * 通过解析 unifiedMsgOrigin 提取 eventType 和 targetId，
-   * 然后调用对应的 REST API 发送消息。
-   * 对于 group/c2c，msg_id 留空以发送主动消息。
+   *
+   * 通过解析 unifiedMsgOrigin 提取 eventType 和 targetId，然后调用对应的
+   * REST API 发送消息。按 QQ 官方 API 规范
+   * (https://bot.qq.com/wiki/develop/api-v2/server-inter/message/send-receive/send.html):
+   *   - 群聊主动消息: 省略 msg_id，使用每月 4 条/群的主动消息配额
+   *     (需群主在 QQ 客户端开启"机器人主动在群聊内发言"设置项)
+   *   - C2C 主动消息: 设置 is_wakeup=true，使用 30 天内 4 个周期的互动召回配额
+   *     (与 msg_id 互斥；用户最近一次与机器人对话后即可下发，更适合提醒场景)
+   *   - 频道/私信: 直接发送（频道有独立的主动消息限额）
+   *
+   * 注意: buildSendBody 已确保不会发送空的 msg_id，避免触发 API 错误。
    */
   override async sendProactiveMessage(
     target: { umo: string; sessionId: string; platformId: string },
     components: MessageComponent[],
   ): Promise<boolean> {
+    const text = extractText(components);
+    if (!text) {
+      console.warn("[QQOfficial] sendProactiveMessage: no text content extracted from components.");
+      return false;
+    }
+
     // QQOfficial 的 UMO 格式: qqofficial:<eventType>:<targetId>
     const parsed = parseQQOfficialUMO(target.umo);
     if (!parsed) {
       // fallback: 尝试用 sessionId 作为 targetId，默认 c2c
       console.warn(`[QQOfficial] Cannot parse UMO ${target.umo}, falling back to sessionId as c2c target.`);
-      const text = extractText(components);
-      if (!text) return false;
       try {
-        await this.sendC2CMessage(target.sessionId, text, "");
+        // Use Ex variant to leverage is_wakeup for C2C proactive delivery
+        await this.sendC2CMessageEx(target.sessionId, {
+          content: text,
+          msg_type: 0,
+          is_wakeup: true,
+        });
         return true;
       } catch (e) {
-        console.error(`[QQOfficial] Proactive message (fallback) failed:`, e);
+        console.error(`[QQOfficial] Proactive message (fallback c2c, target=${target.sessionId}) failed:`, e);
         return false;
       }
     }
 
-    const text = extractText(components);
-    if (!text) return false;
-
     try {
       switch (parsed.eventType) {
         case "group":
-          await this.sendGroupMessage(parsed.targetId, text, "");
+          // Proactive group message: omit msg_id entirely (buildSendBody
+          // handles this). Consumes monthly 4-msg/group proactive quota.
+          await this.sendGroupMessageEx(parsed.targetId, {
+            content: text,
+            msg_type: 0,
+          });
           break;
         case "c2c":
-          await this.sendC2CMessage(parsed.targetId, text, "");
+          // C2C proactive: use is_wakeup=true to leverage互动召回 quota
+          // (4 periods within 30 days of last user interaction) instead of
+          // the stricter 4-msg/month proactive quota. is_wakeup is mutually
+          // exclusive with msg_id, so we must NOT pass msg_id here.
+          await this.sendC2CMessageEx(parsed.targetId, {
+            content: text,
+            msg_type: 0,
+            is_wakeup: true,
+          });
           break;
         case "guild":
           await this.sendGuildMessage(parsed.targetId, text);
@@ -2227,7 +2271,10 @@ export class QQOfficialAdapter extends PlatformAdapter {
       }
       return true;
     } catch (e) {
-      console.error(`[QQOfficial] Proactive message failed:`, e);
+      console.error(
+        `[QQOfficial] Proactive message failed (umo=${target.umo}, eventType=${parsed?.eventType}, targetId=${parsed?.targetId}):`,
+        e,
+      );
       return false;
     }
   }
