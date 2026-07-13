@@ -297,13 +297,13 @@ export default function PersonaManager() {
 
     try {
       const url = isNew ? '/api/personas' : '/api/personas/update'
-      const res = await fetch(url, {
+      const res = await apiFetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(p)
       })
       if (res.ok) {
-        showMessage(isNew ? '设定创建成功' : '设定更新成功')
+        showMessage(isNew ? '创建成功' : '更新成功')
         setShowModal(false)
         setEditingPersona(null)
         await fetchPersonas()
@@ -627,7 +627,6 @@ export default function PersonaManager() {
                     rows={10}
                     className="form-control"
                   />
-                  <span className="help-text">发送给模型的核心 System Prompt</span>
                 </div>
 
                 <div className="form-group">
