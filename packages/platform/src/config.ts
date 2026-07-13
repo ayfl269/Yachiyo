@@ -42,11 +42,17 @@ export interface OneBot11AdapterConfig extends AdapterConfigBase {
 export interface QQOfficialAdapterConfig extends AdapterConfigBase {
   type: "qqofficial";
   /** QQ 机器人 AppID */
-  appId: string;
+  appId?: string;
   /** QQ 机器人 AppSecret */
-  appSecret: string;
+  appSecret?: string;
   /** 订阅事件意图位掩码 (可选, 不填则自动根据配置计算) */
   intents?: number;
+  /** 扫码登录配置：绑定域名/HOST (例如 q.qq.com) */
+  qqofficialBindHost?: string;
+  /** 二维码轮询间隔 (毫秒) */
+  qqofficialQrPollInterval?: number;
+  /** API 请求超时 (毫秒) */
+  qqofficialApiTimeoutMs?: number;
 }
 
 export interface WeixinOCAdapterConfig extends AdapterConfigBase {

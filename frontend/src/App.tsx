@@ -17,6 +17,7 @@ import MessagePlatformManager from './components/MessagePlatformManager'
 import ChatDataManager from './components/ChatDataManager'
 import PluginManager from './components/PluginManager'
 import MemoryManager from './components/MemoryManager'
+import ConversationIndexManager from './components/ConversationIndexManager'
 import SchedulerManager from './components/SchedulerManager'
 import ProxyManager from './components/ProxyManager'
 import AccountSettings from './components/AccountSettings'
@@ -27,7 +28,7 @@ import { authStore, apiFetch } from './lib/api'
 type TabType =
   | 'dashboard' | 'configs' | 'providers' | 'mcp' | 'subagents'
   | 'skills' | 'kbs' | 'personas' | 'platforms' | 'chatdata'
-  | 'plugins' | 'memory' | 'scheduler' | 'proxy'
+  | 'plugins' | 'memory' | 'scheduler' | 'conversation_indices'
 
 type AuthStatus = 'checking' | 'unauthenticated' | 'authenticated' | 'must_change_credentials'
 
@@ -43,7 +44,6 @@ const NAV_ITEMS: Array<{ key: TabType; label: string; icon: typeof LayoutDashboa
   { key: 'skills', label: 'Skills', icon: FileCode },
   { key: 'memory', label: '记忆', icon: Brain },
   { key: 'scheduler', label: '定时任务', icon: Clock },
-  { key: 'proxy', label: '代理', icon: Globe },
   { key: 'chatdata', label: '对话数据', icon: Database },
   { key: 'configs', label: '配置', icon: Settings },
 ]
@@ -53,7 +53,7 @@ function App() {
     const stored = localStorage.getItem('currentTab')
     // Validate against known tab keys — a stale/forged value must not be
     // trusted as a `TabType` (type lie). Fall back to 'dashboard'.
-    const validKeys = NAV_ITEMS.map((n) => n.key)
+    const validKeys = [...NAV_ITEMS.map((n) => n.key), 'conversation_indices']
     return (stored && validKeys.includes(stored as TabType)) ? (stored as TabType) : 'dashboard'
   })
   const [isLightMode, setIsLightMode] = useState(() => localStorage.getItem('theme') === 'light')
@@ -77,6 +77,7 @@ function App() {
   const [showConfirmPassword, setShowConfirmPassword] = useState(false)
   const [showUserMenu, setShowUserMenu] = useState(false)
   const [showAccountModal, setShowAccountModal] = useState(false)
+  const [showProxyModal, setShowProxyModal] = useState(false)
   const userMenuRef = useRef<HTMLDivElement>(null)
 
   const probeAuth = async () => {
@@ -393,8 +394,8 @@ function App() {
       case 'skills': return <SkillManager />
       case 'kbs': return <KnowledgeManager />
       case 'memory': return <MemoryManager />
+      case 'conversation_indices': return <ConversationIndexManager />
       case 'scheduler': return <SchedulerManager />
-      case 'proxy': return <ProxyManager />
       case 'personas': return <PersonaManager />
       case 'plugins': return <PluginManager />
       default: return <Dashboard isLightMode={isLightMode} />
@@ -414,6 +415,13 @@ function App() {
           </button>
         </div>
         <div className="topbar-right">
+          <button
+            className="topbar-theme-toggle"
+            onClick={() => setShowProxyModal(true)}
+            title="代理配置"
+          >
+            <Globe className="topbar-icon" />
+          </button>
           <button
             className="topbar-theme-toggle"
             onClick={toggleTheme}
@@ -480,17 +488,49 @@ function App() {
       <div className="layout-wrapper">
         <aside className={`sidebar ${isSidebarCollapsed ? 'collapsed' : ''}`}>
           <nav className="nav-links">
-            {NAV_ITEMS.map(({ key, label, icon: Icon }) => (
-              <button
-                key={key}
-                className={`nav-link ${currentTab === key ? 'active' : ''}`}
-                onClick={() => setCurrentTab(key)}
-                title={isSidebarCollapsed ? label : ''}
-              >
-                <Icon className="nav-icon" />
-                <span className="nav-text">{label}</span>
-              </button>
-            ))}
+            {NAV_ITEMS.map(({ key, label, icon: Icon }) => {
+              if (key === 'memory') {
+                const isMemoryActive = currentTab === 'memory' || currentTab === 'conversation_indices';
+                return (
+                  <div key={key} className={`nav-group ${isMemoryActive ? 'active' : ''}`}>
+                    <button
+                      className={`nav-link ${isMemoryActive ? 'active' : ''}`}
+                      onClick={() => setCurrentTab('memory')}
+                      title={isSidebarCollapsed ? label : ''}
+                    >
+                      <Icon className="nav-icon" />
+                      <span className="nav-text">{label}</span>
+                    </button>
+                    <div className="nav-submenu">
+                      <button
+                        className={`nav-link sub-link ${currentTab === 'memory' ? 'active' : ''}`}
+                        onClick={() => setCurrentTab('memory')}
+                      >
+                        <span className="nav-text">记忆管理</span>
+                      </button>
+                      <button
+                        className={`nav-link sub-link ${currentTab === 'conversation_indices' ? 'active' : ''}`}
+                        onClick={() => setCurrentTab('conversation_indices')}
+                      >
+                        <span className="nav-text">对话历史索引</span>
+                      </button>
+                    </div>
+                  </div>
+                )
+              }
+
+              return (
+                <button
+                  key={key}
+                  className={`nav-link ${currentTab === key ? 'active' : ''}`}
+                  onClick={() => setCurrentTab(key)}
+                  title={isSidebarCollapsed ? label : ''}
+                >
+                  <Icon className="nav-icon" />
+                  <span className="nav-text">{label}</span>
+                </button>
+              )
+            })}
           </nav>
         </aside>
 
@@ -514,6 +554,15 @@ function App() {
         size="sm"
       >
         <AccountSettings onSuccess={() => setShowAccountModal(false)} />
+      </Modal>
+
+      <Modal
+        open={showProxyModal}
+        onClose={() => setShowProxyModal(false)}
+        title="代理配置"
+        size="lg"
+      >
+        <ProxyManager isModal={true} />
       </Modal>
     </div>
   )

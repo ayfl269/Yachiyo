@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react'
-import { Globe, Save, Power, Zap, AlertCircle, CheckCircle } from 'lucide-react'
+import { Globe, Save, Power, Zap, AlertCircle, CheckCircle, Loader2 } from 'lucide-react'
 import { useToast, ToastPortal, useAsyncEffect } from './shared'
 import { apiFetch } from '../lib/api'
 
@@ -17,7 +17,11 @@ interface ProxyTestResult {
   error: string | null
 }
 
-export default function ProxyManager() {
+interface ProxyManagerProps {
+  isModal?: boolean
+}
+
+export default function ProxyManager({ isModal = false }: ProxyManagerProps = {}) {
   const [status, setStatus] = useState<ProxyStatus | null>(null)
   const [urlInput, setUrlInput] = useState('')
   const [loading, setLoading] = useState(true)
@@ -149,15 +153,17 @@ export default function ProxyManager() {
 
   if (loading) {
     return (
-      <div className="config-view animate-fade-in">
-        <div className="header">
-          <div className="header-main">
-            <div>
-              <h1>代理配置</h1>
-              <p>管理 Agent 系统的网络代理设置</p>
+      <div className="config-view animate-fade-in" style={isModal ? { padding: 0 } : undefined}>
+        {!isModal && (
+          <div className="header">
+            <div className="header-main">
+              <div>
+                <h1>代理配置</h1>
+                <p>管理 Agent 系统的网络代理设置</p>
+              </div>
             </div>
           </div>
-        </div>
+        )}
         <div className="loading-state">
           <div className="spinner"></div>
           <p>加载中...</p>
@@ -167,179 +173,375 @@ export default function ProxyManager() {
   }
 
   return (
-    <div className="config-view animate-fade-in">
-      <div className="header">
-        <div className="header-main">
-          <div>
-            <h1>代理配置</h1>
-            <p>管理 Agent 系统的网络代理设置，影响所有 fetch 请求和浏览器工具</p>
+    <div className="config-view animate-fade-in" style={isModal ? { padding: 0 } : undefined}>
+      {!isModal && (
+        <div className="header">
+          <div className="header-main">
+            <div>
+              <h1>代理配置</h1>
+              <p>管理 Agent 系统的网络代理设置，影响所有 fetch 请求和浏览器工具</p>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
-      <div className="config-form">
-        {/* Status Card */}
-        <div className="section-content" style={{ marginBottom: '1.5rem' }}>
-          <div className="form-grid">
-            <div className="form-group span-2">
-              <label>当前状态</label>
-              <div style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.75rem',
-                padding: '1rem 1.25rem',
-                borderRadius: '8px',
-                background: status?.enabled
-                  ? 'rgba(34, 197, 94, 0.1)'
-                  : 'var(--bg-secondary)',
-                border: `1px solid ${status?.enabled ? 'rgba(34, 197, 94, 0.3)' : 'var(--border-color)'}`,
-              }}>
-                {status?.enabled ? (
-                  <CheckCircle size={24} style={{ color: '#22c55e' }} />
-                ) : (
-                  <Power size={24} style={{ color: 'var(--text-secondary)' }} />
-                )}
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: '1rem', fontWeight: 600 }}>
-                    {status?.enabled ? '代理已启用' : '代理未启用（直连模式）'}
-                  </div>
-                  {status?.url && (
-                    <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
-                      URL: <span className="font-mono">{status.url}</span>
+      {isModal ? (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.2rem', alignItems: 'start' }}>
+          {/* Left Column: Status & URL configuration */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1.2rem' }}>
+            {/* Status Card */}
+            <div className="section-content" style={{ margin: 0 }}>
+              <div className="form-grid">
+                <div className="form-group span-2">
+                  <label>当前状态</label>
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.75rem',
+                    padding: '0.85rem 1rem',
+                    borderRadius: '8px',
+                    background: status?.enabled
+                      ? 'rgba(34, 197, 94, 0.1)'
+                      : 'var(--bg-secondary)',
+                    border: `1px solid ${status?.enabled ? 'rgba(34, 197, 94, 0.3)' : 'var(--border-color)'}`,
+                  }}>
+                    {status?.enabled ? (
+                      <CheckCircle size={22} style={{ color: '#22c55e', flexShrink: 0 }} />
+                    ) : (
+                      <Power size={22} style={{ color: 'var(--text-secondary)', flexShrink: 0 }} />
+                    )}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: '0.95rem', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {status?.enabled ? '代理已启用' : '代理未启用（直连模式）'}
+                      </div>
+                      {status?.url && (
+                        <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.2rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={status.url}>
+                          URL: <span className="font-mono">{status.url}</span>
+                        </div>
+                      )}
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.15rem' }}>
+                        来源: {sourceLabel(status?.source ?? 'default')}
+                      </div>
                     </div>
-                  )}
-                  <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
-                    来源: {sourceLabel(status?.source ?? 'default')}
+                    <button className="btn" onClick={fetchStatus} disabled={saving} style={{ whiteSpace: 'nowrap', padding: '0.4rem 0.75rem', fontSize: '0.85rem' }}>
+                      刷新
+                    </button>
                   </div>
                 </div>
-                <button className="btn" onClick={fetchStatus} disabled={saving} style={{ whiteSpace: 'nowrap' }}>
-                  刷新
-                </button>
+              </div>
+            </div>
+
+            {/* Configuration Card */}
+            <div className="section-content" style={{ margin: 0 }}>
+              <div className="form-grid">
+                <div className="form-group span-2">
+                  <label>代理 URL</label>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <input
+                      type="text"
+                      value={urlInput}
+                      onChange={(e) => setUrlInput(e.target.value)}
+                      placeholder="http://127.0.0.1:7890"
+                      className="form-control font-mono"
+                      style={{ fontSize: '0.85rem', padding: '0.5rem 0.75rem' }}
+                      onKeyDown={(e) => { if (e.key === 'Enter' && !saving) handleEnable() }}
+                    />
+                    <button
+                      className="btn primary"
+                      onClick={handleEnable}
+                      disabled={saving || !urlInput.trim()}
+                      style={{ whiteSpace: 'nowrap', padding: '0.5rem 1rem', fontSize: '0.85rem' }}
+                    >
+                      {saving ? (
+                        <Loader2 className="icon-inline spinning" size={14} />
+                      ) : (
+                        <Save className="icon-inline" size={14} />
+                      )}
+                      {saving ? '处理中...' : '启用'}
+                    </button>
+                    {status?.enabled && (
+                      <button
+                        className="btn"
+                        onClick={handleDisable}
+                        disabled={saving}
+                        style={{ whiteSpace: 'nowrap', color: 'var(--text-danger, #ef4444)', padding: '0.5rem 1rem', fontSize: '0.85rem' }}
+                      >
+                        <Power size={12} />
+                        禁用
+                      </button>
+                    )}
+                  </div>
+                  <span className="help-text" style={{ fontSize: '0.75rem', lineHeight: '1.4' }}>
+                    支持的协议: http://, https://, socks5://, socks4://。无协议前缀时默认使用 http://。<br />
+                    SOCKS 代理仅对 Playwright 浏览器工具生效，fetch 请求需使用 http/https 代理。
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Right Column: Impact Scope & Test */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1.2rem' }}>
+            {/* Impact Scope Card */}
+            <div className="section-content" style={{ margin: 0 }}>
+              <div className="form-grid">
+                <div className="form-group span-2">
+                  <label>影响范围</label>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', padding: '0.6rem 0.75rem', background: 'var(--bg-secondary)', borderRadius: '6px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem', lineHeight: '1.3' }}>
+                      <Globe size={13} style={{ color: 'var(--text-secondary)', flexShrink: 0 }} />
+                      <span>web_fetch / http_request / web_search (undici)</span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem', lineHeight: '1.3' }}>
+                      <Globe size={13} style={{ color: 'var(--text-secondary)', flexShrink: 0 }} />
+                      <span>browser_navigate 等浏览器工具 (Playwright)</span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem', lineHeight: '1.3' }}>
+                      <Globe size={13} style={{ color: 'var(--text-secondary)', flexShrink: 0 }} />
+                      <span>Agent 运行中可通过 proxy_manage 工具修改</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Test Card */}
+            <div className="section-content" style={{ margin: 0 }}>
+              <div className="form-grid">
+                <div className="form-group span-2">
+                  <label>连通性测试</label>
+                  <span className="help-text" style={{ marginBottom: '0.5rem', fontSize: '0.75rem' }}>
+                    通过当前代理（或直连）访问指定 URL 验证连通性
+                  </span>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <input
+                      type="text"
+                      value={testUrl}
+                      onChange={(e) => setTestUrl(e.target.value)}
+                      placeholder="https://httpbin.org/get"
+                      className="form-control font-mono"
+                      style={{ fontSize: '0.85rem', padding: '0.5rem 0.75rem' }}
+                      onKeyDown={(e) => { if (e.key === 'Enter' && !testing) handleTest() }}
+                    />
+                    <button
+                      className="btn"
+                      onClick={handleTest}
+                      disabled={testing}
+                      style={{ whiteSpace: 'nowrap', padding: '0.5rem 1rem', fontSize: '0.85rem' }}
+                    >
+                      {testing ? (
+                        <Loader2 className="icon-inline spinning" size={14} />
+                      ) : (
+                        <Zap className="icon-inline" size={14} />
+                      )}
+                      {testing ? '测试中...' : '测试'}
+                    </button>
+                  </div>
+                </div>
+
+                {testResult && (
+                  <div className="form-group span-2" style={{ marginTop: '-0.5rem' }}>
+                    <div style={{
+                      padding: '0.6rem 0.85rem',
+                      borderRadius: '6px',
+                      background: testResult.ok
+                        ? 'rgba(34, 197, 94, 0.1)'
+                        : 'rgba(239, 68, 68, 0.1)',
+                      border: `1px solid ${testResult.ok ? 'rgba(34, 197, 94, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.3rem', fontSize: '0.85rem' }}>
+                        {testResult.ok ? (
+                          <CheckCircle size={14} style={{ color: '#22c55e' }} />
+                        ) : (
+                          <AlertCircle size={14} style={{ color: '#ef4444' }} />
+                        )}
+                        <strong>{testResult.ok ? '测试成功' : '测试失败'}</strong>
+                      </div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
+                        <span>测试 URL: <span className="font-mono">{testResult.testUrl}</span></span>
+                        <span>状态码: {testResult.statusCode || '-'} | 耗时: {testResult.elapsedMs !== null ? `${testResult.elapsedMs}ms` : '-'}</span>
+                        {testResult.error && <span style={{ color: 'var(--text-danger, #ef4444)', wordBreak: 'break-all' }}>错误: {testResult.error}</span>}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </div>
         </div>
+      ) : (
+        <div className="config-form">
+          {/* Status Card */}
+          <div className="section-content" style={{ marginBottom: '1.5rem' }}>
+            <div className="form-grid">
+              <div className="form-group span-2">
+                <label>当前状态</label>
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.75rem',
+                  padding: '1rem 1.25rem',
+                  borderRadius: '8px',
+                  background: status?.enabled
+                    ? 'rgba(34, 197, 94, 0.1)'
+                    : 'var(--bg-secondary)',
+                  border: `1px solid ${status?.enabled ? 'rgba(34, 197, 94, 0.3)' : 'var(--border-color)'}`,
+                }}>
+                  {status?.enabled ? (
+                    <CheckCircle size={24} style={{ color: '#22c55e' }} />
+                  ) : (
+                    <Power size={24} style={{ color: 'var(--text-secondary)' }} />
+                  )}
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: '1rem', fontWeight: 600 }}>
+                      {status?.enabled ? '代理已启用' : '代理未启用（直连模式）'}
+                    </div>
+                    {status?.url && (
+                      <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
+                        URL: <span className="font-mono">{status.url}</span>
+                      </div>
+                    )}
+                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
+                      来源: {sourceLabel(status?.source ?? 'default')}
+                    </div>
+                  </div>
+                  <button className="btn" onClick={fetchStatus} disabled={saving} style={{ whiteSpace: 'nowrap' }}>
+                    刷新
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
 
-        {/* Configuration Card */}
-        <div className="section-content" style={{ marginBottom: '1.5rem' }}>
-          <div className="form-grid">
-            <div className="form-group span-2">
-              <label>代理 URL</label>
-              <div style={{ display: 'flex', gap: '0.5rem' }}>
-                <input
-                  type="text"
-                  value={urlInput}
-                  onChange={(e) => setUrlInput(e.target.value)}
-                  placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:1080"
-                  className="form-control font-mono"
-                  onKeyDown={(e) => { if (e.key === 'Enter' && !saving) handleEnable() }}
-                />
-                <button
-                  className="btn primary"
-                  onClick={handleEnable}
-                  disabled={saving || !urlInput.trim()}
-                  style={{ whiteSpace: 'nowrap' }}
-                >
-                  <Save className={`icon-inline${saving ? ' spinning' : ''}`} />
-                  {saving ? '处理中...' : '启用'}
-                </button>
-                {status?.enabled && (
+          {/* Configuration Card */}
+          <div className="section-content" style={{ marginBottom: '1.5rem' }}>
+            <div className="form-grid">
+              <div className="form-group span-2">
+                <label>代理 URL</label>
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <input
+                    type="text"
+                    value={urlInput}
+                    onChange={(e) => setUrlInput(e.target.value)}
+                    placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:1080"
+                    className="form-control font-mono"
+                    onKeyDown={(e) => { if (e.key === 'Enter' && !saving) handleEnable() }}
+                  />
+                  <button
+                    className="btn primary"
+                    onClick={handleEnable}
+                    disabled={saving || !urlInput.trim()}
+                    style={{ whiteSpace: 'nowrap' }}
+                  >
+                    {saving ? (
+                      <Loader2 className="icon-inline spinning" size={14} />
+                    ) : (
+                      <Save className="icon-inline" size={14} />
+                    )}
+                    {saving ? '处理中...' : '启用'}
+                  </button>
+                  {status?.enabled && (
+                    <button
+                      className="btn"
+                      onClick={handleDisable}
+                      disabled={saving}
+                      style={{ whiteSpace: 'nowrap', color: 'var(--text-danger, #ef4444)' }}
+                    >
+                      <Power size={14} />
+                      禁用
+                    </button>
+                  )}
+                </div>
+                <span className="help-text">
+                  支持的协议: http://, https://, socks5://, socks4://。无协议前缀时默认使用 http://。
+                  SOCKS 代理仅对 Playwright 浏览器工具生效，fetch 请求需使用 http/https 代理。
+                </span>
+              </div>
+
+              <div className="form-group span-2">
+                <label>影响范围</label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', padding: '0.75rem 1rem', background: 'var(--bg-secondary)', borderRadius: '6px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem' }}>
+                    <Globe size={14} style={{ color: 'var(--text-secondary)' }} />
+                    <span>web_fetch / http_request / web_search（通过 undici 全局 dispatcher）</span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem' }}>
+                    <Globe size={14} style={{ color: 'var(--text-secondary)' }} />
+                    <span>browser_navigate 等浏览器工具（通过 Playwright proxy 选项）</span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem' }}>
+                    <Globe size={14} style={{ color: 'var(--text-secondary)' }} />
+                    <span>Agent 调用 proxy_manage 工具也可在运行时修改代理</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Connectivity Test Card */}
+          <div className="section-content">
+            <div className="form-grid">
+              <div className="form-group span-2">
+                <label>连通性测试</label>
+                <span className="help-text" style={{ marginBottom: '0.5rem' }}>
+                  通过当前代理（或直连）访问指定 URL 验证连通性
+                </span>
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <input
+                    type="text"
+                    value={testUrl}
+                    onChange={(e) => setTestUrl(e.target.value)}
+                    placeholder="https://httpbin.org/get（留空使用默认）"
+                    className="form-control font-mono"
+                    onKeyDown={(e) => { if (e.key === 'Enter' && !testing) handleTest() }}
+                  />
                   <button
                     className="btn"
-                    onClick={handleDisable}
-                    disabled={saving}
-                    style={{ whiteSpace: 'nowrap', color: 'var(--text-danger, #ef4444)' }}
+                    onClick={handleTest}
+                    disabled={testing}
+                    style={{ whiteSpace: 'nowrap' }}
                   >
-                    <Power size={14} />
-                    禁用
-                  </button>
-                )}
-              </div>
-              <span className="help-text">
-                支持的协议: http://, https://, socks5://, socks4://。无协议前缀时默认使用 http://。
-                SOCKS 代理仅对 Playwright 浏览器工具生效，fetch 请求需使用 http/https 代理。
-              </span>
-            </div>
-
-            <div className="form-group span-2">
-              <label>影响范围</label>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', padding: '0.75rem 1rem', background: 'var(--bg-secondary)', borderRadius: '6px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem' }}>
-                  <Globe size={14} style={{ color: 'var(--text-secondary)' }} />
-                  <span>web_fetch / http_request / web_search（通过 undici 全局 dispatcher）</span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem' }}>
-                  <Globe size={14} style={{ color: 'var(--text-secondary)' }} />
-                  <span>browser_navigate 等浏览器工具（通过 Playwright proxy 选项）</span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem' }}>
-                  <Globe size={14} style={{ color: 'var(--text-secondary)' }} />
-                  <span>Agent 调用 proxy_manage 工具也可在运行时修改代理</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Connectivity Test Card */}
-        <div className="section-content">
-          <div className="form-grid">
-            <div className="form-group span-2">
-              <label>连通性测试</label>
-              <span className="help-text" style={{ marginBottom: '0.5rem' }}>
-                通过当前代理（或直连）访问指定 URL 验证连通性
-              </span>
-              <div style={{ display: 'flex', gap: '0.5rem' }}>
-                <input
-                  type="text"
-                  value={testUrl}
-                  onChange={(e) => setTestUrl(e.target.value)}
-                  placeholder="https://httpbin.org/get（留空使用默认）"
-                  className="form-control font-mono"
-                  onKeyDown={(e) => { if (e.key === 'Enter' && !testing) handleTest() }}
-                />
-                <button
-                  className="btn"
-                  onClick={handleTest}
-                  disabled={testing}
-                  style={{ whiteSpace: 'nowrap' }}
-                >
-                  <Zap className={`icon-inline${testing ? ' spinning' : ''}`} />
-                  {testing ? '测试中...' : '测试'}
-                </button>
-              </div>
-            </div>
-
-            {testResult && (
-              <div className="form-group span-2">
-                <div style={{
-                  padding: '0.75rem 1rem',
-                  borderRadius: '6px',
-                  background: testResult.ok
-                    ? 'rgba(34, 197, 94, 0.1)'
-                    : 'rgba(239, 68, 68, 0.1)',
-                  border: `1px solid ${testResult.ok ? 'rgba(34, 197, 94, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
-                }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.4rem' }}>
-                    {testResult.ok ? (
-                      <CheckCircle size={16} style={{ color: '#22c55e' }} />
+                    {testing ? (
+                      <Loader2 className="icon-inline spinning" size={14} />
                     ) : (
-                      <AlertCircle size={16} style={{ color: '#ef4444' }} />
+                      <Zap className="icon-inline" size={14} />
                     )}
-                    <strong>{testResult.ok ? '测试成功' : '测试失败'}</strong>
-                  </div>
-                  <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
-                    <span>测试 URL: <span className="font-mono">{testResult.testUrl}</span></span>
-                    {testResult.statusCode && <span>状态码: {testResult.statusCode}</span>}
-                    {testResult.elapsedMs !== null && <span>耗时: {testResult.elapsedMs}ms</span>}
-                    {testResult.error && <span style={{ color: 'var(--text-danger, #ef4444)' }}>错误: {testResult.error}</span>}
-                  </div>
+                    {testing ? '测试中...' : '测试'}
+                  </button>
                 </div>
               </div>
-            )}
+
+              {testResult && (
+                <div className="form-group span-2">
+                  <div style={{
+                    padding: '0.75rem 1rem',
+                    borderRadius: '6px',
+                    background: testResult.ok
+                      ? 'rgba(34, 197, 94, 0.1)'
+                      : 'rgba(239, 68, 68, 0.1)',
+                    border: `1px solid ${testResult.ok ? 'rgba(34, 197, 94, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.4rem' }}>
+                      {testResult.ok ? (
+                        <CheckCircle size={16} style={{ color: '#22c55e' }} />
+                      ) : (
+                        <AlertCircle size={16} style={{ color: '#ef4444' }} />
+                      )}
+                      <strong>{testResult.ok ? '测试成功' : '测试失败'}</strong>
+                    </div>
+                    <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', gap: '0.2rem' }}>
+                      <span>测试 URL: <span className="font-mono">{testResult.testUrl}</span></span>
+                      {testResult.statusCode && <span>状态码: {testResult.statusCode}</span>}
+                      {testResult.elapsedMs !== null && <span>耗时: {testResult.elapsedMs}ms</span>}
+                      {testResult.error && <span style={{ color: 'var(--text-danger, #ef4444)' }}>错误: {testResult.error}</span>}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
-      </div>
+      )}
       <ToastPortal toast={toast} />
     </div>
   )

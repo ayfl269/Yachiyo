@@ -19,6 +19,7 @@ import type { MessageChain } from "@yachiyo/agent/types.js";
 
 import { WebSocket } from "ws";
 import { EventEmitter } from "events";
+import { randomBytes, createDecipheriv } from "crypto";
 
 // ── Config ──
 
@@ -31,8 +32,8 @@ interface AdapterConfigBase {
 
 export interface QQOfficialAdapterConfig extends AdapterConfigBase {
   type: "qqofficial";
-  appId: string;
-  appSecret: string;
+  appId?: string;
+  appSecret?: string;
   /** 事件订阅 intents 位掩码; 不填使用默认值 */
   intents?: number;
   /** 事件订阅名称列表 (与 intents 二选一, 名称会被转换为位掩码) */
@@ -43,6 +44,12 @@ export interface QQOfficialAdapterConfig extends AdapterConfigBase {
   shard?: [number, number];
   /** 私信回调专用 token (可选, 用于回调模式下的私信场景) */
   privateToken?: string;
+  /** 扫码登录配置：绑定域名/HOST (例如 q.qq.com) */
+  qqofficialBindHost?: string;
+  /** 二维码轮询间隔 (毫秒) */
+  qqofficialQrPollInterval?: number;
+  /** API 请求超时 (毫秒) */
+  qqofficialApiTimeoutMs?: number;
 }
 
 // ── QQ Official API Types ──
@@ -968,10 +975,51 @@ class QQOfficialEvent extends MessageEvent {
   }
 }
 
+// ── QQ Official Login Session ──
+
+interface QQOfficialLoginSession {
+  bindKey: string;
+  taskId: string;
+  qrcode: string;
+  status: string; // "wait" | "confirmed" | "expired" | "error"
+  error?: string;
+  startedAt: number;
+}
+
+function decryptQQOfficialSecret(encryptedSecret: string, bindKey: string): string {
+  try {
+    const key = Buffer.from(bindKey, "base64");
+    const raw = Buffer.from(encryptedSecret, "base64");
+
+    if (key.length !== 32 || raw.length <= 28) {
+      throw new Error("QQ 机器人凭证密文格式异常");
+    }
+
+    const nonce = raw.subarray(0, 12);
+    const tag = raw.subarray(raw.length - 16);
+    const ciphertext = raw.subarray(12, raw.length - 16);
+
+    const decipher = createDecipheriv("aes-256-gcm", key, nonce);
+    decipher.setAuthTag(tag);
+
+    const decrypted = Buffer.concat([
+      decipher.update(ciphertext),
+      decipher.final()
+    ]);
+    return decrypted.toString("utf8");
+  } catch (exc: any) {
+    throw new Error(`QQ 机器人凭证解密失败: ${exc.message}`);
+  }
+}
+
 // ── QQOfficialAdapter ──
 
 export class QQOfficialAdapter extends PlatformAdapter {
   private config: QQOfficialAdapterConfig;
+
+  // QR Login State
+  private loginSession: QQOfficialLoginSession | null = null;
+  private qrExpiredCount: number = 0;
 
   // Authentication
   private accessToken: string = "";
@@ -1022,21 +1070,75 @@ export class QQOfficialAdapter extends PlatformAdapter {
   }
 
   async initialize(): Promise<void> {
-    if (!this.config.appId || !this.config.appSecret) {
-      throw new Error("[QQOfficial] appId and appSecret are required");
-    }
     await super.initialize();
   }
 
   async run(): Promise<void> {
     this._status = "running";
     this.reconnectAttempts = 0;
-    await this.authenticate();
-    this.connectWebSocket();
+
+    if (this.config.appId && this.config.appSecret) {
+      await this.authenticate();
+      this.connectWebSocket();
+      return;
+    }
+
+    // QR Login loop
+    (async () => {
+      while (this._status === "running") {
+        try {
+          if (!this.config.appId || !this.config.appSecret) {
+            if (!this.isLoginSessionValid(this.loginSession)) {
+              try {
+                this.loginSession = await this.startLoginSession();
+                this.qrExpiredCount = 0;
+              } catch (e: unknown) {
+                console.error(`[QQOfficial] Start QR login failed:`, e);
+                await this.sleep(5000);
+                continue;
+              }
+            }
+
+            const currentLogin = this.loginSession;
+            if (!currentLogin) continue;
+
+            try {
+              await this.pollQrStatus(currentLogin);
+            } catch (e: unknown) {
+              console.error(`[QQOfficial] Poll QR status failed:`, e);
+              currentLogin.error = String(e);
+              await this.sleep(2000);
+            }
+
+            if (this.config.appId && this.config.appSecret) {
+              console.info(`[QQOfficial] QR binding completed. AppId: ${this.config.appId}`);
+              continue;
+            }
+
+            if (currentLogin.error) {
+              await this.sleep(2000);
+            } else {
+              const interval = this.config.qqofficialQrPollInterval ?? 2000;
+              await this.sleep(interval);
+            }
+            continue;
+          }
+
+          // We have credentials, proceed to authenticate and connect WebSocket
+          await this.authenticate();
+          this.connectWebSocket();
+          break;
+        } catch (e: unknown) {
+          console.error(`[QQOfficial] QR Login loop error:`, e);
+          await this.sleep(5000);
+        }
+      }
+    })();
   }
 
   async stop(): Promise<void> {
     this._status = "stopping";
+    this.loginSession = null;
 
     if (this.tokenRefreshTimer) {
       clearTimeout(this.tokenRefreshTimer);
@@ -1084,6 +1186,9 @@ export class QQOfficialAdapter extends PlatformAdapter {
   // ── Authentication ──
 
   private async authenticate(): Promise<void> {
+    if (!this.config.appId || !this.config.appSecret) {
+      throw new Error("[QQOfficial] appId and appSecret are required for authentication");
+    }
     const body = JSON.stringify({
       appId: this.config.appId,
       clientSecret: this.config.appSecret,
@@ -1407,7 +1512,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
 
     const platformMsg = new PlatformMessage();
     platformMsg.type = MessageType.GROUP_MESSAGE;
-    platformMsg.selfId = this.config.appId;
+    platformMsg.selfId = this.config.appId!;
     platformMsg.sessionId = groupOpenId;
     platformMsg.messageId = data.id;
     platformMsg.sender = { userId: senderId, nickname: null };
@@ -1442,7 +1547,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
 
     const platformMsg = new PlatformMessage();
     platformMsg.type = MessageType.FRIEND_MESSAGE;
-    platformMsg.selfId = this.config.appId;
+    platformMsg.selfId = this.config.appId!;
     platformMsg.sessionId = senderId;
     platformMsg.messageId = data.id;
     platformMsg.sender = { userId: senderId, nickname: null };
@@ -1479,7 +1584,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
 
     const platformMsg = new PlatformMessage();
     platformMsg.type = MessageType.GROUP_MESSAGE;
-    platformMsg.selfId = this.config.appId;
+    platformMsg.selfId = this.config.appId!;
     platformMsg.sessionId = channelId;
     platformMsg.messageId = data.id;
     platformMsg.sender = { userId: senderId, nickname: data.author.username ?? null };
@@ -1515,7 +1620,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
 
     const platformMsg = new PlatformMessage();
     platformMsg.type = MessageType.FRIEND_MESSAGE;
-    platformMsg.selfId = this.config.appId;
+    platformMsg.selfId = this.config.appId!;
     platformMsg.sessionId = channelId;
     platformMsg.messageId = data.id;
     platformMsg.sender = { userId: senderId, nickname: null };
@@ -1671,7 +1776,18 @@ export class QQOfficialAdapter extends PlatformAdapter {
       if (this._status !== "running") return;
 
       try {
-        await this.authenticate();
+        // Only re-authenticate when the access token is missing or about to
+        // expire. The QQ server sends OP.RECONNECT (~every 30 min) for load
+        // balancing; this does NOT require a fresh token. Re-authenticating on
+        // every reconnect wastes an API call, needlessly resets the refresh
+        // timer, and — if the API ever returns a different access token — risks
+        // invalidating the old token mid-session and triggering an extra
+        // server-side reconnect. Reuse the current token while it is still
+        // valid; the refresh timer will renew it before expiry.
+        const tokenRemainingMs = this.tokenExpiresAt - Date.now();
+        if (!this.accessToken || tokenRemainingMs < 300000) {
+          await this.authenticate();
+        }
         this.connectWebSocket();
         // Try resume first, identify will be sent after HELLO
       } catch (e: unknown) {
@@ -3203,6 +3319,148 @@ export class QQOfficialAdapter extends PlatformAdapter {
       const text = await response.text();
       throw new Error(`[QQOfficial] offMic failed: ${response.status} ${text}`);
     }
+  }
+
+  // ── QR Login Helpers ──
+
+  private isLoginSessionValid(session: QQOfficialLoginSession | null): boolean {
+    if (!session) return false;
+    return (Date.now() - session.startedAt) < 5 * 60 * 1000; // 5 minutes
+  }
+
+  private async startLoginSession(): Promise<QQOfficialLoginSession> {
+    const host = (this.config.qqofficialBindHost || "q.qq.com")
+      .replace(/^https?:\/\//, "")
+      .replace(/\/+$/, "");
+
+    const bindKey = randomBytes(32).toString("base64");
+    const timeoutMs = this.config.qqofficialApiTimeoutMs ?? 10000;
+
+    const response = await fetch(`https://${host}/lite/create_bind_task`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+      },
+      body: JSON.stringify({ key: bindKey }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    if (!response.ok) {
+      throw new Error(`[QQOfficial] create_bind_task failed: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json() as any;
+    if (data.retcode !== undefined && Number(data.retcode) !== 0) {
+      throw new Error(data.msg || data.message || "QQ 机器人绑定接口返回失败");
+    }
+
+    const taskId = data.data?.task_id;
+    if (!taskId) {
+      throw new Error("QQ 机器人绑定任务响应缺少 task_id");
+    }
+
+    const connectUrl = `https://${host}/qqbot/openclaw/connect.html?task_id=${encodeURIComponent(taskId)}&_wv=2`;
+
+    return {
+      bindKey,
+      taskId,
+      qrcode: connectUrl,
+      status: "wait",
+      startedAt: Date.now(),
+    };
+  }
+
+  private async pollQrStatus(session: QQOfficialLoginSession): Promise<void> {
+    const host = (this.config.qqofficialBindHost || "q.qq.com")
+      .replace(/^https?:\/\//, "")
+      .replace(/\/+$/, "");
+
+    const timeoutMs = this.config.qqofficialApiTimeoutMs ?? 10000;
+
+    const response = await fetch(`https://${host}/lite/poll_bind_result`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+      },
+      body: JSON.stringify({ task_id: session.taskId }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    if (!response.ok) {
+      throw new Error(`[QQOfficial] poll_bind_result failed: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json() as any;
+    if (data.retcode !== undefined && Number(data.retcode) !== 0) {
+      throw new Error(data.msg || data.message || "QQ 机器人绑定结果查询失败");
+    }
+
+    const payload = data.data || {};
+    const rawStatus = payload.status !== undefined ? Number(payload.status) : 0;
+
+    if (rawStatus === 2) { // QQOFFICIAL_BIND_STATUS_COMPLETED
+      const appid = String(payload.bot_appid || "").trim();
+      const encryptedSecret = String(payload.bot_encrypt_secret || "").trim();
+
+      if (!appid || !encryptedSecret) {
+        throw new Error("扫码成功但未返回完整 QQ 机器人凭证");
+      }
+
+      const secret = decryptQQOfficialSecret(encryptedSecret, session.bindKey);
+
+      this.config.appId = appid;
+      this.config.appSecret = secret;
+
+      session.status = "confirmed";
+      this.loginSession = null;
+
+      // Persist configuration update
+      if (this.onConfigUpdate) {
+        this.onConfigUpdate({
+          ...this.config,
+          appId: this.config.appId,
+          appSecret: this.config.appSecret,
+        });
+      }
+      return;
+    }
+
+    if (rawStatus === 3) { // QQOFFICIAL_BIND_STATUS_EXPIRED
+      this.qrExpiredCount++;
+      if (this.qrExpiredCount > 3) {
+        session.status = "expired";
+        session.error = "QR code expired, max retries exceeded";
+        this.loginSession = null;
+        return;
+      }
+      console.warn(`[QQOfficial] QR expired, refreshing (${this.qrExpiredCount}/3)`);
+      this.loginSession = await this.startLoginSession();
+      return;
+    }
+
+    session.status = "wait";
+  }
+
+  getLoginStatus(): {
+    loggedIn: boolean;
+    accountId: string | null;
+    qrStatus: string | null;
+    qrImgContent: string | null;
+    qrError: string | null;
+  } {
+    return {
+      loggedIn: !!(this.config.appId && this.config.appSecret),
+      accountId: this.config.appId || null,
+      qrStatus: this.loginSession?.status ?? null,
+      qrImgContent: this.loginSession?.qrcode ?? null,
+      qrError: this.loginSession?.error ?? null,
+    };
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }
 

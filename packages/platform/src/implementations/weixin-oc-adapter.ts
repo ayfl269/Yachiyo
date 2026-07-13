@@ -1159,16 +1159,16 @@ export class WeixinOCAdapter extends PlatformAdapter {
 
   // ── Utility ──
 
-  /** Persist current auth state (token, accountId, syncBuf, baseUrl) back to the adapter store */
   private persistConfig(): void {
+    this.config.token = this.token ?? undefined;
+    this.config.accountId = this.accountId ?? undefined;
+    this.config.syncBuf = this.syncBuf || undefined;
+    this.config.baseUrl = this.baseUrl;
+
     if (!this.onConfigUpdate) return;
     try {
       this.onConfigUpdate({
         ...this.config,
-        token: this.token ?? undefined,
-        accountId: this.accountId ?? undefined,
-        syncBuf: this.syncBuf || undefined,
-        baseUrl: this.baseUrl,
       });
     } catch (e: unknown) {
       console.warn("[WeixinOC] Failed to persist config:", e);

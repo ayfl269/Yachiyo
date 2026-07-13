@@ -5,6 +5,8 @@ import {
   AlertCircle,
   RefreshCw,
   QrCode,
+  Eye,
+  EyeOff,
 } from 'lucide-react'
 import QRCode from 'qrcode'
 import { useToast, ToastPortal, Modal } from './shared'
@@ -93,11 +95,13 @@ export default function MessagePlatformManager() {
   const [ob11ReverseUrl, setOb11ReverseUrl] = useState('ws://127.0.0.1:6700')
   const [ob11ReconnectInterval, setOb11ReconnectInterval] = useState(5000)
   const [ob11AccessToken, setOb11AccessToken] = useState('')
+  const [showOb11Token, setShowOb11Token] = useState(false)
 
   // QQ Official form fields
   const [qqAppId, setQqAppId] = useState('')
   const [qqAppSecret, setQqAppSecret] = useState('')
-  const [qqIntents, setQqIntents] = useState<number | null>(null)
+  const [qqLoginMethod, setQqLoginMethod] = useState<'qr' | 'manual'>('qr')
+  const [showQqAppSecret, setShowQqAppSecret] = useState(false)
 
   // Weixin OC — post-create QR scan flow
   const [wxMode, setWxMode] = useState<WxMode>('create')
@@ -114,6 +118,7 @@ export default function MessagePlatformManager() {
   const [editingWxAccountId, setEditingWxAccountId] = useState('')
   const [editingWxToken, setEditingWxToken] = useState('')
   const [editingWxLoggedIn, setEditingWxLoggedIn] = useState(false)
+  const [showWxToken, setShowWxToken] = useState(false)
 
   // QR code login state for weixin_oc (for edit mode)
   const qrPollTimer = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -233,48 +238,48 @@ export default function MessagePlatformManager() {
       clearInterval(wxPostCreatePollTimer.current)
       wxPostCreatePollTimer.current = null
       const scanningId = wxScanningAdapterId
-      ;(async () => {
-        try {
-          const res = await apiFetch(`/api/adapters/${encodeURIComponent(scanningId)}/qrcode`)
-          if (res.ok) {
-            const data = await res.json()
-            const url = data.qrImgContent || ''
-            if (url) {
-              const img = await QRCode.toDataURL(url, {
-                margin: 2, width: 200, errorCorrectionLevel: 'M',
-              })
-              setWxPostCreateQrImage(img)
-            }
-            setWxPostCreateStatus(data.qrStatus ?? '')
-          }
-        } catch { /* ignore */ }
-        wxPostCreatePollTimer.current = setInterval(async () => {
+        ; (async () => {
           try {
             const res = await apiFetch(`/api/adapters/${encodeURIComponent(scanningId)}/qrcode`)
             if (res.ok) {
               const data = await res.json()
-              if (data.loggedIn) {
-                setWxMode('success')
-                stopWxPostCreatePolling()
-                fetchAdapters()
-                return
-              }
               const url = data.qrImgContent || ''
               if (url) {
-                const img = await QRCode.toDataURL(url, { margin: 2, width: 200, errorCorrectionLevel: 'M' })
+                const img = await QRCode.toDataURL(url, {
+                  margin: 2, width: 200, errorCorrectionLevel: 'M',
+                })
                 setWxPostCreateQrImage(img)
               }
               setWxPostCreateStatus(data.qrStatus ?? '')
             }
           } catch { /* ignore */ }
-        }, 3000)
-      })()
+          wxPostCreatePollTimer.current = setInterval(async () => {
+            try {
+              const res = await apiFetch(`/api/adapters/${encodeURIComponent(scanningId)}/qrcode`)
+              if (res.ok) {
+                const data = await res.json()
+                if (data.loggedIn) {
+                  setWxMode('success')
+                  stopWxPostCreatePolling()
+                  fetchAdapters()
+                  return
+                }
+                const url = data.qrImgContent || ''
+                if (url) {
+                  const img = await QRCode.toDataURL(url, { margin: 2, width: 200, errorCorrectionLevel: 'M' })
+                  setWxPostCreateQrImage(img)
+                }
+                setWxPostCreateStatus(data.qrStatus ?? '')
+              }
+            } catch { /* ignore */ }
+          }, 3000)
+        })()
     }
   }, [wxMode, wxScanningAdapterId, stopWxPostCreatePolling, fetchAdapters])
 
   const resetForm = useCallback(() => {
     setModalAdapterId('')
-    setModalAdapterType('onebot11')
+    setModalAdapterType('')
     setOb11Direction('forward')
     setOb11Port(8080)
     setOb11Host('0.0.0.0')
@@ -282,10 +287,13 @@ export default function MessagePlatformManager() {
     setOb11ReverseUrl('ws://127.0.0.1:6700')
     setOb11ReconnectInterval(5000)
     setOb11AccessToken('')
+    setShowOb11Token(false)
     setQqAppId('')
     setQqAppSecret('')
-    setQqIntents(null)
+    setQqLoginMethod('qr')
+    setShowQqAppSecret(false)
     setWxMode('create')
+    setShowWxToken(false)
     stopWxPostCreatePolling()
   }, [stopWxPostCreatePolling])
 
@@ -313,7 +321,6 @@ export default function MessagePlatformManager() {
     } else if (adapter.type === 'qqofficial') {
       setQqAppId(adapter.config.appId ?? '')
       setQqAppSecret(adapter.config.appSecret ?? '')
-      setQqIntents(adapter.config.intents ?? null)
     } else if (adapter.type === 'weixin_oc') {
       const initialAccountId = adapter.config.accountId ?? ''
       const initialLoggedIn = !!adapter.config.token
@@ -349,14 +356,15 @@ export default function MessagePlatformManager() {
     } else if (modalAdapterType === 'qqofficial') {
       config.appId = qqAppId.trim()
       config.appSecret = qqAppSecret.trim()
-      if (qqIntents != null) {
-        config.intents = qqIntents
-      }
     }
     return config
   }
 
   const submitAdapter = async () => {
+    if (!isEditMode && !modalAdapterType) {
+      showMessage('请选择消息平台', 'error')
+      return
+    }
     if (!isEditMode && !modalAdapterId.trim()) {
       showMessage('请输入平台实例 ID', 'error')
       return
@@ -390,7 +398,7 @@ export default function MessagePlatformManager() {
         const result = await res.json()
         if (!res.ok) throw new Error(result.error || '添加适配器失败')
 
-        if (modalAdapterType === 'weixin_oc') {
+        if (modalAdapterType === 'weixin_oc' || (modalAdapterType === 'qqofficial' && qqLoginMethod === 'qr')) {
           setWxScanningAdapterId(modalAdapterId.trim())
           await startWxPostCreateScan(modalAdapterId.trim())
         } else {
@@ -399,6 +407,40 @@ export default function MessagePlatformManager() {
         }
         await fetchAdapters()
       }
+    } catch (err: any) {
+      showMessage(err.message, 'error')
+    }
+  }
+
+  const handleReLogin = async () => {
+    const config = { ...buildConfig() }
+    if (modalAdapterType === 'weixin_oc') {
+      config.token = undefined
+      config.accountId = undefined
+      config.syncBuf = undefined
+    } else if (modalAdapterType === 'qqofficial') {
+      config.appId = undefined
+      config.appSecret = undefined
+    }
+
+    try {
+      const res = await apiFetch(`/api/adapters/${encodeURIComponent(editingAdapterId)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: modalAdapterType, config })
+      })
+      const result = await res.json()
+      if (!res.ok) throw new Error(result.error || '重置登录状态失败')
+
+      setIsEditMode(false)
+      if (modalAdapterType === 'weixin_oc' || modalAdapterType === 'qqofficial') {
+        setWxScanningAdapterId(editingAdapterId)
+        await startWxPostCreateScan(editingAdapterId)
+      } else {
+        setShowModal(false)
+        resetForm()
+      }
+      await fetchAdapters()
     } catch (err: any) {
       showMessage(err.message, 'error')
     }
@@ -520,50 +562,48 @@ export default function MessagePlatformManager() {
         title={isEditMode ? '编辑平台连接' : '接入新消息平台'}
         footer={
           <>
-            {(modalAdapterType !== 'weixin_oc' || wxMode === 'create' || isEditMode) && (
+            {wxMode === 'create' || isEditMode ? (
               <button
                 className="btn btn-secondary"
                 onClick={() => { setShowModal(false); stopWxPostCreatePolling() }}
               >取消</button>
-            )}
-            {modalAdapterType === 'weixin_oc' && wxMode === 'scanning' && (
+            ) : wxMode === 'scanning' ? (
               <button
                 className="btn btn-secondary"
                 onClick={() => { setShowModal(false); stopWxPostCreatePolling(); setWxMode('create') }}
               >取消</button>
-            )}
-            {wxMode === 'create' && !isEditMode && modalAdapterType === 'weixin_oc' && (
-              <button className="btn btn-primary" onClick={submitAdapter}>确认接入</button>
-            )}
-            {(wxMode === 'scanning' || wxMode === 'success') && modalAdapterType === 'weixin_oc' && (
+            ) : null}
+            {isEditMode ? (
+              <button className="btn btn-primary" onClick={submitAdapter}>保存更改</button>
+            ) : wxMode === 'create' ? (
+              modalAdapterType ? (
+                <button className="btn btn-primary" onClick={submitAdapter}>确认</button>
+              ) : null
+            ) : (
               <button
                 className="btn btn-primary"
                 onClick={() => { setShowModal(false); stopWxPostCreatePolling(); resetForm() }}
               >{wxMode === 'success' ? '完成' : '关闭'}</button>
             )}
-            {(isEditMode || modalAdapterType !== 'weixin_oc') && (
-              <button className="btn btn-primary" onClick={submitAdapter}>
-                {isEditMode ? '保存更改' : '确认接入'}
-              </button>
-            )}
           </>
         }
       >
         <div className="form-group">
-          <label>平台适配器类型</label>
+          <label>选择消息平台</label>
           <select
             value={modalAdapterType}
             onChange={e => setModalAdapterType(e.target.value)}
             className="form-select"
             disabled={isEditMode}
           >
+            {!isEditMode && <option value="">请选择消息平台...</option>}
             <option value="onebot11">OneBot 11</option>
             <option value="qqofficial">QQ官方Bot</option>
             <option value="weixin_oc">个人微信</option>
           </select>
         </div>
 
-        {!isEditMode && (
+        {!isEditMode && modalAdapterType && (
           <div className="form-group">
             <label>实例唯一 ID (例如: qq-bot, telegram-main)</label>
             <input
@@ -654,13 +694,25 @@ export default function MessagePlatformManager() {
 
             <div className="form-group">
               <label>鉴权 Token (可选)</label>
-              <input
-                type="password"
-                value={ob11AccessToken}
-                onChange={e => setOb11AccessToken(e.target.value)}
-                placeholder="不填则不启用验证"
-                className="form-input"
-              />
+              <div className="input-with-toggle" style={{ width: '100%' }}>
+                <input
+                  type={showOb11Token ? 'text' : 'password'}
+                  value={ob11AccessToken}
+                  onChange={e => setOb11AccessToken(e.target.value)}
+                  placeholder="不填则不启用验证"
+                  className="form-input"
+                  style={{ width: '100%' }}
+                />
+                <button
+                  type="button"
+                  className="toggle-visibility"
+                  onClick={() => setShowOb11Token(!showOb11Token)}
+                  title={showOb11Token ? '隐藏 Token' : '显示 Token'}
+                  tabIndex={-1}
+                >
+                  {showOb11Token ? <EyeOff size={15} /> : <Eye size={15} />}
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -669,41 +721,150 @@ export default function MessagePlatformManager() {
           <div className="form-section">
             <h4>QQ官方Bot参数配置</h4>
 
-            <div className="form-group">
-              <label>AppID</label>
-              <input
-                type="text"
-                value={qqAppId}
-                onChange={e => setQqAppId(e.target.value)}
-                placeholder="QQ 机器人 AppID"
-                className="form-input"
-              />
-            </div>
+            {isEditMode ? (
+              <>
+                <div className="form-group">
+                  <label>AppID</label>
+                  <input
+                    type="text"
+                    value={qqAppId}
+                    onChange={e => setQqAppId(e.target.value)}
+                    placeholder="QQ 机器人 AppID"
+                    className="form-input"
+                  />
+                </div>
 
-            <div className="form-group">
-              <label>AppSecret</label>
-              <input
-                type="password"
-                value={qqAppSecret}
-                onChange={e => setQqAppSecret(e.target.value)}
-                placeholder="QQ 机器人 AppSecret"
-                className="form-input"
-              />
-            </div>
+                <div className="form-group">
+                  <label>AppSecret</label>
+                  <div className="input-with-toggle" style={{ width: '100%' }}>
+                    <input
+                      type={showQqAppSecret ? 'text' : 'password'}
+                      value={qqAppSecret}
+                      onChange={e => setQqAppSecret(e.target.value)}
+                      placeholder="QQ 机器人 AppSecret"
+                      className="form-input"
+                      style={{ width: '100%' }}
+                    />
+                    <button
+                      type="button"
+                      className="toggle-visibility"
+                      onClick={() => setShowQqAppSecret(!showQqAppSecret)}
+                      title={showQqAppSecret ? '隐藏 AppSecret' : '显示 AppSecret'}
+                      tabIndex={-1}
+                    >
+                      {showQqAppSecret ? <EyeOff size={15} /> : <Eye size={15} />}
+                    </button>
+                  </div>
+                </div>
 
-            <div className="form-group">
-              <label>Intents 位掩码 (可选)</label>
-              <input
-                type="number"
-                value={qqIntents === null ? '' : qqIntents}
-                onChange={e => setQqIntents(e.target.value === '' ? null : Number(e.target.value))}
-                placeholder="留空自动计算 (默认: 群消息+C2C消息)"
-                className="form-input"
-              />
-              <small style={{ color: 'var(--text-secondary)', marginTop: '4px', display: 'block' }}>
-                常用值: 群@消息=33554432, C2C消息=67108864, 群+C2C=100663296
-              </small>
-            </div>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  style={{ marginTop: '12px', width: '100%' }}
+                  onClick={handleReLogin}
+                >
+                  重新扫码登录
+                </button>
+              </>
+            ) : wxMode === 'create' ? (
+              <>
+                <div className="login-method-selector" style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
+                  <button
+                    type="button"
+                    className={`btn ${qqLoginMethod === 'qr' ? 'btn-primary' : 'btn-secondary'}`}
+                    style={{ flex: 1 }}
+                    onClick={() => setQqLoginMethod('qr')}
+                  >
+                    扫码登录
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn ${qqLoginMethod === 'manual' ? 'btn-primary' : 'btn-secondary'}`}
+                    style={{ flex: 1 }}
+                    onClick={() => setQqLoginMethod('manual')}
+                  >
+                    手动配置
+                  </button>
+                </div>
+
+                {qqLoginMethod === 'qr' ? (
+                  <p className="wx-oc-create-hint">
+                    点击「确认接入」后将生成 QQ 机器人绑定二维码。<br />
+                    请在弹出的扫码页面中使用手机 QQ 扫码完成绑定。
+                  </p>
+                ) : (
+                  <>
+                    <div className="form-group">
+                      <label>AppID</label>
+                      <input
+                        type="text"
+                        value={qqAppId}
+                        onChange={e => setQqAppId(e.target.value)}
+                        placeholder="QQ 机器人 AppID"
+                        className="form-input"
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label>AppSecret</label>
+                      <div className="input-with-toggle" style={{ width: '100%' }}>
+                        <input
+                          type={showQqAppSecret ? 'text' : 'password'}
+                          value={qqAppSecret}
+                          onChange={e => setQqAppSecret(e.target.value)}
+                          placeholder="QQ 机器人 AppSecret"
+                          className="form-input"
+                          style={{ width: '100%' }}
+                        />
+                        <button
+                          type="button"
+                          className="toggle-visibility"
+                          onClick={() => setShowQqAppSecret(!showQqAppSecret)}
+                          title={showQqAppSecret ? '隐藏 AppSecret' : '显示 AppSecret'}
+                          tabIndex={-1}
+                        >
+                          {showQqAppSecret ? <EyeOff size={15} /> : <Eye size={15} />}
+                        </button>
+                      </div>
+                    </div>
+
+
+                  </>
+                )}
+              </>
+            ) : wxMode === 'scanning' ? (
+              <div className="wx-oc-modal-qr">
+                <p className="wx-oc-hint-text">请使用手机 QQ 扫码登录并绑定机器人</p>
+
+                {!wxPostCreateQrImage && !wxPostCreateError ? (
+                  <div className="qr-waiting">
+                    <QrCode className="qr-waiting-icon" />
+                    <span>正在获取二维码...</span>
+                  </div>
+                ) : wxPostCreateError ? (
+                  <p className="wx-oc-error">{wxPostCreateError}</p>
+                ) : wxPostCreateQrImage ? (
+                  <>
+                    <img src={wxPostCreateQrImage} alt="QQ扫码绑定" className="wx-modal-qr-img" />
+                    {wxPostCreateStatus === 'expired' && (
+                      <p className="qr-expired-hint">二维码已过期，正在刷新...</p>
+                    )}
+                    <button className="btn btn-secondary wx-qr-refresh-btn" onClick={refreshWxPostCreateQr}>
+                      刷新二维码
+                    </button>
+                  </>
+                ) : null}
+              </div>
+            ) : wxMode === 'success' ? (
+              <div className="wx-oc-success">
+                <span className="success-icon">✓</span>
+                <p className="success-title">绑定成功！</p>
+                <div className="token-field">
+                  <label>AppID</label>
+                  <div className="token-value">{wxPostCreateAccountId || '-'}</div>
+                </div>
+              </div>
+            ) : null}
           </div>
         )}
 
@@ -713,21 +874,57 @@ export default function MessagePlatformManager() {
 
             {isEditMode ? (
               <div className="wx-oc-token-info">
-                <div className="token-field">
-                  <label>Account ID</label>
-                  <div className="token-value">{editingWxAccountId ? '••••••' : '未登录'}</div>
+                <div className="form-group">
+                  <label>account_id</label>
+                  <input
+                    type="text"
+                    value={editingWxAccountId || '未登录'}
+                    readOnly
+                    className="form-input"
+                  />
                 </div>
-                <div className="token-field">
-                  <label>Bot Token</label>
-                  <div className="token-value token-masked">{editingWxToken ? '••••••' : '未获取'}</div>
-                </div>
-                <div className="token-field">
-                  <label>状态</label>
-                  <div className={`token-value ${editingWxLoggedIn ? 'status-logged-in' : 'status-not-logged'}`}>
-                    {editingWxLoggedIn ? '已登录' : '未登录'}
+                <div className="form-group">
+                  <label>token</label>
+                  <div className="input-with-toggle" style={{ width: '100%' }}>
+                    <input
+                      type={showWxToken ? 'text' : 'password'}
+                      value={editingWxToken || '未获取'}
+                      readOnly
+                      className="form-input"
+                      style={{ width: '100%' }}
+                    />
+                    {editingWxToken && (
+                      <button
+                        type="button"
+                        className="toggle-visibility"
+                        onClick={() => setShowWxToken(!showWxToken)}
+                        title={showWxToken ? '隐藏 Token' : '显示 Token'}
+                        tabIndex={-1}
+                      >
+                        {showWxToken ? <EyeOff size={15} /> : <Eye size={15} />}
+                      </button>
+                    )}
                   </div>
                 </div>
-                <p className="wx-oc-edit-hint">Token 在扫码登录后自动保存，无需手动配置。如需重新登录请删除此适配器后重新添加。</p>
+                <div className="form-group">
+                  <label>状态</label>
+                  <input
+                    type="text"
+                    value={editingWxLoggedIn ? '已登录' : '未登录'}
+                    readOnly
+                    className="form-input"
+                    style={{ color: editingWxLoggedIn ? '#10b981' : '#ef4444', fontWeight: 'bold' }}
+                  />
+                </div>
+                <p className="wx-oc-edit-hint">Token 在扫码登录后自动保存，无需手动配置。如需重新登录，请点击下方「重新扫码登录」按钮。</p>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  style={{ marginTop: '12px', width: '100%' }}
+                  onClick={handleReLogin}
+                >
+                  重新扫码登录
+                </button>
               </div>
             ) : wxMode === 'create' ? (
               <p className="wx-oc-create-hint">
@@ -762,7 +959,7 @@ export default function MessagePlatformManager() {
                 <span className="success-icon">✓</span>
                 <p className="success-title">登录成功！</p>
                 <div className="token-field">
-                  <label>Account ID</label>
+                  <label>account_id</label>
                   <div className="token-value">{wxPostCreateAccountId || '-'}</div>
                 </div>
               </div>

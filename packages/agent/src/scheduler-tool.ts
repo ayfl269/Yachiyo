@@ -79,11 +79,30 @@ export function createSchedulerTool(options?: CreateSchedulerToolOptions): Funct
     name: "scheduler_tool",
     description:
       "Scheduled task, reminder, and execution plan management. " +
-      "Task types: reminder (one-shot), scheduled (one-shot at time), " +
-      "recurring (interval: 'Nh'/'Nm'/'daily'/'weekly'), goal (current goal), " +
-      "plan (multi-step plan). " +
+      "USE THIS TOOL whenever the user asks you to set a reminder, " +
+      "schedule a task, set up a recurring alert, start a timer, or asks " +
+      "for any time-based notification. Trigger examples: " +
+      "\"remind me in 5 minutes\", \"提醒我3小时后开会\", " +
+      "\"every day at 9am remind me to stand up\", \"set a 30-minute timer\", " +
+      "\"tomorrow at 8pm notify me\", \"每周一提醒我写周报\". " +
+      "YOU MUST CALL THIS TOOL to actually schedule a reminder — do NOT just " +
+      "reply with text like \"好的，我会在5分钟后提醒你\" without calling the " +
+      "tool, otherwise NO reminder will ever be delivered. The background " +
+      "scheduler only fires tasks created through this tool.\n\n" +
+      "Task types: reminder (one-shot, fires at scheduled_at), scheduled " +
+      "(one-shot, fires at scheduled_at), recurring (fires on recurrence " +
+      "interval: 'Nh'/'Nm'/'Ns'/'daily'/'weekly'/'monthly'), goal (current " +
+      "task goal, no auto-fire), plan (multi-step execution plan, no auto-fire).\n\n" +
       "Actions: create, get, list, search, update, delete, set_goal, " +
-      "get_goal, set_plan, update_step, next_step, fire_now, stats.",
+      "get_goal, set_plan, update_step, next_step, fire_now, stats.\n\n" +
+      "How to compute scheduled_at from relative time: take the current " +
+      "date/time provided in the system prompt and add the requested offset, " +
+      "then format as ISO 8601 UTC. Examples: \"in 5 minutes\" → " +
+      "(now + 5min) as '2026-07-13T15:35:00Z'; \"in 2 hours\" → (now + 2h); " +
+      "\"tomorrow 9am\" → next day at 09:00 in user's timezone, converted to UTC.\n\n" +
+      "Typical create call for a reminder: action='create', type='reminder', " +
+      "title=<short summary>, scheduled_at=<ISO timestamp>, payload=<message " +
+      "to deliver when the reminder fires>.",
     parameters: {
       type: "object",
       properties: {
@@ -102,7 +121,7 @@ export function createSchedulerTool(options?: CreateSchedulerToolOptions): Funct
           description: "Task type. One of: reminder, scheduled, recurring, goal, plan.",
           enum: ["reminder", "scheduled", "recurring", "goal", "plan"],
         },
-        title: { type: "string", description: "Task title." },
+        title: { type: "string", description: "Task title (required for create). For reminders, use a short summary of what to remind about." },
         description: { type: "string", description: "Task description / payload." },
         status: {
           type: "string",
@@ -116,15 +135,26 @@ export function createSchedulerTool(options?: CreateSchedulerToolOptions): Funct
         },
         scheduled_at: {
           type: "string",
-          description: "ISO 8601 timestamp when the task should fire (e.g. '2026-07-08T15:30:00Z').",
+          description:
+            "ISO 8601 timestamp when the task should fire (e.g. '2026-07-08T15:30:00Z'). " +
+            "Required for reminder/scheduled types if you want it to auto-fire. " +
+            "For relative time like 'in 5 minutes', compute (current time + 5 minutes) " +
+            "and pass as UTC ISO 8601.",
           format: "date-time",
         },
         recurrence: {
           type: "string",
-          description: "Recurrence pattern for recurring tasks: '1h', '30m', 'daily', 'weekly', 'monthly'.",
+          description:
+            "Recurrence pattern for recurring tasks: '1h', '30m', '45s', 'daily', 'weekly', 'monthly'. " +
+            "Required for recurring type.",
         },
         goal: { type: "string", description: "Current task goal text (for goal/plan tasks)." },
-        payload: { type: "string", description: "Message/payload delivered when the task fires." },
+        payload: {
+          type: "string",
+          description:
+            "Message text delivered to the user when the task fires. " +
+            "For reminders, this is the actual reminder message the user will receive.",
+        },
         tags: { type: "array", description: "Tags for categorization.", items: { type: "string" } },
         plan: {
           type: "array",
