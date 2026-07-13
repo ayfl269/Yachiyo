@@ -1646,7 +1646,7 @@ async function testSandbox(): Promise<void> {
     const { adapter, fetchMock } = await createAdapter({ sandbox: true });
     fetchMock.route("/gateway", () => ({ status: 200, body: { url: "wss://sandbox.api.sgroup.qq.com/websocket" } }));
     await adapter.getGateway();
-    assert(fetchMock.getLastCall()?.url.startsWith("https://sandbox.api.sgroup.qq.com"), "getGateway() should hit sandbox URL");
+    assert(/^https:\/\/sandbox\.api\.sgroup\.qq\.com[\/]/.test(fetchMock.getLastCall()?.url ?? ""), "getGateway() should hit sandbox URL");
 
     fetchMock.restore();
     await adapter.stop();
@@ -1655,7 +1655,7 @@ async function testSandbox(): Promise<void> {
     const prod = await createAdapter({ sandbox: false });
     prod.fetchMock.route("/gateway", () => ({ status: 200, body: { url: "wss://api.sgroup.qq.com/websocket" } }));
     await prod.adapter.getGateway();
-    assert(prod.fetchMock.getLastCall()?.url.startsWith("https://api.sgroup.qq.com"), "getGateway() should hit production URL");
+    assert(/^https:\/\/api\.sgroup\.qq\.com[\/]/.test(prod.fetchMock.getLastCall()?.url ?? ""), "getGateway() should hit production URL");
     await cleanup(prod.adapter, prod.fetchMock);
   }
 }
