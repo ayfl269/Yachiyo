@@ -18,6 +18,7 @@ import { MessageType } from "@yachiyo/message/types.js";
 import type { MessageChain } from "@yachiyo/agent/types.js";
 
 import { WebSocket } from "ws";
+import { EventEmitter } from "events";
 
 // ── Config ──
 
@@ -32,7 +33,16 @@ export interface QQOfficialAdapterConfig extends AdapterConfigBase {
   type: "qqofficial";
   appId: string;
   appSecret: string;
+  /** 事件订阅 intents 位掩码; 不填使用默认值 */
   intents?: number;
+  /** 事件订阅名称列表 (与 intents 二选一, 名称会被转换为位掩码) */
+  intentNames?: QQOfficialIntentName[];
+  /** 沙箱环境 (true 时切换到 sandbox.api.sgroup.qq.com) */
+  sandbox?: boolean;
+  /** 分片配置: [当前分片ID, 总分片数]; 不填为单分片 */
+  shard?: [number, number];
+  /** 私信回调专用 token (可选, 用于回调模式下的私信场景) */
+  privateToken?: string;
 }
 
 // ── QQ Official API Types ──
@@ -53,20 +63,79 @@ const OP = {
 const DISPATCH_TYPE = {
   READY: "READY",
   RESUMED: "RESUMED",
+  // 消息事件
   GROUP_AT_MESSAGE_CREATE: "GROUP_AT_MESSAGE_CREATE",
   C2C_MESSAGE_CREATE: "C2C_MESSAGE_CREATE",
   AT_MESSAGE_CREATE: "AT_MESSAGE_CREATE",
   DIRECT_MESSAGE_CREATE: "DIRECT_MESSAGE_CREATE",
+  MESSAGE_CREATE: "MESSAGE_CREATE", // 私域机器人可接收
+  MESSAGE_AUDIT_PASS: "MESSAGE_AUDIT_PASS",
+  MESSAGE_AUDIT_REJECT: "MESSAGE_AUDIT_REJECT",
+  // 频道事件 (GUILDS intent)
+  GUILD_CREATE: "GUILD_CREATE",
+  GUILD_UPDATE: "GUILD_UPDATE",
+  GUILD_DELETE: "GUILD_DELETE",
+  CHANNEL_CREATE: "CHANNEL_CREATE",
+  CHANNEL_UPDATE: "CHANNEL_UPDATE",
+  CHANNEL_DELETE: "CHANNEL_DELETE",
+  // 频道成员事件 (GUILD_MEMBERS intent)
+  GUILD_MEMBER_ADD: "GUILD_MEMBER_ADD",
+  GUILD_MEMBER_UPDATE: "GUILD_MEMBER_UPDATE",
+  GUILD_MEMBER_REMOVE: "GUILD_MEMBER_REMOVE",
+  // 表情表态事件 (GUILD_MESSAGE_REACTIONS intent)
+  MESSAGE_REACTION_ADD: "MESSAGE_REACTION_ADD",
+  MESSAGE_REACTION_REMOVE: "MESSAGE_REACTION_REMOVE",
+  // 互动事件 (INTERACTION intent)
+  INTERACTION_CREATE: "INTERACTION_CREATE",
+  // 论坛事件 (FORUMS_EVENT intent, 仅私域)
+  FORUM_THREAD_CREATE: "FORUM_THREAD_CREATE",
+  FORUM_THREAD_UPDATE: "FORUM_THREAD_UPDATE",
+  FORUM_THREAD_DELETE: "FORUM_THREAD_DELETE",
+  FORUM_POST_CREATE: "FORUM_POST_CREATE",
+  FORUM_POST_DELETE: "FORUM_POST_DELETE",
+  FORUM_REPLY_CREATE: "FORUM_REPLY_CREATE",
+  FORUM_REPLY_DELETE: "FORUM_REPLY_DELETE",
+  FORUM_PUBLISH_AUDIT_RESULT: "FORUM_PUBLISH_AUDIT_RESULT",
+  // 音频事件 (AUDIO_ACTION intent)
+  AUDIO_START: "AUDIO_START",
+  AUDIO_FINISH: "AUDIO_FINISH",
+  AUDIO_ON_MIC: "AUDIO_ON_MIC",
+  AUDIO_OFF_MIC: "AUDIO_OFF_MIC",
 } as const;
 
 /** Intents bitfield */
 const INTENTS = {
-  GUILDS: 1 << 0,
-  GUILD_MESSAGES: 1 << 9,
-  PUBLIC_GUILD_MESSAGES: 1 << 12,
-  GROUP_AT_MESSAGE_CREATE: 1 << 25,
-  C2C_MESSAGE_CREATE: 1 << 26,
+  // 基础事件 (默认有权限)
+  GUILDS: 1 << 0,                          // 频道变更事件
+  GUILD_MEMBERS: 1 << 1,                   // 频道成员变更 (需申请)
+  GUILD_MESSAGES: 1 << 9,                  // 私域消息事件 (需申请)
+  GUILD_MESSAGE_REACTIONS: 1 << 10,        // 表情表态事件 (需申请)
+  DIRECT_MESSAGE: 1 << 12,                 // 私信事件 (默认有权限)
+  INTERACTION: 1 << 26,                    // 互动事件 (按钮回调)
+  MESSAGE_AUDIT: 1 << 27,                  // 消息审核事件
+  FORUMS_EVENT: 1 << 28,                   // 论坛事件 (仅私域)
+  AUDIO_ACTION: 1 << 29,                   // 音频事件
+  PUBLIC_GUILD_MESSAGES: 1 << 30,          // 公域消息事件 (默认有权限)
+  // 注: 群@消息和C2C消息事件不通过 intents 订阅 (由机器人能力配置控制)
+  // 保留常量名为 0 以保持向后兼容, OR 0 为无操作
+  GROUP_AT_MESSAGE_CREATE: 0,              // 群@消息事件 (无需订阅)
+  C2C_MESSAGE_CREATE: 0,                   // C2C 消息事件 (无需订阅)
 } as const;
+
+/** 事件订阅类型 (用于配置) */
+export type QQOfficialIntentName =
+  | "GUILDS"
+  | "GUILD_MEMBERS"
+  | "GUILD_MESSAGES"
+  | "GUILD_MESSAGE_REACTIONS"
+  | "DIRECT_MESSAGE"
+  | "INTERACTION"
+  | "MESSAGE_AUDIT"
+  | "FORUMS_EVENT"
+  | "AUDIO_ACTION"
+  | "PUBLIC_GUILD_MESSAGES"
+  | "GROUP_AT_MESSAGE_CREATE"
+  | "C2C_MESSAGE_CREATE";
 
 interface AccessTokenResponse {
   access_token: string;
@@ -143,6 +212,463 @@ interface ReadyData {
   shard?: [number, number];
 }
 
+// ── Rich Media / Markdown / Ark / Embed / Keyboard / Reaction Types ──
+
+/** 媒体类型: 1 图片、2 视频、3 语音、4 文件 */
+export type QQOfficialMediaType = 1 | 2 | 3 | 4;
+
+/** 富媒体上传返回结果 */
+export interface QQOfficialRichMediaUploadResult {
+  file_uuid: string;
+  file_info: string;
+  /** 有效期剩余秒数，0 表示可长期使用 */
+  ttl: number;
+}
+
+/** Markdown 模板消息 */
+export interface QQOfficialMarkdownTemplate {
+  /** 模板 ID */
+  custom_template_id: string;
+  /** 模板参数键值对 */
+  params: Array<{ key: string; values: Array<{ key: string; values: string[] }> }>;
+}
+
+/** Markdown 自定义消息 */
+export interface QQOfficialMarkdownCustom {
+  /** Markdown 内容 */
+  content: string;
+}
+
+/** Ark 消息 */
+export interface QQOfficialArkMessage {
+  template_id: number;
+  kv: Array<{ key: string; value: string } | { key: string; obj: Array<{ obj_kv: Array<{ key: string; value: string }> }> }>;
+}
+
+/** Embed 消息 */
+export interface QQOfficialEmbed {
+  title?: string;
+  description?: string;
+  prompt?: string;
+  thumbnail?: { url: string };
+  fields?: Array<{ name: string; value: string }>;
+}
+
+/** 发送消息时附带的 media 字段 */
+export interface QQOfficialMediaField {
+  file_info: string;
+}
+
+/** 按钮权限 */
+export interface QQOfficialButtonPermission {
+  /** 0 指定用户、1 仅管理者、2 所有人、3 指定身份组(频道) */
+  type: 0 | 1 | 2 | 3;
+  specify_user_ids?: string[];
+  specify_role_ids?: string[];
+}
+
+/** 按钮操作 */
+export interface QQOfficialButtonAction {
+  /** 0 跳转按钮、1 回调按钮、2 指令按钮 */
+  type: 0 | 1 | 2;
+  permission: QQOfficialButtonPermission;
+  /** 操作相关数据 */
+  data: string;
+  /** 指令按钮: 是否带引用回复 */
+  reply?: boolean;
+  /** 指令按钮: 点击后自动发送 (仅单聊) */
+  enter?: boolean;
+  /** 指令按钮: 1=唤起手Q选图器 */
+  anchor?: number;
+  /** 客户端不支持时的 toast 文案 */
+  unsupport_tips: string;
+}
+
+/** 按钮渲染数据 */
+export interface QQOfficialButtonRender {
+  label: string;
+  visited_label: string;
+  /** 0 灰色线框、1 蓝色线框 */
+  style: 0 | 1;
+}
+
+/** 单个按钮 */
+export interface QQOfficialButton {
+  id?: string;
+  render_data: QQOfficialButtonRender;
+  action: QQOfficialButtonAction;
+}
+
+/** 按钮行 */
+export interface QQOfficialButtonRow {
+  buttons: QQOfficialButton[];
+}
+
+/** Inline 键盘 (消息按钮) */
+export interface QQOfficialKeyboard {
+  content?: { rows: QQOfficialButtonRow[] };
+  /** 模板 ID */
+  id?: string;
+}
+
+/** 表情表态用户 */
+export interface QQOfficialReactionUser {
+  user_id: string;
+  username?: string;
+  avatar?: string;
+}
+
+/** 表情表态用户列表返回 */
+export interface QQOfficialReactionUsersResult {
+  users: QQOfficialReactionUser[];
+  is_end: boolean;
+  cookie?: string;
+}
+
+/** 扩展发送消息参数 */
+export interface QQOfficialSendOptions {
+  /** 文本内容 (msg_type=0 时必填) */
+  content?: string;
+  /** 消息类型: 0 文本、2 markdown、3 ark、4 embed、7 media */
+  msg_type?: 0 | 2 | 3 | 4 | 7;
+  /** Markdown 对象 (msg_type=2) */
+  markdown?: QQOfficialMarkdownTemplate | QQOfficialMarkdownCustom;
+  /** Ark 对象 (msg_type=3) */
+  ark?: QQOfficialArkMessage;
+  /** Embed 对象 (msg_type=4) */
+  embed?: QQOfficialEmbed;
+  /** 富媒体 (msg_type=7) */
+  media?: QQOfficialMediaField;
+  /** 消息按钮 */
+  keyboard?: QQOfficialKeyboard;
+  /** 被动消息回复的 msg_id */
+  msg_id?: string;
+  /** 互动召回消息 (仅 C2C, 2026/01/10 新增) */
+  is_wakeup?: boolean;
+}
+
+/** 发送消息返回结果 */
+export interface QQOfficialSendMessageResult {
+  id?: string;
+  /** 频道场景返回的消息 ID */
+  message_id?: string;
+  /** msg_seq */
+  seq?: number;
+  /** 审核中的消息会返回 audit_id */
+  audit_id?: string;
+}
+
+// ── Phase 2: Guild / Channel / Member / Role / Announces / Schedule Types ──
+
+/** 频道用户对象 */
+export interface QQOfficialUser {
+  id: string;
+  username?: string;
+  avatar?: string;
+  bot?: boolean;
+  public_flags?: number;
+  system?: boolean;
+  union_openid?: string;
+  union_user_account?: string;
+}
+
+/** 频道对象 */
+export interface QQOfficialGuild {
+  id: string;
+  name: string;
+  icon: string;
+  owner_id?: string;
+  owner?: boolean;
+  member_count?: number;
+  max_members?: number;
+  description?: string;
+  joined_at?: string;
+}
+
+/** 频道成员对象 */
+export interface QQOfficialMember {
+  user: QQOfficialUser;
+  nick: string;
+  roles: string[];
+  joined_at: string;
+  deaf?: boolean;
+  mute?: boolean;
+  pending?: boolean;
+}
+
+/** 身份组对象 */
+export interface QQOfficialRole {
+  id: string;
+  name: string;
+  color: number;
+  hoist: boolean;
+  number: number;
+  member_limit: number;
+  permissions: string;
+}
+
+/** 子频道对象 */
+export interface QQOfficialChannel {
+  id: string;
+  guild_id: string;
+  name: string;
+  type: number;
+  position?: number;
+  parent_id?: string;
+  owner_id?: string;
+  sub_type?: number;
+  private_type?: number;
+  speak_permission?: number;
+  application_id?: string;
+  permissions?: string;
+}
+
+/** 子频道创建参数 */
+export interface QQOfficialChannelCreateOptions {
+  name: string;
+  type: number;
+  position?: number;
+  parent_id?: string;
+  sub_type?: number;
+  private_type?: number;
+  speak_permission?: number;
+}
+
+/** 子频道修改参数 */
+export interface QQOfficialChannelUpdateOptions {
+  name?: string;
+  type?: number;
+  position?: number;
+  parent_id?: string;
+  sub_type?: number;
+  private_type?: number;
+  speak_permission?: number;
+}
+
+/** 子频道权限 (用户/身份组通用) */
+export interface QQOfficialChannelPermissions {
+  /** 权限位字符串 (例如 "5"=可读+可写) */
+  permissions?: string;
+}
+
+/** 频道公告对象 */
+export interface QQOfficialAnnounce {
+  guild_id: string;
+  channel_id: string;
+  message_id: string;
+}
+
+/** 频道公告创建参数 */
+export interface QQOfficialAnnounceCreateOptions {
+  channel_id: string;
+  message_id: string;
+}
+
+/** 日程对象 */
+export interface QQOfficialSchedule {
+  id: string;
+  name: string;
+  description: string;
+  start_timestamp: string;
+  end_timestamp: string;
+  creator: QQOfficialUser;
+  jump_channel_id: string;
+  remind_type: string;
+}
+
+/** 日程创建/修改参数 */
+export interface QQOfficialScheduleOptions {
+  name: string;
+  description: string;
+  start_timestamp: string;
+  end_timestamp: string;
+  jump_channel_id: string;
+  /** 提醒类型: "0"=不提醒, "1"=开始时, "2"=5分钟前, "3"=15分钟前, "4"=30分钟前, "5"=60分钟前 */
+  remind_type: string;
+}
+
+/** 频道成员修改参数 (修改昵称/禁言) */
+export interface QQOfficialModifyMemberOptions {
+  /** 昵称 */
+  nick?: string;
+  /** 禁言时长 (秒)，传 "0" 解除禁言 */
+  mute_seconds?: string;
+  /** 头像 */
+  avatar?: string;
+}
+
+/** API 权限标识 */
+export interface QQOfficialApiPermissionIdentify {
+  path: string;
+  method: string;
+}
+
+/** API 权限需求 (申请授权链接) */
+export interface QQOfficialApiPermissionDemand {
+  guild_id: string;
+  channel_id: string;
+  api_identify: QQOfficialApiPermissionIdentify;
+  title: string;
+  desc: string;
+}
+
+/** API 权限申请参数 */
+export interface QQOfficialApiPermissionDemandOptions {
+  channel_id: string;
+  api_identify: QQOfficialApiPermissionIdentify;
+  desc: string;
+}
+
+/** 在线成员数返回 */
+export interface QQOfficialOnlineNums {
+  online_count: number;
+  online_member_count: number;
+  online_robot_count: number;
+}
+
+// ── Phase 4: Gateway / Message / Role CRUD / Pins / Speak / Forum / Audio Types ──
+
+/** Gateway 接入点返回 */
+export interface QQOfficialGateway {
+  url: string;
+}
+
+/** Gateway Bot 接入点返回 (含分片信息) */
+export interface QQOfficialGatewayBot {
+  url: string;
+  shards: number;
+  session_start_limit: {
+    total: number;
+    remaining: number;
+    reset_after: number;
+    max_concurrency: number;
+  };
+}
+
+/** 频道消息对象 (与子频道消息 API 配合使用) */
+export interface QQOfficialChannelMessage {
+  id: string;
+  channel_id: string;
+  guild_id?: string;
+  content: string;
+  timestamp: string;
+  author: QQOfficialUser;
+  member?: { roles: string[]; joined_at: string };
+  mentions?: QQOfficialUser[];
+  attachments?: QQOfficialAttachment[];
+  pinned?: boolean;
+  type?: number;
+  seq?: number;
+}
+
+/** 频道消息列表查询参数 */
+export interface QQOfficialListMessagesOptions {
+  /** 查询此 ID 之前的消息 (不含), 与 after 二选一 */
+  before?: string;
+  /** 查询此 ID 之后的消息 (不含), 与 before 二选一 */
+  after?: string;
+  /** 查询条数 (1-20) */
+  limit?: number;
+  /** 分页类型: 0=前后, 1=向前, 2=向后 */
+  type?: 0 | 1 | 2;
+}
+
+/** 修改消息参数 (仅 markdown + keyboard 可修改) */
+export interface QQOfficialPatchMessageOptions {
+  content?: string;
+  markdown?: QQOfficialMarkdownTemplate | QQOfficialMarkdownCustom;
+  keyboard?: QQOfficialKeyboard;
+}
+
+/** 身份组创建/修改参数 */
+export interface QQOfficialRoleOptions {
+  name: string;
+  color: number;
+  hoist: boolean;
+}
+
+/** 身份组创建/修改返回 */
+export interface QQOfficialRoleCreateResult {
+  role: QQOfficialRole;
+  role_id: string;
+}
+
+/** 精华消息列表返回 */
+export interface QQOfficialPinsListResult {
+  guild_id?: string;
+  channel_id: string;
+  message_ids: string[];
+}
+
+/** 精华消息操作返回 */
+export interface QQOfficialPinsResult {
+  message_ids: string[];
+  guild_id?: string;
+  channel_id: string;
+}
+
+/** 子频道发言权限设置 */
+export interface QQOfficialSpeakPrivilegeSettings {
+  /** 子频道 ID 与权限的映射, 值为权限位字符串 */
+  [channelId: string]: string;
+}
+
+/** 频道消息频率设置返回 */
+export interface QQOfficialMessageSetting {
+  guild_id: string;
+  channel_id: string;
+  /** 5 秒内可发送消息数 */
+  max_count: number;
+  /** 统计窗口 (秒) */
+  window_seconds: number;
+}
+
+/** 论坛帖子对象 */
+export interface QQOfficialThread {
+  channel_id: string;
+  guild_id?: string;
+  author: QQOfficialUser;
+  thread_info: {
+    thread_id: string;
+    title: string;
+    content: string;
+    date_time: string;
+  };
+}
+
+/** 论坛帖子详情 */
+export interface QQOfficialThreadDetail extends QQOfficialThread {
+  member?: { roles: string[]; joined_at: string };
+}
+
+/** 论坛帖子列表返回 */
+export interface QQOfficialThreadListResult {
+  threads: QQOfficialThread[];
+}
+
+/** 论坛评论对象 */
+export interface QQOfficialComment {
+  comment_id: string;
+  content: string;
+  author: QQOfficialUser;
+  date_time: string;
+}
+
+/** 论坛评论列表返回 */
+export interface QQOfficialCommentListResult {
+  comments: QQOfficialComment[];
+}
+
+/** 音频控制参数 */
+export interface QQOfficialAudioControl {
+  /** 音频 URL */
+  audio_url: string;
+  /** 显示文字 */
+  text?: string;
+  /** 状态: 0=开始, 1=暂停, 2=继续, 3=停止 */
+  status: 0 | 1 | 2 | 3;
+}
+
 // ── QQOfficialEvent ──
 
 type QQOfficialEventType = "group" | "c2c" | "guild" | "direct";
@@ -155,6 +681,8 @@ class QQOfficialEvent extends MessageEvent {
   /** Target identifiers for replying */
   private targetId: string;
   private eventId: string;
+  /** 机器人最近发送消息的 ID (用于撤回) */
+  private sentMessageId: string | null = null;
 
   constructor(
     messageStr: string,
@@ -198,23 +726,167 @@ class QQOfficialEvent extends MessageEvent {
     if (!plainText) return;
 
     try {
-      switch (this.eventType) {
-        case "group":
-          await this.adapter.sendGroupMessage(this.targetId, plainText, this.eventId);
-          break;
-        case "c2c":
-          await this.adapter.sendC2CMessage(this.targetId, plainText, this.eventId);
-          break;
-        case "guild":
-          await this.adapter.sendGuildMessage(this.targetId, plainText);
-          break;
-        case "direct":
-          await this.adapter.sendDirectMessage(this.targetId, plainText);
-          break;
-      }
+      const result = await this.sendTextEx(plainText);
+      this.storeSentMessageId(result);
     } catch (e: unknown) {
       console.error("[QQOfficial] Failed to send message:", e);
     }
+  }
+
+  /**
+   * 扩展发送消息 (支持所有 msg_type, 由调用方构造完整 options)
+   * 返回结果对象, 调用方可自行获取 message_id 用于撤回。
+   */
+  async sendEx(options: QQOfficialSendOptions): Promise<QQOfficialSendMessageResult> {
+    // 默认带上被动回复的 msg_id (群/C2C 场景)
+    if (!options.msg_id && (this.eventType === "group" || this.eventType === "c2c")) {
+      options.msg_id = this.eventId;
+    }
+    const result = await this.dispatchSend(options);
+    this.storeSentMessageId(result);
+    return result;
+  }
+
+  /** 发送纯文本 (扩展版, 返回结果) */
+  async sendTextEx(content: string): Promise<QQOfficialSendMessageResult> {
+    return this.sendEx({ content, msg_type: 0 });
+  }
+
+  /**
+   * 发送图片消息 (自动上传富媒体 + 发送)
+   * @param imageUrl 图片 URL
+   */
+  async sendImage(imageUrl: string): Promise<QQOfficialSendMessageResult> {
+    return this.sendMedia(1, imageUrl);
+  }
+
+  /**
+   * 发送视频消息
+   */
+  async sendVideo(videoUrl: string): Promise<QQOfficialSendMessageResult> {
+    return this.sendMedia(2, videoUrl);
+  }
+
+  /**
+   * 发送语音消息
+   */
+  async sendVoice(voiceUrl: string): Promise<QQOfficialSendMessageResult> {
+    return this.sendMedia(3, voiceUrl);
+  }
+
+  /**
+   * 发送文件消息
+   */
+  async sendFile(fileUrl: string): Promise<QQOfficialSendMessageResult> {
+    return this.sendMedia(4, fileUrl);
+  }
+
+  /**
+   * 上传富媒体并发送 (通用)
+   * @param fileType 1 图片、2 视频、3 语音、4 文件
+   */
+  async sendMedia(fileType: QQOfficialMediaType, url: string): Promise<QQOfficialSendMessageResult> {
+    let fileInfo: string;
+    if (this.eventType === "group") {
+      const upload = await this.adapter.uploadGroupRichMedia(this.targetId, fileType, url);
+      fileInfo = upload.file_info;
+    } else if (this.eventType === "c2c") {
+      const upload = await this.adapter.uploadC2CRichMedia(this.targetId, fileType, url);
+      fileInfo = upload.file_info;
+    } else {
+      // 频道场景: media 字段用 file_info, 需先上传
+      // 频道富媒体上传使用群接口的变体; 若无 fileInfo, fallback 到 content 带 URL
+      throw new Error("[QQOfficial] Guild/direct media upload not supported via this method; use sendGuildMessageEx with media field");
+    }
+    return this.sendEx({ msg_type: 7, media: { file_info: fileInfo } });
+  }
+
+  /** 发送 Markdown 消息 (自定义内容) */
+  async sendMarkdown(content: string): Promise<QQOfficialSendMessageResult> {
+    return this.sendEx({ msg_type: 2, markdown: { content } });
+  }
+
+  /** 发送 Markdown 模板消息 */
+  async sendMarkdownTemplate(template: QQOfficialMarkdownTemplate): Promise<QQOfficialSendMessageResult> {
+    return this.sendEx({ msg_type: 2, markdown: template });
+  }
+
+  /** 发送 Ark 消息 */
+  async sendArk(ark: QQOfficialArkMessage): Promise<QQOfficialSendMessageResult> {
+    return this.sendEx({ msg_type: 3, ark });
+  }
+
+  /** 发送 Embed 消息 */
+  async sendEmbed(embed: QQOfficialEmbed): Promise<QQOfficialSendMessageResult> {
+    return this.sendEx({ msg_type: 4, embed });
+  }
+
+  /**
+   * 发送带按钮的消息 (Markdown + Keyboard)
+   * 按钮需要 markdown 内容作为载体
+   */
+  async sendWithKeyboard(markdownContent: string, keyboard: QQOfficialKeyboard): Promise<QQOfficialSendMessageResult> {
+    return this.sendEx({
+      msg_type: 2,
+      markdown: { content: markdownContent },
+      keyboard,
+    });
+  }
+
+  /**
+   * 撤回机器人最近发送的消息
+   * 仅在 2 分钟内有效 (单聊/群聊); 频道需管理员权限
+   */
+  async recall(): Promise<void> {
+    if (!this.sentMessageId) {
+      console.warn("[QQOfficial] recall(): no sent message_id available");
+      return;
+    }
+    try {
+      switch (this.eventType) {
+        case "group":
+          await this.adapter.deleteGroupMessage(this.targetId, this.sentMessageId);
+          break;
+        case "c2c":
+          await this.adapter.deleteC2CMessage(this.targetId, this.sentMessageId);
+          break;
+        case "guild":
+        case "direct":
+          await this.adapter.deleteGuildMessage(this.targetId, this.sentMessageId);
+          break;
+      }
+      this.sentMessageId = null;
+    } catch (e: unknown) {
+      console.error("[QQOfficial] recall() failed:", e);
+    }
+  }
+
+  /**
+   * 对当前消息发表表情表态 (仅频道场景)
+   * @param type 表情类型, 参考 EmojiType
+   * @param id 表情 ID
+   */
+  async addReaction(type: number, id: string): Promise<void> {
+    if (this.eventType !== "guild" && this.eventType !== "direct") {
+      console.warn("[QQOfficial] addReaction() only supported in guild/direct channel");
+      return;
+    }
+    const messageId = this.messageObj.messageId;
+    if (!messageId) {
+      console.warn("[QQOfficial] addReaction(): no message_id available");
+      return;
+    }
+    await this.adapter.addReaction(this.targetId, messageId, type, id);
+  }
+
+  /**
+   * 删除机器人对当前消息的表情表态 (仅频道场景)
+   */
+  async deleteReaction(type: number, id: string): Promise<void> {
+    if (this.eventType !== "guild" && this.eventType !== "direct") return;
+    const messageId = this.messageObj.messageId;
+    if (!messageId) return;
+    await this.adapter.deleteReaction(this.targetId, messageId, type, id);
   }
 
   async sendStreaming(generator: AsyncGenerator<MessageChain, void>): Promise<void> {
@@ -265,6 +937,29 @@ class QQOfficialEvent extends MessageEvent {
     }
   }
 
+  // ── Private helpers ──
+
+  /** Dispatch a send-message request to the correct REST endpoint based on event type. */
+  private async dispatchSend(options: QQOfficialSendOptions): Promise<QQOfficialSendMessageResult> {
+    switch (this.eventType) {
+      case "group":
+        return this.adapter.sendGroupMessageEx(this.targetId, options);
+      case "c2c":
+        return this.adapter.sendC2CMessageEx(this.targetId, options);
+      case "guild":
+        return this.adapter.sendGuildMessageEx(this.targetId, options);
+      case "direct":
+        return this.adapter.sendDirectMessageEx(this.targetId, options);
+    }
+  }
+
+  /** Store the most recent sent message_id for recall support. */
+  private storeSentMessageId(result: QQOfficialSendMessageResult): void {
+    if (result.id || result.message_id) {
+      this.sentMessageId = result.id ?? result.message_id ?? null;
+    }
+  }
+
   private extractPlainText(components: MessageComponent[]): string {
     return components
       .filter((c): c is PlainComponent => c.type === ComponentType.Plain)
@@ -293,9 +988,37 @@ export class QQOfficialAdapter extends PlatformAdapter {
   private maxReconnectAttempts: number = 10;
   private msgSeqCounter: number = 0;
 
+  // 原生事件分发器 (用于非消息类事件, 如成员变动/消息审核/互动回调等)
+  private rawEventEmitter = new EventEmitter();
+
   constructor(config: QQOfficialAdapterConfig, eventQueue: AsyncQueue<MessageEvent>) {
     super(config as unknown as Record<string, unknown>, eventQueue);
     this.config = config;
+  }
+
+  /**
+   * 订阅原生 QQ 官方事件 (非消息类)
+   * @param eventType 事件类型 (如 "GUILD_MEMBER_ADD", "INTERACTION_CREATE", "MESSAGE_AUDIT_PASS")
+   * @param handler 事件处理器
+   * @returns 取消订阅函数
+   *
+   * @example
+   * ```typescript
+   * adapter.onRawEvent("INTERACTION_CREATE", (data) => {
+   *   console.log("按钮回调:", data.data);
+   * });
+   * ```
+   */
+  onRawEvent(eventType: string, handler: (data: unknown) => void): () => void {
+    this.rawEventEmitter.on(eventType, handler);
+    return () => this.rawEventEmitter.off(eventType, handler);
+  }
+
+  /** 触发原生事件 */
+  private emitRawEvent(eventType: string, data: unknown): void {
+    this.rawEventEmitter.emit(eventType, data);
+    // 同时 emit 一个通用的 "raw" 事件, 让上层可以监听所有事件
+    this.rawEventEmitter.emit("*", { type: eventType, data });
   }
 
   async initialize(): Promise<void> {
@@ -420,18 +1143,46 @@ export class QQOfficialAdapter extends PlatformAdapter {
     if (this.config.intents !== undefined) {
       return this.config.intents;
     }
-    // Default: group + c2c + public guild messages
+    if (this.config.intentNames && this.config.intentNames.length > 0) {
+      let bits = 0;
+      for (const name of this.config.intentNames) {
+        const intent = INTENTS[name as keyof typeof INTENTS];
+        if (intent) bits |= intent;
+      }
+      return bits;
+    }
+    // Default: guilds + public guild messages (群@和C2C无需订阅)
     return INTENTS.GUILDS
-      | INTENTS.PUBLIC_GUILD_MESSAGES
-      | INTENTS.GROUP_AT_MESSAGE_CREATE
-      | INTENTS.C2C_MESSAGE_CREATE;
+      | INTENTS.PUBLIC_GUILD_MESSAGES;
+  }
+
+  /** 获取 API 基础 URL (沙箱/生产) */
+  private getApiBase(): string {
+    return this.config.sandbox
+      ? "https://sandbox.api.sgroup.qq.com"
+      : "https://api.sgroup.qq.com";
+  }
+
+  /** 获取 WebSocket URL (沙箱/生产) */
+  private getWsUrl(): string {
+    return this.config.sandbox
+      ? "wss://sandbox.api.sgroup.qq.com/websocket"
+      : "wss://api.sgroup.qq.com/websocket";
+  }
+
+  /** 获取分片配置 (无配置返回 undefined) */
+  private getShard(): [number, number] | undefined {
+    if (Array.isArray(this.config.shard) && this.config.shard.length === 2) {
+      return this.config.shard;
+    }
+    return undefined;
   }
 
   private connectWebSocket(): void {
     if (this._status !== "running") return;
 
-    const url = "wss://api.sgroup.qq.com/websocket";
-    console.info(`[QQOfficial] Connecting to WebSocket: ${url}`);
+    const url = this.getWsUrl();
+    console.info(`[QQOfficial] Connecting to WebSocket: ${url}${this.config.sandbox ? " (sandbox)" : ""}`);
 
     this.ws = new WebSocket(url, {
       headers: {
@@ -526,15 +1277,18 @@ export class QQOfficialAdapter extends PlatformAdapter {
           this.sessionId = ready.session_id;
           console.info(`[QQOfficial] Session ready, session_id=${this.sessionId}`);
           this.reconnectAttempts = 0;
+          this.emitRawEvent("READY", data);
           break;
         }
 
         case DISPATCH_TYPE.RESUMED: {
           console.info("[QQOfficial] Session resumed successfully");
           this.reconnectAttempts = 0;
+          this.emitRawEvent("RESUMED", data);
           break;
         }
 
+        // ── 消息事件 ──
         case DISPATCH_TYPE.GROUP_AT_MESSAGE_CREATE: {
           this.handleGroupAtMessage(data as GroupAtMessageData);
           break;
@@ -555,8 +1309,80 @@ export class QQOfficialAdapter extends PlatformAdapter {
           break;
         }
 
+        case DISPATCH_TYPE.MESSAGE_CREATE: {
+          // 私域机器人可接收所有消息 (无需@), 复用 handleAtMessage
+          this.handleAtMessage(data as AtMessageData);
+          break;
+        }
+
+        // ── 消息审核事件 ──
+        case DISPATCH_TYPE.MESSAGE_AUDIT_PASS:
+        case DISPATCH_TYPE.MESSAGE_AUDIT_REJECT: {
+          console.info(`[QQOfficial] Message audit: ${eventType}`);
+          this.emitRawEvent(eventType, data);
+          break;
+        }
+
+        // ── 频道事件 (GUILDS intent) ──
+        case DISPATCH_TYPE.GUILD_CREATE:
+        case DISPATCH_TYPE.GUILD_UPDATE:
+        case DISPATCH_TYPE.GUILD_DELETE:
+        case DISPATCH_TYPE.CHANNEL_CREATE:
+        case DISPATCH_TYPE.CHANNEL_UPDATE:
+        case DISPATCH_TYPE.CHANNEL_DELETE: {
+          this.emitRawEvent(eventType, data);
+          break;
+        }
+
+        // ── 频道成员事件 (GUILD_MEMBERS intent) ──
+        case DISPATCH_TYPE.GUILD_MEMBER_ADD:
+        case DISPATCH_TYPE.GUILD_MEMBER_UPDATE:
+        case DISPATCH_TYPE.GUILD_MEMBER_REMOVE: {
+          this.emitRawEvent(eventType, data);
+          break;
+        }
+
+        // ── 表情表态事件 (GUILD_MESSAGE_REACTIONS intent) ──
+        case DISPATCH_TYPE.MESSAGE_REACTION_ADD:
+        case DISPATCH_TYPE.MESSAGE_REACTION_REMOVE: {
+          this.emitRawEvent(eventType, data);
+          break;
+        }
+
+        // ── 互动事件 (INTERACTION intent) ──
+        case DISPATCH_TYPE.INTERACTION_CREATE: {
+          console.info("[QQOfficial] Interaction received (button callback)");
+          this.emitRawEvent("INTERACTION_CREATE", data);
+          break;
+        }
+
+        // ── 论坛事件 (FORUMS_EVENT intent, 仅私域) ──
+        case DISPATCH_TYPE.FORUM_THREAD_CREATE:
+        case DISPATCH_TYPE.FORUM_THREAD_UPDATE:
+        case DISPATCH_TYPE.FORUM_THREAD_DELETE:
+        case DISPATCH_TYPE.FORUM_POST_CREATE:
+        case DISPATCH_TYPE.FORUM_POST_DELETE:
+        case DISPATCH_TYPE.FORUM_REPLY_CREATE:
+        case DISPATCH_TYPE.FORUM_REPLY_DELETE:
+        case DISPATCH_TYPE.FORUM_PUBLISH_AUDIT_RESULT: {
+          this.emitRawEvent(eventType, data);
+          break;
+        }
+
+        // ── 音频事件 (AUDIO_ACTION intent) ──
+        case DISPATCH_TYPE.AUDIO_START:
+        case DISPATCH_TYPE.AUDIO_FINISH:
+        case DISPATCH_TYPE.AUDIO_ON_MIC:
+        case DISPATCH_TYPE.AUDIO_OFF_MIC: {
+          this.emitRawEvent(eventType, data);
+          break;
+        }
+
         default: {
-          // Unhandled dispatch event, ignore
+          // 未识别的 dispatch 事件, 通过 raw 事件分发
+          if (eventType) {
+            this.emitRawEvent(eventType, data);
+          }
           break;
         }
       }
@@ -750,17 +1576,23 @@ export class QQOfficialAdapter extends PlatformAdapter {
   private sendIdentify(): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
+    const d: Record<string, unknown> = {
+      token: `QQBot ${this.accessToken}`,
+      intents: this.getIntents(),
+    };
+
+    // 分片配置 (无配置默认 [0, 1])
+    const shard = this.getShard();
+    d.shard = shard ?? [0, 1];
+
     const payload: QQOfficialDispatchPayload = {
       op: OP.IDENTIFY,
-      d: {
-        token: `QQBot ${this.accessToken}`,
-        intents: this.getIntents(),
-        shard: [0, 1],
-      },
+      d,
     };
 
     this.ws.send(JSON.stringify(payload));
-    console.info("[QQOfficial] Identify sent");
+    const shardInfo = d.shard as [number, number];
+    console.info(`[QQOfficial] Identify sent (shard: ${shardInfo.join("/")})`);
   }
 
   private sendResume(): void {
@@ -864,15 +1696,50 @@ export class QQOfficialAdapter extends PlatformAdapter {
     return this.msgSeqCounter;
   }
 
-  /** Send group message via REST API */
-  async sendGroupMessage(groupOpenId: string, content: string, eventId: string): Promise<void> {
-    const url = `https://api.sgroup.qq.com/v2/groups/${groupOpenId}/messages`;
-    const body = JSON.stringify({
-      content,
-      msg_type: 0,
-      msg_id: eventId,
+  /** Build the JSON body for an extended send-message request. */
+  private buildSendBody(options: QQOfficialSendOptions, msgId?: string): Record<string, unknown> {
+    const body: Record<string, unknown> = {
+      msg_type: options.msg_type ?? 0,
+      msg_id: options.msg_id ?? msgId ?? "",
       msg_seq: this.nextMsgSeq(),
-    });
+    };
+    if (options.content !== undefined) body.content = options.content;
+    if (options.markdown) body.markdown = options.markdown;
+    if (options.ark) body.ark = options.ark;
+    if (options.embed) body.embed = options.embed;
+    if (options.media) body.media = options.media;
+    if (options.keyboard) body.keyboard = options.keyboard;
+    if (options.is_wakeup !== undefined) body.is_wakeup = options.is_wakeup;
+    return body;
+  }
+
+  /** Parse a send-message response into a result object. */
+  private async parseSendResult(response: Response): Promise<QQOfficialSendMessageResult> {
+    // 200/204 are success; body may be empty (204) or contain id/audit_id
+    if (response.status === 204) return {};
+    try {
+      const data = await response.json() as Record<string, unknown>;
+      return {
+        id: data.id as string | undefined,
+        message_id: (data.message_id ?? data.id) as string | undefined,
+        seq: data.seq as number | undefined,
+        audit_id: data.audit_id as string | undefined,
+      };
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * 发送群消息 (扩展版, 支持所有 msg_type)
+   * POST /v2/groups/{group_openid}/messages
+   */
+  async sendGroupMessageEx(
+    groupOpenId: string,
+    options: QQOfficialSendOptions,
+  ): Promise<QQOfficialSendMessageResult> {
+    const url = `${this.getApiBase()}/v2/groups/${groupOpenId}/messages`;
+    const body = JSON.stringify(this.buildSendBody(options));
 
     const response = await fetch(url, {
       method: "POST",
@@ -885,17 +1752,19 @@ export class QQOfficialAdapter extends PlatformAdapter {
       const text = await response.text();
       throw new Error(`[QQOfficial] Send group message failed: ${response.status} ${text}`);
     }
+    return this.parseSendResult(response);
   }
 
-  /** Send C2C message via REST API */
-  async sendC2CMessage(openid: string, content: string, eventId: string): Promise<void> {
-    const url = `https://api.sgroup.qq.com/v2/users/${openid}/messages`;
-    const body = JSON.stringify({
-      content,
-      msg_type: 0,
-      msg_id: eventId,
-      msg_seq: this.nextMsgSeq(),
-    });
+  /**
+   * 发送 C2C 单聊消息 (扩展版, 支持所有 msg_type + is_wakeup)
+   * POST /v2/users/{openid}/messages
+   */
+  async sendC2CMessageEx(
+    openid: string,
+    options: QQOfficialSendOptions,
+  ): Promise<QQOfficialSendMessageResult> {
+    const url = `${this.getApiBase()}/v2/users/${openid}/messages`;
+    const body = JSON.stringify(this.buildSendBody(options));
 
     const response = await fetch(url, {
       method: "POST",
@@ -908,17 +1777,32 @@ export class QQOfficialAdapter extends PlatformAdapter {
       const text = await response.text();
       throw new Error(`[QQOfficial] Send C2C message failed: ${response.status} ${text}`);
     }
+    return this.parseSendResult(response);
   }
 
-  /** Send guild channel message via REST API */
-  async sendGuildMessage(channelId: string, content: string): Promise<void> {
-    const url = `https://api.sgroup.qq.com/channels/${channelId}/messages`;
-    const body = JSON.stringify({ content });
+  /**
+   * 发送频道子频道消息 (扩展版)
+   * POST /channels/{channel_id}/messages
+   */
+  async sendGuildMessageEx(
+    channelId: string,
+    options: QQOfficialSendOptions,
+  ): Promise<QQOfficialSendMessageResult> {
+    const url = `${this.getApiBase()}/channels/${channelId}/messages`;
+    // 频道消息体: msg_type 频道默认 0, content 必填; msg_id/msg_seq 仅被动回复需要
+    const bodyObj: Record<string, unknown> = { content: options.content ?? "" };
+    if (options.msg_type !== undefined) bodyObj.msg_type = options.msg_type;
+    if (options.markdown) bodyObj.markdown = options.markdown;
+    if (options.ark) bodyObj.ark = options.ark;
+    if (options.embed) bodyObj.embed = options.embed;
+    if (options.media) bodyObj.media = options.media;
+    if (options.keyboard) bodyObj.keyboard = options.keyboard;
+    if (options.msg_id) bodyObj.msg_id = options.msg_id;
 
     const response = await fetch(url, {
       method: "POST",
       headers: this.getAuthHeaders(),
-      body,
+      body: JSON.stringify(bodyObj),
       signal: AbortSignal.timeout(15000),
     });
 
@@ -926,18 +1810,30 @@ export class QQOfficialAdapter extends PlatformAdapter {
       const text = await response.text();
       throw new Error(`[QQOfficial] Send guild message failed: ${response.status} ${text}`);
     }
+    return this.parseSendResult(response);
   }
 
-  /** Send direct message (guild DM) via REST API */
-  async sendDirectMessage(channelId: string, content: string): Promise<void> {
-    // For guild DMs, we post directly to the DM channel
-    const url = `https://api.sgroup.qq.com/channels/${channelId}/messages`;
-    const body = JSON.stringify({ content });
+  /**
+   * 发送频道私信消息 (扩展版)
+   * POST /channels/{channel_id}/messages (DM channel)
+   */
+  async sendDirectMessageEx(
+    channelId: string,
+    options: QQOfficialSendOptions,
+  ): Promise<QQOfficialSendMessageResult> {
+    const url = `${this.getApiBase()}/channels/${channelId}/messages`;
+    const bodyObj: Record<string, unknown> = { content: options.content ?? "" };
+    if (options.msg_type !== undefined) bodyObj.msg_type = options.msg_type;
+    if (options.markdown) bodyObj.markdown = options.markdown;
+    if (options.ark) bodyObj.ark = options.ark;
+    if (options.embed) bodyObj.embed = options.embed;
+    if (options.media) bodyObj.media = options.media;
+    if (options.keyboard) bodyObj.keyboard = options.keyboard;
 
     const response = await fetch(url, {
       method: "POST",
       headers: this.getAuthHeaders(),
-      body,
+      body: JSON.stringify(bodyObj),
       signal: AbortSignal.timeout(15000),
     });
 
@@ -945,11 +1841,212 @@ export class QQOfficialAdapter extends PlatformAdapter {
       const text = await response.text();
       throw new Error(`[QQOfficial] Send direct message failed: ${response.status} ${text}`);
     }
+    return this.parseSendResult(response);
+  }
+
+  // ── Backward-compatible simple send methods (return result for recall support) ──
+
+  /** Send group text message via REST API (backward compatible) */
+  async sendGroupMessage(groupOpenId: string, content: string, eventId: string): Promise<QQOfficialSendMessageResult> {
+    return this.sendGroupMessageEx(groupOpenId, { content, msg_type: 0, msg_id: eventId });
+  }
+
+  /** Send C2C text message via REST API (backward compatible) */
+  async sendC2CMessage(openid: string, content: string, eventId: string): Promise<QQOfficialSendMessageResult> {
+    return this.sendC2CMessageEx(openid, { content, msg_type: 0, msg_id: eventId });
+  }
+
+  /** Send guild channel text message via REST API (backward compatible) */
+  async sendGuildMessage(channelId: string, content: string): Promise<QQOfficialSendMessageResult> {
+    return this.sendGuildMessageEx(channelId, { content });
+  }
+
+  /** Send direct message (guild DM) via REST API (backward compatible) */
+  async sendDirectMessage(channelId: string, content: string): Promise<QQOfficialSendMessageResult> {
+    return this.sendDirectMessageEx(channelId, { content });
+  }
+
+  // ── REST API: Rich Media Upload ──
+
+  /**
+   * 上传群聊富媒体文件
+   * POST /v2/groups/{group_openid}/files
+   */
+  async uploadGroupRichMedia(
+    groupOpenId: string,
+    fileType: QQOfficialMediaType,
+    url: string,
+    fileData?: string,
+  ): Promise<QQOfficialRichMediaUploadResult> {
+    const apiUrl = `${this.getApiBase()}/v2/groups/${groupOpenId}/files`;
+    return this.uploadRichMedia(apiUrl, fileType, url, fileData);
+  }
+
+  /**
+   * 上传单聊富媒体文件
+   * POST /v2/users/{openid}/files
+   */
+  async uploadC2CRichMedia(
+    openid: string,
+    fileType: QQOfficialMediaType,
+    url: string,
+    fileData?: string,
+  ): Promise<QQOfficialRichMediaUploadResult> {
+    const apiUrl = `${this.getApiBase()}/v2/users/${openid}/files`;
+    return this.uploadRichMedia(apiUrl, fileType, url, fileData);
+  }
+
+  private async uploadRichMedia(
+    apiUrl: string,
+    fileType: QQOfficialMediaType,
+    url: string,
+    fileData?: string,
+  ): Promise<QQOfficialRichMediaUploadResult> {
+    const bodyObj: Record<string, unknown> = { file_type: fileType, url };
+    if (fileData) bodyObj.file_data = fileData;
+
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify(bodyObj),
+      signal: AbortSignal.timeout(30000),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] Upload rich media failed: ${response.status} ${text}`);
+    }
+
+    return await response.json() as QQOfficialRichMediaUploadResult;
+  }
+
+  // ── REST API: Message Recall (Delete) ──
+
+  /**
+   * 撤回单聊消息
+   * DELETE /v2/users/{openid}/messages/{message_id}
+   */
+  async deleteC2CMessage(openid: string, messageId: string): Promise<void> {
+    const url = `${this.getApiBase()}/v2/users/${openid}/messages/${messageId}`;
+    await this.deleteMessage(url);
+  }
+
+  /**
+   * 撤回群聊消息 (机器人自己的, 或被设为管理员后撤回成员的)
+   * DELETE /v2/groups/{group_openid}/messages/{message_id}
+   */
+  async deleteGroupMessage(groupOpenId: string, messageId: string): Promise<void> {
+    const url = `${this.getApiBase()}/v2/groups/${groupOpenId}/messages/${messageId}`;
+    await this.deleteMessage(url);
+  }
+
+  /**
+   * 撤回频道子频道消息
+   * DELETE /channels/{channel_id}/messages/{message_id}?hidetip=false
+   * @param hideTip 是否隐藏提示小灰条, 默认 false
+   */
+  async deleteGuildMessage(channelId: string, messageId: string, hideTip: boolean = false): Promise<void> {
+    const url = `${this.getApiBase()}/channels/${channelId}/messages/${messageId}?hidetip=${hideTip}`;
+    await this.deleteMessage(url);
+  }
+
+  private async deleteMessage(url: string): Promise<void> {
+    const response = await fetch(url, {
+      method: "DELETE",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] Delete message failed: ${response.status} ${text}`);
+    }
+  }
+
+  // ── REST API: Emoji Reactions (Channel only) ──
+
+  /**
+   * 发表表情表态 (频道场景)
+   * PUT /channels/{channel_id}/messages/{message_id}/reactions/{type}/{id}
+   * @param type 表情类型, 参考 EmojiType
+   * @param id 表情 ID, 参考 Emoji 列表
+   */
+  async addReaction(
+    channelId: string,
+    messageId: string,
+    type: number,
+    id: string,
+  ): Promise<void> {
+    const url = `${this.getApiBase()}/channels/${channelId}/messages/${messageId}/reactions/${type}/${id}`;
+    const response = await fetch(url, {
+      method: "PUT",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] Add reaction failed: ${response.status} ${text}`);
+    }
+  }
+
+  /**
+   * 删除机器人发表的表情表态 (频道场景)
+   * DELETE /channels/{channel_id}/messages/{message_id}/reactions/{type}/{id}
+   */
+  async deleteReaction(
+    channelId: string,
+    messageId: string,
+    type: number,
+    id: string,
+  ): Promise<void> {
+    const url = `${this.getApiBase()}/channels/${channelId}/messages/${messageId}/reactions/${type}/${id}`;
+    const response = await fetch(url, {
+      method: "DELETE",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] Delete reaction failed: ${response.status} ${text}`);
+    }
+  }
+
+  /**
+   * 获取消息表情表态的用户列表 (频道场景)
+   * GET /channels/{channel_id}/messages/{message_id}/reactions/{type}/{id}?cookie=&limit=
+   */
+  async getReactionUsers(
+    channelId: string,
+    messageId: string,
+    type: number,
+    id: string,
+    options: { cookie?: string; limit?: number } = {},
+  ): Promise<QQOfficialReactionUsersResult> {
+    const params = new URLSearchParams();
+    if (options.cookie) params.set("cookie", options.cookie);
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    const query = params.toString();
+    const url = `${this.getApiBase()}/channels/${channelId}/messages/${messageId}/reactions/${type}/${id}${query ? `?${query}` : ""}`;
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] Get reaction users failed: ${response.status} ${text}`);
+    }
+
+    return await response.json() as QQOfficialReactionUsersResult;
   }
 
   /** Create a DM session for guild direct messages */
   async createDmSession(recipientId: string): Promise<string> {
-    const url = "https://api.sgroup.qq.com/users/@me/dms";
+    const url = `${this.getApiBase()}/users/@me/dms`;
     const body = JSON.stringify({ recipient_id: recipientId });
 
     const response = await fetch(url, {
@@ -1016,6 +2113,1095 @@ export class QQOfficialAdapter extends PlatformAdapter {
     } catch (e) {
       console.error(`[QQOfficial] Proactive message failed:`, e);
       return false;
+    }
+  }
+
+  // ── Phase 2: Guild API ──
+
+  /**
+   * 获取频道信息
+   * GET /guilds/{guild_id}
+   */
+  async getGuild(guildId: string): Promise<QQOfficialGuild> {
+    const url = `${this.getApiBase()}/guilds/${guildId}`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] getGuild failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialGuild;
+  }
+
+  /**
+   * 获取机器人加入的频道列表
+   * GET /users/@me/guilds?before=&after=&limit=
+   */
+  async getGuilds(options?: { before?: string; after?: string; limit?: number }): Promise<QQOfficialGuild[]> {
+    const params = new URLSearchParams();
+    if (options?.before) params.set("before", options.before);
+    if (options?.after) params.set("after", options.after);
+    if (options?.limit !== undefined) params.set("limit", String(options.limit));
+    const query = params.toString() ? `?${params.toString()}` : "";
+    const url = `${this.getApiBase()}/users/@me/guilds${query}`;
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] getGuilds failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialGuild[];
+  }
+
+  /**
+   * 获取频道成员列表 (私域机器人可用, 支持分页)
+   * GET /guilds/{guild_id}/members?after=&limit=
+   */
+  async getGuildMembers(
+    guildId: string,
+    options?: { after?: string; limit?: number },
+  ): Promise<QQOfficialMember[]> {
+    const params = new URLSearchParams();
+    if (options?.after) params.set("after", options.after);
+    params.set("limit", String(options?.limit ?? 1));
+    const url = `${this.getApiBase()}/guilds/${guildId}/members?${params.toString()}`;
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] getGuildMembers failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialMember[];
+  }
+
+  /**
+   * 获取频道成员详情
+   * GET /guilds/{guild_id}/members/{user_id}
+   */
+  async getGuildMember(guildId: string, userId: string): Promise<QQOfficialMember> {
+    const url = `${this.getApiBase()}/guilds/${guildId}/members/${userId}`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] getGuildMember failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialMember;
+  }
+
+  /**
+   * 删除频道成员 (踢出)
+   * DELETE /guilds/{guild_id}/members/{user_id}?add_blacklist=&delete_message_days=
+   */
+  async deleteGuildMember(
+    guildId: string,
+    userId: string,
+    options?: { addBlacklist?: boolean; deleteMessageDays?: number },
+  ): Promise<void> {
+    const params = new URLSearchParams();
+    if (options?.addBlacklist !== undefined) params.set("add_blacklist", String(options.addBlacklist));
+    if (options?.deleteMessageDays !== undefined) params.set("delete_message_days", String(options.deleteMessageDays));
+    const query = params.toString() ? `?${params.toString()}` : "";
+    const url = `${this.getApiBase()}/guilds/${guildId}/members/${userId}${query}`;
+
+    const response = await fetch(url, {
+      method: "DELETE",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] deleteGuildMember failed: ${response.status} ${text}`);
+    }
+  }
+
+  /**
+   * 修改频道成员 (修改昵称/禁言/头像)
+   * PATCH /guilds/{guild_id}/members/{user_id}
+   */
+  async modifyGuildMember(
+    guildId: string,
+    userId: string,
+    options: QQOfficialModifyMemberOptions,
+  ): Promise<void> {
+    const url = `${this.getApiBase()}/guilds/${guildId}/members/${userId}`;
+    const body: Record<string, unknown> = {};
+    if (options.nick !== undefined) body.nick = options.nick;
+    if (options.mute_seconds !== undefined) body.mute_seconds = options.mute_seconds;
+    if (options.avatar !== undefined) body.avatar = options.avatar;
+
+    const response = await fetch(url, {
+      method: "PATCH",
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] modifyGuildMember failed: ${response.status} ${text}`);
+    }
+  }
+
+  /**
+   * 禁言频道成员 (便捷方法)
+   * 等同于 modifyGuildMember({ mute_seconds: String(seconds) })
+   */
+  async muteGuildMember(guildId: string, userId: string, seconds: number): Promise<void> {
+    await this.modifyGuildMember(guildId, userId, { mute_seconds: String(seconds) });
+  }
+
+  /**
+   * 解除频道成员禁言 (便捷方法)
+   */
+  async unmuteGuildMember(guildId: string, userId: string): Promise<void> {
+    await this.modifyGuildMember(guildId, userId, { mute_seconds: "0" });
+  }
+
+  /**
+   * 获取频道身份组列表
+   * GET /guilds/{guild_id}/roles
+   */
+  async getGuildRoles(guildId: string): Promise<QQOfficialRole[]> {
+    const url = `${this.getApiBase()}/guilds/${guildId}/roles`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] getGuildRoles failed: ${response.status} ${text}`);
+    }
+    const data = await response.json() as { roles: QQOfficialRole[] };
+    return data.roles;
+  }
+
+  /**
+   * 获取身份组成员列表 (分页)
+   * GET /guilds/{guild_id}/roles/{role_id}/members?start_index=&limit=
+   */
+  async getRoleMembers(
+    guildId: string,
+    roleId: string,
+    options?: { startIndex?: string; limit?: number },
+  ): Promise<{ members: QQOfficialMember[]; next_start_index?: string }> {
+    const params = new URLSearchParams();
+    if (options?.startIndex) params.set("start_index", options.startIndex);
+    params.set("limit", String(options?.limit ?? 1));
+    const url = `${this.getApiBase()}/guilds/${guildId}/roles/${roleId}/members?${params.toString()}`;
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] getRoleMembers failed: ${response.status} ${text}`);
+    }
+    return await response.json() as { members: QQOfficialMember[]; next_start_index?: string };
+  }
+
+  /**
+   * 为成员添加身份组
+   * PUT /guilds/{guild_id}/members/{user_id}/roles/{role_id}
+   */
+  async addRoleToMember(guildId: string, userId: string, roleId: string): Promise<void> {
+    const url = `${this.getApiBase()}/guilds/${guildId}/members/${userId}/roles/${roleId}`;
+    const response = await fetch(url, {
+      method: "PUT",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] addRoleToMember failed: ${response.status} ${text}`);
+    }
+  }
+
+  /**
+   * 移除成员的身份组
+   * DELETE /guilds/{guild_id}/members/{user_id}/roles/{role_id}
+   */
+  async removeRoleFromMember(guildId: string, userId: string, roleId: string): Promise<void> {
+    const url = `${this.getApiBase()}/guilds/${guildId}/members/${userId}/roles/${roleId}`;
+    const response = await fetch(url, {
+      method: "DELETE",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] removeRoleFromMember failed: ${response.status} ${text}`);
+    }
+  }
+
+  // ── Phase 2: Channel API ──
+
+  /**
+   * 获取频道下的子频道列表
+   * GET /guilds/{guild_id}/channels
+   */
+  async getGuildChannels(guildId: string): Promise<QQOfficialChannel[]> {
+    const url = `${this.getApiBase()}/guilds/${guildId}/channels`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] getGuildChannels failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialChannel[];
+  }
+
+  /**
+   * 获取子频道详情
+   * GET /channels/{channel_id}
+   */
+  async getChannel(channelId: string): Promise<QQOfficialChannel> {
+    const url = `${this.getApiBase()}/channels/${channelId}`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] getChannel failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialChannel;
+  }
+
+  /**
+   * 创建子频道
+   * POST /guilds/{guild_id}/channels
+   */
+  async createChannel(guildId: string, options: QQOfficialChannelCreateOptions): Promise<QQOfficialChannel> {
+    const url = `${this.getApiBase()}/guilds/${guildId}/channels`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify(options),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] createChannel failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialChannel;
+  }
+
+  /**
+   * 修改子频道
+   * PATCH /channels/{channel_id}
+   */
+  async updateChannel(channelId: string, options: QQOfficialChannelUpdateOptions): Promise<QQOfficialChannel> {
+    const url = `${this.getApiBase()}/channels/${channelId}`;
+    const response = await fetch(url, {
+      method: "PATCH",
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify(options),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] updateChannel failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialChannel;
+  }
+
+  /**
+   * 删除子频道
+   * DELETE /channels/{channel_id}
+   */
+  async deleteChannel(channelId: string): Promise<void> {
+    const url = `${this.getApiBase()}/channels/${channelId}`;
+    const response = await fetch(url, {
+      method: "DELETE",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] deleteChannel failed: ${response.status} ${text}`);
+    }
+  }
+
+  /**
+   * 获取子频道在线成员数
+   * GET /channels/{channel_id}/online_nums
+   */
+  async getChannelOnlineNums(channelId: string): Promise<QQOfficialOnlineNums> {
+    const url = `${this.getApiBase()}/channels/${channelId}/online_nums`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] getChannelOnlineNums failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialOnlineNums;
+  }
+
+  /**
+   * 获取子频道用户权限
+   * GET /channels/{channel_id}/permissions/{user_id}
+   */
+  async getChannelUserPermissions(channelId: string, userId: string): Promise<QQOfficialChannelPermissions> {
+    const url = `${this.getApiBase()}/channels/${channelId}/permissions/${userId}`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] getChannelUserPermissions failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialChannelPermissions;
+  }
+
+  /**
+   * 修改子频道用户权限 (PUT 为覆盖, PATCH 为增量)
+   * PUT/PATCH /channels/{channel_id}/permissions/{user_id}
+   * @param additive true=增量修改(PATCH), false=覆盖(PUT)
+   */
+  async updateChannelUserPermissions(
+    channelId: string,
+    userId: string,
+    permissions: QQOfficialChannelPermissions,
+    additive: boolean = false,
+  ): Promise<void> {
+    const url = `${this.getApiBase()}/channels/${channelId}/permissions/${userId}`;
+    const response = await fetch(url, {
+      method: additive ? "PATCH" : "PUT",
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify({ add: permissions.permissions ?? "", remove: "" }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] updateChannelUserPermissions failed: ${response.status} ${text}`);
+    }
+  }
+
+  /**
+   * 获取子频道身份组权限
+   * GET /channels/{channel_id}/permissions/{role_id}
+   */
+  async getChannelRolePermissions(channelId: string, roleId: string): Promise<QQOfficialChannelPermissions> {
+    const url = `${this.getApiBase()}/channels/${channelId}/permissions/${roleId}`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] getChannelRolePermissions failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialChannelPermissions;
+  }
+
+  /**
+   * 修改子频道身份组权限
+   * PUT/PATCH /channels/{channel_id}/permissions/{role_id}
+   * @param additive true=增量(PATCH), false=覆盖(PUT)
+   */
+  async updateChannelRolePermissions(
+    channelId: string,
+    roleId: string,
+    permissions: QQOfficialChannelPermissions,
+    additive: boolean = false,
+  ): Promise<void> {
+    const url = `${this.getApiBase()}/channels/${channelId}/permissions/${roleId}`;
+    const response = await fetch(url, {
+      method: additive ? "PATCH" : "PUT",
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify({ add: permissions.permissions ?? "", remove: "" }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] updateChannelRolePermissions failed: ${response.status} ${text}`);
+    }
+  }
+
+  // ── Phase 2: Announces API ──
+
+  /**
+   * 获取频道公告列表
+   * GET /guilds/{guild_id}/announces
+   */
+  async getAnnounces(guildId: string): Promise<QQOfficialAnnounce[]> {
+    const url = `${this.getApiBase()}/guilds/${guildId}/announces`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] getAnnounces failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialAnnounce[];
+  }
+
+  /**
+   * 创建频道公告 (将消息设置为频道公告)
+   * POST /guilds/{guild_id}/announces
+   */
+  async createAnnounce(guildId: string, options: QQOfficialAnnounceCreateOptions): Promise<QQOfficialAnnounce> {
+    const url = `${this.getApiBase()}/guilds/${guildId}/announces`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify(options),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] createAnnounce failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialAnnounce;
+  }
+
+  /**
+   * 删除频道公告
+   * DELETE /guilds/{guild_id}/announces/{message_id}
+   */
+  async deleteAnnounce(guildId: string, messageId: string): Promise<void> {
+    const url = `${this.getApiBase()}/guilds/${guildId}/announces/${messageId}`;
+    const response = await fetch(url, {
+      method: "DELETE",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] deleteAnnounce failed: ${response.status} ${text}`);
+    }
+  }
+
+  // ── Phase 2: Schedule API ──
+
+  /**
+   * 获取日程列表 (频道日程子频道)
+   * GET /channels/{channel_id}/schedules?since=
+   */
+  async getSchedules(channelId: string, since?: string): Promise<QQOfficialSchedule[]> {
+    const params = new URLSearchParams();
+    if (since) params.set("since", since);
+    const query = params.toString() ? `?${params.toString()}` : "";
+    const url = `${this.getApiBase()}/channels/${channelId}/schedules${query}`;
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] getSchedules failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialSchedule[];
+  }
+
+  /**
+   * 创建日程
+   * POST /channels/{channel_id}/schedules
+   */
+  async createSchedule(channelId: string, options: QQOfficialScheduleOptions): Promise<QQOfficialSchedule> {
+    const url = `${this.getApiBase()}/channels/${channelId}/schedules`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify({ schedule: options }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] createSchedule failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialSchedule;
+  }
+
+  /**
+   * 修改日程
+   * PATCH /channels/{channel_id}/schedules/{schedule_id}
+   */
+  async updateSchedule(
+    channelId: string,
+    scheduleId: string,
+    options: QQOfficialScheduleOptions,
+  ): Promise<QQOfficialSchedule> {
+    const url = `${this.getApiBase()}/channels/${channelId}/schedules/${scheduleId}`;
+    const response = await fetch(url, {
+      method: "PATCH",
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify({ schedule: options }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] updateSchedule failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialSchedule;
+  }
+
+  /**
+   * 删除日程
+   * DELETE /channels/{channel_id}/schedules/{schedule_id}
+   */
+  async deleteSchedule(channelId: string, scheduleId: string): Promise<void> {
+    const url = `${this.getApiBase()}/channels/${channelId}/schedules/${scheduleId}`;
+    const response = await fetch(url, {
+      method: "DELETE",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] deleteSchedule failed: ${response.status} ${text}`);
+    }
+  }
+
+  // ── Phase 2: API Permissions ──
+
+  /**
+   * 获取机器人在频道可用权限列表
+   * GET /guilds/{guild_id}/api_permission
+   */
+  async getApiPermissions(guildId: string): Promise<Array<{ path: string; method: string; desc: string }>> {
+    const url = `${this.getApiBase()}/guilds/${guildId}/api_permission`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] getApiPermissions failed: ${response.status} ${text}`);
+    }
+    const data = await response.json() as { apis: Array<{ path: string; method: string; desc: string }> };
+    return data.apis;
+  }
+
+  /**
+   * 发送机器人在频道接口权限的授权链接
+   * POST /guilds/{guild_id}/api_permission/demand
+   */
+  async createApiPermissionDemand(
+    guildId: string,
+    options: QQOfficialApiPermissionDemandOptions,
+  ): Promise<QQOfficialApiPermissionDemand> {
+    const url = `${this.getApiBase()}/guilds/${guildId}/api_permission/demand`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify(options),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] createApiPermissionDemand failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialApiPermissionDemand;
+  }
+
+  // ── Phase 4: Gateway API ──
+
+  /**
+   * 获取 WSS 接入点
+   * GET /gateway
+   */
+  async getGateway(): Promise<QQOfficialGateway> {
+    const url = `${this.getApiBase()}/gateway`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] getGateway failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialGateway;
+  }
+
+  /**
+   * 获取带分片信息的 WSS 接入点
+   * GET /gateway/bot
+   */
+  async getGatewayBot(): Promise<QQOfficialGatewayBot> {
+    const url = `${this.getApiBase()}/gateway/bot`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] getGatewayBot failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialGatewayBot;
+  }
+
+  // ── Phase 4: User API ──
+
+  /**
+   * 获取机器人自身信息
+   * GET /users/@me
+   */
+  async getBotSelfInfo(): Promise<QQOfficialUser> {
+    const url = `${this.getApiBase()}/users/@me`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] getBotSelfInfo failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialUser;
+  }
+
+  // ── Phase 4: Channel Message Management API ──
+
+  /**
+   * 获取频道消息列表 (私域机器人可用)
+   * GET /channels/{channel_id}/messages
+   */
+  async listChannelMessages(
+    channelId: string,
+    options?: QQOfficialListMessagesOptions,
+  ): Promise<QQOfficialChannelMessage[]> {
+    const params = new URLSearchParams();
+    if (options?.before) params.set("before", options.before);
+    if (options?.after) params.set("after", options.after);
+    if (options?.limit !== undefined) params.set("limit", String(options.limit));
+    if (options?.type !== undefined) params.set("type", String(options.type));
+    const query = params.toString() ? `?${params.toString()}` : "";
+    const url = `${this.getApiBase()}/channels/${channelId}/messages${query}`;
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] listChannelMessages failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialChannelMessage[];
+  }
+
+  /**
+   * 获取频道消息详情
+   * GET /channels/{channel_id}/messages/{message_id}
+   */
+  async getChannelMessage(channelId: string, messageId: string): Promise<QQOfficialChannelMessage> {
+    const url = `${this.getApiBase()}/channels/${channelId}/messages/${messageId}`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] getChannelMessage failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialChannelMessage;
+  }
+
+  /**
+   * 修改频道消息 (仅 markdown + keyboard 可修改)
+   * PATCH /channels/{channel_id}/messages/{message_id}
+   */
+  async patchChannelMessage(
+    channelId: string,
+    messageId: string,
+    options: QQOfficialPatchMessageOptions,
+  ): Promise<QQOfficialChannelMessage> {
+    const url = `${this.getApiBase()}/channels/${channelId}/messages/${messageId}`;
+    const response = await fetch(url, {
+      method: "PATCH",
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify(options),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] patchChannelMessage failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialChannelMessage;
+  }
+
+  // ── Phase 4: Role CRUD API ──
+
+  /**
+   * 创建身份组
+   * POST /guilds/{guild_id}/roles
+   */
+  async createGuildRole(guildId: string, options: QQOfficialRoleOptions): Promise<QQOfficialRoleCreateResult> {
+    const url = `${this.getApiBase()}/guilds/${guildId}/roles`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify(options),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] createGuildRole failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialRoleCreateResult;
+  }
+
+  /**
+   * 修改身份组
+   * PATCH /guilds/{guild_id}/roles/{role_id}
+   */
+  async updateGuildRole(
+    guildId: string,
+    roleId: string,
+    options: QQOfficialRoleOptions,
+  ): Promise<QQOfficialRoleCreateResult> {
+    const url = `${this.getApiBase()}/guilds/${guildId}/roles/${roleId}`;
+    const response = await fetch(url, {
+      method: "PATCH",
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify(options),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] updateGuildRole failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialRoleCreateResult;
+  }
+
+  /**
+   * 删除身份组
+   * DELETE /guilds/{guild_id}/roles/{role_id}
+   */
+  async deleteGuildRole(guildId: string, roleId: string): Promise<void> {
+    const url = `${this.getApiBase()}/guilds/${guildId}/roles/${roleId}`;
+    const response = await fetch(url, {
+      method: "DELETE",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] deleteGuildRole failed: ${response.status} ${text}`);
+    }
+  }
+
+  // ── Phase 4: Pins API ──
+
+  /**
+   * 添加精华消息
+   * PUT /channels/{channel_id}/pins/{message_id}
+   */
+  async addPinMessage(channelId: string, messageId: string): Promise<QQOfficialPinsResult> {
+    const url = `${this.getApiBase()}/channels/${channelId}/pins/${messageId}`;
+    const response = await fetch(url, {
+      method: "PUT",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] addPinMessage failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialPinsResult;
+  }
+
+  /**
+   * 删除精华消息
+   * DELETE /channels/{channel_id}/pins/{message_id}
+   */
+  async deletePinMessage(channelId: string, messageId: string): Promise<void> {
+    const url = `${this.getApiBase()}/channels/${channelId}/pins/${messageId}`;
+    const response = await fetch(url, {
+      method: "DELETE",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] deletePinMessage failed: ${response.status} ${text}`);
+    }
+  }
+
+  /**
+   * 获取精华消息列表
+   * GET /channels/{channel_id}/pins
+   */
+  async listPinMessages(channelId: string): Promise<QQOfficialPinsListResult> {
+    const url = `${this.getApiBase()}/channels/${channelId}/pins`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] listPinMessages failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialPinsListResult;
+  }
+
+  // ── Phase 4: Speak Privilege Settings API ──
+
+  /**
+   * 获取子频道发言权限设置
+   * GET /guilds/{guild_id}/speak_privilege_settings
+   */
+  async getSpeakPrivilegeSettings(guildId: string): Promise<QQOfficialSpeakPrivilegeSettings> {
+    const url = `${this.getApiBase()}/guilds/${guildId}/speak_privilege_settings`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] getSpeakPrivilegeSettings failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialSpeakPrivilegeSettings;
+  }
+
+  /**
+   * 修改子频道发言权限设置
+   * PUT /guilds/{guild_id}/speak_privilege_settings
+   */
+  async updateSpeakPrivilegeSettings(
+    guildId: string,
+    settings: QQOfficialSpeakPrivilegeSettings,
+  ): Promise<QQOfficialSpeakPrivilegeSettings> {
+    const url = `${this.getApiBase()}/guilds/${guildId}/speak_privilege_settings`;
+    const response = await fetch(url, {
+      method: "PUT",
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify(settings),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] updateSpeakPrivilegeSettings failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialSpeakPrivilegeSettings;
+  }
+
+  /**
+   * 获取频道消息频率设置
+   * GET /guilds/{guild_id}/message_setting
+   */
+  async getMessageSetting(guildId: string): Promise<QQOfficialMessageSetting> {
+    const url = `${this.getApiBase()}/guilds/${guildId}/message_setting`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] getMessageSetting failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialMessageSetting;
+  }
+
+  // ── Phase 4: Forum API (仅私域机器人) ──
+
+  /**
+   * 获取论坛帖子列表
+   * GET /channels/{channel_id}/threads
+   */
+  async listThreads(channelId: string): Promise<QQOfficialThreadListResult> {
+    const url = `${this.getApiBase()}/channels/${channelId}/threads`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] listThreads failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialThreadListResult;
+  }
+
+  /**
+   * 获取论坛帖子详情
+   * GET /channels/{channel_id}/threads/{thread_id}
+   */
+  async getThread(channelId: string, threadId: string): Promise<QQOfficialThreadDetail> {
+    const url = `${this.getApiBase()}/channels/${channelId}/threads/${threadId}`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] getThread failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialThreadDetail;
+  }
+
+  /**
+   * 发布论坛帖子
+   * PUT /channels/{channel_id}/threads
+   */
+  async publishThread(
+    channelId: string,
+    title: string,
+    content: string,
+    format?: number,
+  ): Promise<QQOfficialThread> {
+    const url = `${this.getApiBase()}/channels/${channelId}/threads`;
+    const body: Record<string, unknown> = { title, content };
+    if (format !== undefined) body.format = format;
+    const response = await fetch(url, {
+      method: "PUT",
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] publishThread failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialThread;
+  }
+
+  /**
+   * 删除论坛帖子
+   * DELETE /channels/{channel_id}/threads/{thread_id}
+   */
+  async deleteThread(channelId: string, threadId: string): Promise<void> {
+    const url = `${this.getApiBase()}/channels/${channelId}/threads/${threadId}`;
+    const response = await fetch(url, {
+      method: "DELETE",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] deleteThread failed: ${response.status} ${text}`);
+    }
+  }
+
+  /**
+   * 获取论坛评论列表
+   * GET /channels/{channel_id}/threads/{thread_id}/comments
+   */
+  async listThreadComments(channelId: string, threadId: string): Promise<QQOfficialCommentListResult> {
+    const url = `${this.getApiBase()}/channels/${channelId}/threads/${threadId}/comments`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] listThreadComments failed: ${response.status} ${text}`);
+    }
+    return await response.json() as QQOfficialCommentListResult;
+  }
+
+  // ── Phase 4: Audio API (仅音频机器人) ──
+
+  /**
+   * 音频控制 (播放/暂停/继续/停止)
+   * POST /channels/{channel_id}/audio
+   */
+  async controlAudio(channelId: string, control: QQOfficialAudioControl): Promise<void> {
+    const url = `${this.getApiBase()}/channels/${channelId}/audio`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify(control),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] controlAudio failed: ${response.status} ${text}`);
+    }
+  }
+
+  /** 便捷: 播放音频 */
+  async playAudio(channelId: string, audioUrl: string, text?: string): Promise<void> {
+    await this.controlAudio(channelId, { audio_url: audioUrl, text, status: 0 });
+  }
+
+  /** 便捷: 暂停音频 */
+  async pauseAudio(channelId: string): Promise<void> {
+    await this.controlAudio(channelId, { audio_url: "", status: 1 });
+  }
+
+  /** 便捷: 继续播放 */
+  async resumeAudio(channelId: string): Promise<void> {
+    await this.controlAudio(channelId, { audio_url: "", status: 2 });
+  }
+
+  /** 便捷: 停止音频 */
+  async stopAudio(channelId: string): Promise<void> {
+    await this.controlAudio(channelId, { audio_url: "", status: 3 });
+  }
+
+  /**
+   * 机器人上麦
+   * PUT /channels/{channel_id}/mic
+   */
+  async onMic(channelId: string): Promise<void> {
+    const url = `${this.getApiBase()}/channels/${channelId}/mic`;
+    const response = await fetch(url, {
+      method: "PUT",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] onMic failed: ${response.status} ${text}`);
+    }
+  }
+
+  /**
+   * 机器人下麦
+   * DELETE /channels/{channel_id}/mic
+   */
+  async offMic(channelId: string): Promise<void> {
+    const url = `${this.getApiBase()}/channels/${channelId}/mic`;
+    const response = await fetch(url, {
+      method: "DELETE",
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`[QQOfficial] offMic failed: ${response.status} ${text}`);
     }
   }
 }
