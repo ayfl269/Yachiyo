@@ -73,6 +73,7 @@ interface AgentConfig {
 interface Provider {
   id: string
   type: string
+  provider_type?: string
 }
 
 interface Persona {
@@ -134,7 +135,11 @@ export default function ConfigManager() {
       }
       if (provRes.ok) {
         const data = await provRes.json()
-        setProvidersList(data.providers.map((p: { id: string; type: string }) => ({ id: p.id, type: p.type })))
+        setProvidersList(data.providers.map((p: { id: string; type: string; config?: { provider_type?: string } }) => ({
+          id: p.id,
+          type: p.type,
+          provider_type: p.config?.provider_type || (p.type?.includes('embedding') ? 'embedding' : p.type?.includes('tts') ? 'text_to_speech' : p.type?.includes('stt') ? 'speech_to_text' : 'chat_completion'),
+        })))
       }
       if (personaRes.ok) {
         const data = await personaRes.json()
@@ -558,7 +563,7 @@ export default function ConfigManager() {
                   className="form-control font-mono"
                 >
                   <option value="">(未选择)</option>
-                  {providersList.map((p) => (
+                  {providersList.filter((p) => p.provider_type === 'chat_completion').map((p) => (
                     <option key={p.id} value={p.id}>{p.id} ({p.type})</option>
                   ))}
                 </select>
@@ -626,7 +631,7 @@ export default function ConfigManager() {
                   >
                     <option value="">选择要添加的模型…</option>
                     {providersList
-                      .filter((p) => !config.fallbackProviderIds.includes(p.id) && p.id !== config.defaultProviderId)
+                      .filter((p) => p.provider_type === 'chat_completion' && !config.fallbackProviderIds.includes(p.id) && p.id !== config.defaultProviderId)
                       .map((p) => (
                         <option key={p.id} value={p.id}>{p.id} ({p.type})</option>
                       ))}

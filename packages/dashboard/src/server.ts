@@ -2360,20 +2360,31 @@ export class DashboardServer {
         }
 
         // 构建 loadConfig
-        const loadConfig: Record<string, unknown> = {
-          id: providerConfig.id,
-          type: sourceType,
-          model: providerConfig.model || "",
-          apiKey,
-          baseUrl: apiBase,
-          provider_source_id: providerConfig.provider_source_id || "",
-          provider_type: providerConfig.provider_type || "chat_completion",
-          modalities: providerConfig.modalities || [],
-          custom_extra_body: providerConfig.custom_extra_body || {},
-          max_context_tokens: providerConfig.max_context_tokens || 0,
-          reasoning: providerConfig.reasoning || false,
-          enable: providerConfig.enable !== false,
-        };
+        // 非聊天类提供商（embedding/rerank/TTS/STT）需要保留 dimensions/timeout/proxy 等字段
+        const nonChatTypes = new Set(["embedding", "rerank", "text_to_speech", "speech_to_text"]);
+        const isNonChat = nonChatTypes.has(String(providerConfig.provider_type || ""));
+
+        const loadConfig: Record<string, unknown> = isNonChat
+          ? {
+              ...providerConfig,
+              type: sourceType,
+              apiKey,
+              baseUrl: apiBase,
+            }
+          : {
+              id: providerConfig.id,
+              type: sourceType,
+              model: providerConfig.model || "",
+              apiKey,
+              baseUrl: apiBase,
+              provider_source_id: providerConfig.provider_source_id || "",
+              provider_type: providerConfig.provider_type || "chat_completion",
+              modalities: providerConfig.modalities || [],
+              custom_extra_body: providerConfig.custom_extra_body || {},
+              max_context_tokens: providerConfig.max_context_tokens || 0,
+              reasoning: providerConfig.reasoning || false,
+              enable: providerConfig.enable !== false,
+            };
 
         // 合并 source 的额外配置
         if (sqliteStore && providerConfig.provider_source_id) {
@@ -2381,6 +2392,13 @@ export class DashboardServer {
           if (source && source.extra_config) {
             Object.assign(loadConfig, source.extra_config);
           }
+        }
+
+        // Check if provider ID already exists
+        if (this.ctx.providerManager.getProviderConfigById(providerConfig.id, false, false)) {
+          res.writeHead(200);
+          res.end(JSON.stringify({ status: "error", message: `提供商 ID "${providerConfig.id}" 已存在，请使用不同的 ID` }));
+          return;
         }
 
         await this.ctx.providerManager.loadProvider(loadConfig as unknown as Parameters<typeof this.ctx.providerManager.loadProvider>[0]);
@@ -2451,6 +2469,14 @@ export class DashboardServer {
           }
         }
 
+        // 如果 apiKey 是掩码占位符或为空（用户未修改密钥），保留已存储的真实密钥
+        if (apiKey === "***" || apiKey === "********" || apiKey === "") {
+          const existingConfig = this.ctx.providerManager.getProviderConfigById(id, true, true);
+          if (existingConfig) {
+            apiKey = String(existingConfig.apiKey || existingConfig.key || "");
+          }
+        }
+
         const loadConfig: Record<string, unknown> = {
           ...config,
           id: config.id || id,
@@ -2504,29 +2530,55 @@ export class DashboardServer {
           return;
         }
 
-        // 使用完整配置（含实际模型名）创建临时 provider 进行测试，确保测试结果反映真实对话行为
-        const { createChatProvider } = await import("@yachiyo/provider/factory.js");
-        const prov = createChatProvider(type as unknown as Parameters<typeof createChatProvider>[0], { apiKey, baseUrl, model, modalities: providerConfig.modalities || [] } as unknown as Parameters<typeof createChatProvider>[1]);
+        const embeddingTypes = new Set(["openai_embedding", "gemini_embedding"]);
+        const rerankTypes = new Set(["cohere", "jina", "voyage", "generic"]);
 
-        // 优先使用流式调用测试（与实际对话一致），配置禁用或不支持流式时回退到非流式
-        const config = this.ctx.configManager.getActiveConfig();
-        const modelStreaming = config?.modelStreaming ?? true;
-
-        if (modelStreaming && prov.textChatStream) {
-          let received = false;
-          for await (const chunk of prov.textChatStream({
-            contexts: [{ role: "user" as const, content: "hello" }],
-          })) {
-            if (chunk.completionText || chunk.reasoningContent || chunk.toolsCallName) {
-              received = true;
-              break; // 收到有效内容后确认连通并退出
-            }
+        if (embeddingTypes.has(type)) {
+          // 嵌入模型：发送测试文本验证连通性
+          const { dynamicCreateEmbeddingProvider } = await import("@yachiyo/provider/factory.js");
+          const embProv = await dynamicCreateEmbeddingProvider(
+            type as unknown as Parameters<typeof dynamicCreateEmbeddingProvider>[0],
+            { apiKey, baseUrl, model } as unknown as Parameters<typeof dynamicCreateEmbeddingProvider>[1],
+          );
+          if (!embProv) throw new Error(`不支持的嵌入类型: ${type}`);
+          const embeddings = await embProv.getEmbeddings(["connectivity test"]);
+          if (!embeddings || embeddings.length === 0) {
+            throw new Error("嵌入 API 未返回有效向量");
           }
-          if (!received) throw new Error("流式响应未返回有效内容");
+        } else if (rerankTypes.has(type)) {
+          // 重排模型：发送测试请求验证连通性
+          const { dynamicCreateRerankProvider } = await import("@yachiyo/provider/factory.js");
+          const rerankProv = await dynamicCreateRerankProvider(
+            type as unknown as Parameters<typeof dynamicCreateRerankProvider>[0],
+            { apiKey, baseUrl, model } as unknown as Parameters<typeof dynamicCreateRerankProvider>[1],
+          );
+          if (!rerankProv) throw new Error(`不支持的重排类型: ${type}`);
+          await rerankProv.rerank("query", ["test document"]);
         } else {
-          await prov.textChat({
-            contexts: [{ role: "user" as const, content: "hello" }],
-          });
+          // 聊天模型：使用完整配置创建临时 provider 进行测试
+          const { createChatProvider } = await import("@yachiyo/provider/factory.js");
+          const prov = createChatProvider(type as unknown as Parameters<typeof createChatProvider>[0], { apiKey, baseUrl, model, modalities: providerConfig.modalities || [] } as unknown as Parameters<typeof createChatProvider>[1]);
+
+          // 优先使用流式调用测试（与实际对话一致），配置禁用或不支持流式时回退到非流式
+          const config = this.ctx.configManager.getActiveConfig();
+          const modelStreaming = config?.modelStreaming ?? true;
+
+          if (modelStreaming && prov.textChatStream) {
+            let received = false;
+            for await (const chunk of prov.textChatStream({
+              contexts: [{ role: "user" as const, content: "hello" }],
+            })) {
+              if (chunk.completionText || chunk.reasoningContent || chunk.toolsCallName) {
+                received = true;
+                break; // 收到有效内容后确认连通并退出
+              }
+            }
+            if (!received) throw new Error("流式响应未返回有效内容");
+          } else {
+            await prov.textChat({
+              contexts: [{ role: "user" as const, content: "hello" }],
+            });
+          }
         }
 
         res.writeHead(200);
@@ -2534,6 +2586,75 @@ export class DashboardServer {
       } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ status: "ok", data: { error: safeClientMessage(err, "测试失败") } }));
+      }
+      return;
+    }
+
+    // 27b. GET /api/config/provider/detect_embedding_dim — 检测嵌入模型实际维度
+    //     发送一条测试文本，返回实际嵌入向量长度。不传 dimensions 参数以获取
+    //     模型原始维度，用户据此填写正确的 dimensions 配置。
+    if (pathname === "/api/config/provider/detect_embedding_dim" && req.method === "GET") {
+      const providerId = url.searchParams.get("id");
+      if (!providerId) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ status: "error", message: "缺少提供商 ID" }));
+        return;
+      }
+
+      try {
+        const providerConfig = this.ctx.providerManager.getProviderConfigById(providerId, true, true);
+        if (!providerConfig) {
+          res.writeHead(200);
+          res.end(JSON.stringify({ status: "ok", data: { error: `提供商 ${providerId} 不存在` } }));
+          return;
+        }
+
+        const type = String(providerConfig.type || "");
+        if (!type.includes("embedding")) {
+          res.writeHead(200);
+          res.end(JSON.stringify({ status: "ok", data: { error: "该提供商不是嵌入模型" } }));
+          return;
+        }
+
+        const apiKey = String(providerConfig.apiKey || providerConfig.key || "");
+        const baseUrl = String(providerConfig.baseUrl || providerConfig.api_base || "");
+        const model = String(providerConfig.model || "");
+
+        if (!apiKey) {
+          res.writeHead(200);
+          res.end(JSON.stringify({ status: "ok", data: { error: "API Key 未配置" } }));
+          return;
+        }
+
+        // 创建临时 embedding provider 实例（不传 dimensions 以获取模型原始维度）
+        // 保留 timeout/proxy 等配置，仅移除 dimensions
+        const { dynamicCreateEmbeddingProvider } = await import("@yachiyo/provider/factory.js");
+        const embeddingType = type as unknown as Parameters<typeof dynamicCreateEmbeddingProvider>[0];
+        const embConfig = { ...providerConfig, apiKey, baseUrl: baseUrl || undefined, dimensions: undefined } as unknown as Parameters<typeof dynamicCreateEmbeddingProvider>[1];
+        const prov = await dynamicCreateEmbeddingProvider(embeddingType, embConfig);
+
+        if (!prov) {
+          res.writeHead(200);
+          res.end(JSON.stringify({ status: "ok", data: { error: `不支持的嵌入类型: ${type}` } }));
+          return;
+        }
+
+        // 发送测试文本获取实际维度
+        const testText = "dimension detection test";
+        const embeddings = await prov.getEmbeddings([testText]);
+        if (!embeddings || embeddings.length === 0) {
+          throw new Error("嵌入 API 未返回有效向量");
+        }
+        const detectedDim = embeddings[0].length;
+
+        res.writeHead(200);
+        res.end(JSON.stringify({
+          status: "ok",
+          data: { error: null, dimension: detectedDim, model },
+        }));
+      } catch (err: unknown) {
+        res.writeHead(200);
+        res.end(JSON.stringify({ status: "ok", data: { error: safeClientMessage(err, "维度检测失败") } }));
       }
       return;
     }

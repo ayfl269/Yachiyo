@@ -4,7 +4,7 @@ import {
   Plus, Save, Trash2, RefreshCw, Search, Download,
   Pencil, Power, Image as ImageIcon,
   AudioWaveform, Wrench, Brain, Globe,
-  Play, Sparkles, Eye, EyeOff
+  Play, Sparkles, Eye, EyeOff, Ruler
 } from 'lucide-react'
 import { useToast, ToastPortal, Modal, useAsyncEffect } from './shared'
 import { apiFetch } from '../lib/api'
@@ -361,6 +361,7 @@ export default function ProviderManager() {
   const [savingSource, setSavingSource] = useState(false)
   const [testingProviders, setTestingProviders] = useState<string[]>([])
   const [savingProviders, setSavingProviders] = useState<string[]>([])
+  const [detectingDims, setDetectingDims] = useState<string[]>([])
   const [isSourceModified, setIsSourceModified] = useState(false)
   const [modelSearch, setModelSearch] = useState('')
 
@@ -518,22 +519,6 @@ export default function ProviderManager() {
     const pt = nonChatConfigData.provider_type || ''
     return nonChatFieldSchema[pt] || nonChatFieldSchema['embedding'] || []
   }, [nonChatConfigData])
-
-  const nonChatUnknownFields = useMemo(() => {
-    if (!nonChatConfigData) return []
-    const schemaKeys = new Set<string>()
-    for (const row of nonChatFieldRows) {
-      for (const f of row) schemaKeys.add(f.key)
-    }
-    const excludeKeys = new Set(['modalities', 'provider_source_id', 'custom_extra_body', 'provider_type', 'type', 'max_context_tokens', 'reasoning'])
-    const fields: Array<{ key: string; value: any }> = []
-    for (const [key, value] of Object.entries(nonChatConfigData)) {
-      if (!schemaKeys.has(key) && !excludeKeys.has(key)) {
-        fields.push({ key, value })
-      }
-    }
-    return fields
-  }, [nonChatConfigData, nonChatFieldRows])
 
   // ===== API Methods =====
   async function loadConfig() {
@@ -827,6 +812,30 @@ export default function ProviderManager() {
     }
   }
 
+  async function detectEmbeddingDim(provider: Provider) {
+    if (detectingDims.includes(provider.id)) return
+    setDetectingDims(prev => [...prev, provider.id])
+    try {
+      const res = await apiFetch(`/api/config/provider/detect_embedding_dim?id=${encodeURIComponent(provider.id)}`)
+      const json = await parseResponseJson(res)
+      if (json.status === 'ok' && json.data?.error === null) {
+        const dim = json.data.dimension
+        const model = json.data.model
+        showMessage(`检测成功: 模型 ${model} 的嵌入维度为 ${dim}`)
+        // 自动填充到当前编辑中的配置（如果对话框打开且匹配）
+        if (nonChatConfigData?.id === provider.id) {
+          setNonChatField('dimensions', dim)
+        }
+      } else {
+        throw new Error(json.data?.error || '维度检测失败')
+      }
+    } catch (error: any) {
+      showMessage(error.message || '维度检测失败', 'error')
+    } finally {
+      setDetectingDims(prev => prev.filter(id => id !== provider.id))
+    }
+  }
+
   // Provider edit dialog
   function openProviderEdit(provider: Provider) {
     const data = structuredClone(provider)
@@ -918,7 +927,12 @@ export default function ProviderManager() {
 
   // Non-chat provider full config edit
   function openNonChatProviderEdit(provider: Provider) {
-    setNonChatConfigData(structuredClone(provider))
+    const cloned = structuredClone(provider)
+    // Clear masked key — user enters new key or leaves empty to keep existing
+    if (cloned.key === '********' || cloned.key === '***') {
+      cloned.key = ''
+    }
+    setNonChatConfigData(cloned)
     setNonChatConfigMode('edit')
     setShowNonChatConfigDialog(true)
   }
@@ -1161,7 +1175,7 @@ export default function ProviderManager() {
                         <div className="input-with-toggle">
                           <input
                             type={showSourceApiKey ? 'text' : 'password'}
-                            value={showSourceApiKey && revealedKeys[editableProviderSource.id] ? revealedKeys[editableProviderSource.id] : (editableProviderSource.key ?? '')}
+                            value={editableProviderSource.key ?? ''}
                             onChange={e => setSourceField('key', e.target.value)}
                             className="form-control font-mono"
                             placeholder="鉴权密钥"
@@ -1637,19 +1651,17 @@ export default function ProviderManager() {
                         onChange={e => setNonChatField(field.key, e.target.value)}
                         className="form-control font-mono"
                         placeholder={field.placeholder}
-                        disabled={field.disabled}
+                        disabled={field.disabled && nonChatConfigMode === 'edit'}
                       />
                     )}
                     {field.type === 'string' && field.password && (
                       <div className="input-with-toggle">
                         <input
                           type={showNonChatPassword[field.key] ? 'text' : 'password'}
-                          value={showNonChatPassword[field.key] && revealedKeys[nonChatConfigData.provider_source_id || nonChatConfigData.id]
-                            ? revealedKeys[nonChatConfigData.provider_source_id || nonChatConfigData.id]
-                            : (nonChatConfigData[field.key] ?? '')}
+                          value={nonChatConfigData[field.key] ?? ''}
                           onChange={e => setNonChatField(field.key, e.target.value)}
                           className="form-control font-mono"
-                          placeholder={field.placeholder}
+                          placeholder={nonChatConfigMode === 'edit' ? `${field.placeholder}（留空保持不变）` : field.placeholder}
                         />
                         <button
                           type="button"
@@ -1670,13 +1682,29 @@ export default function ProviderManager() {
                       </div>
                     )}
                     {field.type === 'number' && (
-                      <input
-                        type="number"
-                        value={nonChatConfigData[field.key] ?? ''}
-                        onChange={e => setNonChatField(field.key, Number(e.target.value))}
-                        className="form-control font-mono"
-                        placeholder={field.placeholder}
-                      />
+                      <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                        <input
+                          type="number"
+                          value={nonChatConfigData[field.key] ?? ''}
+                          onChange={e => setNonChatField(field.key, e.target.value === '' ? undefined : Number(e.target.value))}
+                          className="form-control font-mono"
+                          placeholder={field.placeholder}
+                          style={{ flex: 1 }}
+                        />
+                        {field.key === 'dimensions' && nonChatConfigMode === 'edit' && (
+                          <button
+                            type="button"
+                            className="btn sm"
+                            disabled={detectingDims.includes(nonChatConfigData.id)}
+                            onClick={() => void detectEmbeddingDim(nonChatConfigData as unknown as Provider)}
+                            title="发送测试文本检测嵌入向量实际维度"
+                            style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4 }}
+                          >
+                            {detectingDims.includes(nonChatConfigData.id) ? <RefreshCw size={12} className="animate-spin" /> : <Ruler size={12} />}
+                            检测
+                          </button>
+                        )}
+                      </div>
                     )}
                     {field.type === 'boolean' && (
                       <label className="toggle-label">
@@ -1699,48 +1727,6 @@ export default function ProviderManager() {
                 ))}
               </div>
             ))}
-
-            {/* Dynamic extra fields not covered by schema */}
-            {nonChatUnknownFields.length > 0 && (
-              <>
-                <div className="config-divider" style={{ margin: '1rem 0' }}></div>
-                <div className="section-title" style={{ fontSize: 14, fontWeight: 600, marginBottom: '0.75rem' }}>其他配置</div>
-                <div className="form-grid">
-                  {nonChatUnknownFields.map(field => (
-                    <div key={field.key} className="form-group">
-                      <label>{field.key}</label>
-                      {typeof field.value === 'string' && !field.value.startsWith('{') ? (
-                        <input
-                          type="text"
-                          value={String(nonChatConfigData[field.key] ?? '')}
-                          onChange={e => setNonChatField(field.key, e.target.value)}
-                          className="form-control font-mono"
-                        />
-                      ) : typeof field.value === 'number' ? (
-                        <input
-                          type="number"
-                          value={nonChatConfigData[field.key] ?? ''}
-                          onChange={e => setNonChatField(field.key, Number(e.target.value))}
-                          className="form-control font-mono"
-                        />
-                      ) : typeof field.value === 'boolean' ? (
-                        <label className="toggle-label">
-                          <input type="checkbox" checked={Boolean(nonChatConfigData[field.key])} onChange={e => setNonChatField(field.key, e.target.checked)} />
-                          <span>{field.value ? '启用' : '停用'}</span>
-                        </label>
-                      ) : (
-                        <textarea
-                          value={typeof nonChatConfigData[field.key] === 'string' ? nonChatConfigData[field.key] : JSON.stringify(nonChatConfigData[field.key], null, 2)}
-                          onChange={e => setNonChatField(field.key, e.target.value)}
-                          className="form-control font-mono textarea-sm"
-                          rows={2}
-                        />
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
           </>
         )}
       </Modal>
