@@ -11,6 +11,15 @@ import { safeFetch, assertSafeUrl } from "@yachiyo/common/ssrf-guard.js";
 import { isDomainAllowed, type SandboxPolicy } from "./sandbox.js";
 import { proxyManager } from "./proxy-manager.js";
 
+// ── Unified User-Agent strings ──
+// SYSTEM_USER_AGENT: used for direct HTTP requests made by the agent
+//   (http_request_tool). Identifies the agent itself.
+// BROWSER_USER_AGENT: used for browser emulation (Playwright) and search
+//   engine scraping, where a realistic desktop Chrome UA is required.
+const SYSTEM_USER_AGENT = "AgentSystem/1.0";
+const BROWSER_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36";
+
 // ── Proxy helper for Playwright launches ──
 
 /**
@@ -202,7 +211,7 @@ export function createWebFetchTool(): FunctionTool<WebToolContext> {
 
         const fetchOptions: RequestInit = {
           method,
-          headers: { "User-Agent": "AgentSystem/1.0", ...headers },
+          headers: { "User-Agent": SYSTEM_USER_AGENT, ...headers },
           signal: controller.signal,
         };
         if (body && ["POST", "PUT", "PATCH"].includes(method)) {
@@ -242,7 +251,7 @@ export function createWebFetchTool(): FunctionTool<WebToolContext> {
             // Reuse the shared Chromium instance to avoid 1-3s launch overhead.
             const browser = await getSharedBrowser();
             browserContext = await browser.newContext({
-              userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+              userAgent: BROWSER_USER_AGENT,
               viewport: { width: 1920, height: 1080 },
             });
             page = await browserContext.newPage();
@@ -295,7 +304,7 @@ class BingSearchProvider implements WebSearchProvider {
     // checks) as the web_fetch_tool. Native fetch would bypass all of these.
     const response = await safeFetch(url, {
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": BROWSER_USER_AGENT,
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
       },
     });
@@ -379,7 +388,7 @@ class GoogleSearchProvider implements WebSearchProvider {
     // Use safeFetch for the same SSRF-protection reasons as BingSearchProvider.
     const response = await safeFetch(url, {
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": BROWSER_USER_AGENT,
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
       },
     });
@@ -476,7 +485,7 @@ class PlaywrightSearchProviderBase implements WebSearchProvider {
     const browser = await this.ensureBrowser();
     const context = await browser.newContext({
       userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        BROWSER_USER_AGENT,
       locale: "en-US",
       viewport: { width: 1920, height: 1080 },
       colorScheme: "light",
@@ -778,7 +787,7 @@ export function createWebSearchTool(customProvider?: WebSearchProvider, engine: 
                 // against private/reserved IP ranges. Search result URLs are
                 // attacker-influencable and could otherwise be used for SSRF.
                 const resp = await safeFetch(r.url, {
-                  headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" },
+                  headers: { "User-Agent": BROWSER_USER_AGENT },
                   signal: AbortSignal.timeout(10000),
                 });
                 const contentType = resp.headers.get("content-type") ?? "";
@@ -859,7 +868,7 @@ export function createHttpRequestTool(): FunctionTool<WebToolContext> {
         const timeoutId = setTimeout(() => controller.abort(), timeout * 1000);
 
         const requestHeaders: Record<string, string> = {
-          "User-Agent": "AgentSystem/1.0",
+          "User-Agent": SYSTEM_USER_AGENT,
           ...headers,
         };
 
@@ -1029,7 +1038,7 @@ export function createBrowserNavigateTool(): FunctionTool<WebToolContext> {
         await assertSafeUrl(url);
         const browser = await getSharedBrowser();
         const context = await browser.newContext({
-          userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+          userAgent: BROWSER_USER_AGENT,
           viewport: { width: 1280, height: 720 },
           locale: "en-US",
         });
