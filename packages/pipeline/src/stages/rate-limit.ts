@@ -51,6 +51,9 @@ export class RateLimitStage extends PipelineStage {
   async process(event: MessageEvent): Promise<void> {
     if (!this.rateLimitEnabled) return;
 
+    // System-generated events bypass rate limiting.
+    if (event.isSystem) return;
+
     const key = event.unifiedMsgOrigin;
     const now = Date.now();
     let counter = this.counters.get(key);

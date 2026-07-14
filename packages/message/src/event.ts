@@ -18,6 +18,9 @@ export abstract class MessageEvent {
   session: MessageSession;
   isWake: boolean = false;
   isAtOrWakeCommand: boolean = false;
+  /** System-generated events (e.g. proactive reminders) bypass wake
+   *  checks and rate limits so the pipeline always processes them. */
+  isSystem: boolean = false;
   createdAt: number;
 
   private extras: Map<string, unknown> = new Map();

@@ -19,7 +19,7 @@ import { escapeLike, type Migration } from "@yachiyo/common/database.js";
 // ── Types ──
 
 export type TaskType = "reminder" | "scheduled" | "recurring" | "goal" | "plan";
-export type TaskStatus = "pending" | "active" | "completed" | "cancelled" | "failed";
+export type TaskStatus = "pending" | "active" | "notifying" | "completed" | "cancelled" | "failed";
 export type StepStatus = "pending" | "in_progress" | "completed" | "skipped";
 
 export interface PlanStep {
@@ -270,7 +270,10 @@ export class SqliteSchedulerTaskStore {
 
   /**
    * Return all tasks that are due to fire at or before `now`.
-   * A task is due when next_fire_at <= now AND status is pending or active.
+   * A task is due when next_fire_at <= now AND status is pending, active,
+   * or notifying. The "notifying" status indicates the task was sent to
+   * the model in the pre-fire window but the model hasn't responded yet —
+   * if it reaches due time while still "notifying", the fallback fires.
    */
   getDueTasks(now: Date): SchedulerTask[] {
     const nowIso = now.toISOString();
@@ -278,18 +281,59 @@ export class SqliteSchedulerTaskStore {
       SELECT id, type, title, description, status, priority, scheduled_at, recurrence, goal, plan, current_step, umo, session_id, platform_id, payload, last_fired_at, next_fire_at, created_at, updated_at FROM scheduler_tasks
       WHERE next_fire_at IS NOT NULL
         AND next_fire_at <= ?
-        AND status IN ('pending', 'active')
+        AND status IN ('pending', 'active', 'notifying')
     `).all(nowIso) as SchedulerTaskRow[];
     return rows.map((r) => this.rowToTask(r));
   }
 
   /**
+   * Return all tasks within the pre-fire window: tasks whose next_fire_at
+   * falls within (now, now + windowMs] and are still in 'pending' status.
+   * These tasks should be sent to the model early so it can generate a
+   * natural reminder before the strict deadline.
+   */
+  getPreFireTasks(now: Date, windowMs: number): SchedulerTask[] {
+    const nowIso = now.toISOString();
+    const thresholdIso = new Date(now.getTime() + windowMs).toISOString();
+    const rows = this.db.prepare(`
+      SELECT id, type, title, description, status, priority, scheduled_at, recurrence, goal, plan, current_step, umo, session_id, platform_id, payload, last_fired_at, next_fire_at, created_at, updated_at FROM scheduler_tasks
+      WHERE next_fire_at IS NOT NULL
+        AND next_fire_at > ?
+        AND next_fire_at <= ?
+        AND status = 'pending'
+    `).all(nowIso, thresholdIso) as SchedulerTaskRow[];
+    return rows.map((r) => this.rowToTask(r));
+  }
+
+  /**
+   * Mark a task as "notifying" — it has been sent to the model in the
+   * pre-fire window. This prevents duplicate pre-fire triggers and allows
+   * the fallback to identify tasks that the model didn't handle in time.
+   * Returns true if the transition was applied, false if the task was
+   * already advanced or doesn't exist.
+   */
+  markNotifying(id: string): boolean {
+    const nowIso = new Date().toISOString();
+    const result = this.db.prepare(`
+      UPDATE scheduler_tasks
+      SET status = 'notifying', updated_at = ?
+      WHERE id = ? AND status = 'pending'
+    `).run(nowIso, id);
+    return result.changes > 0;
+  }
+
+  /**
    * Mark a task as fired: update last_fired_at, compute next_fire_at for
    * recurring tasks (or mark one-shot tasks as completed).
+   * Uses a conditional WHERE clause to prevent double-firing: only
+   * advances tasks that are still in an active state (pending/active/notifying).
+   * If the task was already completed, cancelled, or deleted, this is a no-op.
    */
   markFired(id: string, now: Date): void {
     const task = this.get(id);
     if (!task) return;
+    if (task.status === "completed" || task.status === "cancelled" || task.status === "failed") return;
+
     const nowIso = now.toISOString();
 
     let nextFireAt: string | null = null;
@@ -300,6 +344,10 @@ export class SqliteSchedulerTaskStore {
       if (!nextFireAt) {
         // Could not parse recurrence → mark completed to avoid infinite re-fire
         newStatus = "completed";
+      } else if (task.status === "notifying") {
+        // Reset "notifying" back to "pending" so the task can be
+        // pre-fired again for the next occurrence.
+        newStatus = "pending";
       }
     } else {
       // One-shot reminder/scheduled → mark completed after firing
@@ -309,7 +357,7 @@ export class SqliteSchedulerTaskStore {
     this.db.prepare(`
       UPDATE scheduler_tasks
       SET last_fired_at = ?, next_fire_at = ?, status = ?, updated_at = ?
-      WHERE id = ?
+      WHERE id = ? AND status IN ('pending', 'active', 'notifying')
     `).run(nowIso, nextFireAt, newStatus, nowIso, id);
   }
 
@@ -381,7 +429,7 @@ export class SqliteSchedulerTaskStore {
     for (const t of types) byType[t] = this.count({ type: t });
 
     const byStatus = {} as Record<TaskStatus, number>;
-    const statuses: TaskStatus[] = ["pending", "active", "completed", "cancelled", "failed"];
+    const statuses: TaskStatus[] = ["pending", "active", "notifying", "completed", "cancelled", "failed"];
     for (const s of statuses) byStatus[s] = this.count({ status: s });
 
     return { total, byType, byStatus };

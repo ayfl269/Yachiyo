@@ -2,14 +2,22 @@
  * TaskScheduler: periodically checks for due scheduler tasks and fires them
  * by delivering proactive messages to the user via the platform adapter.
  *
- * When a task fires:
- * 1. Build a reminder message from the task's payload/title.
- * 2. Look up the adapter that created the session (via platformId).
- * 3. Call adapter.sendProactiveMessage() to push the message directly.
- * 4. Mark the task as fired (advances next_fire_at for recurring tasks).
+ * Two-phase firing mechanism (model-first, system-fallback):
  *
- * If the adapter cannot deliver (no active session, platform doesn't support
- * proactive messages), the task is still marked fired to avoid retry loops.
+ * Phase 1 — Pre-fire (model path):
+ *   When a task's next_fire_at falls within the pre-fire window (default
+ *   60s before due), the task is marked "notifying" and the onPreFire
+ *   callback is invoked. The callback injects a system event into the
+ *   pipeline so the model can generate a natural reminder. When the
+ *   model responds, the onResponded callback marks the task as fired,
+ *   preventing the fallback. The model is also expected to delete the
+ *   task via the scheduler tool to prevent accumulation.
+ *
+ * Phase 2 — Fallback (direct path):
+ *   If the task reaches its strict due time while still in "notifying"
+ *   status (model didn't respond in time), or if no onPreFire callback
+ *   is configured, the task fires directly: a raw reminder message is
+ *   pushed via adapter.sendProactiveMessage(), bypassing the model.
  */
 
 import type { SqliteSchedulerTaskStore, SchedulerTask } from "@yachiyo/agent/scheduler-task-store.js";
@@ -21,17 +29,29 @@ export interface TaskSchedulerConfig {
   interval?: number;
   /** Whether the scheduler is enabled. Default: true. */
   enabled?: boolean;
+  /** Pre-fire window in milliseconds. Tasks within this window before
+   *  their next_fire_at are sent to the model early. Default: 60000 (60s). */
+  preFireWindow?: number;
 }
 
+/** Callback invoked when a task enters the pre-fire window. */
+export type OnPreFireCallback = (task: SchedulerTask) => void;
+
 const DEFAULT_INTERVAL = 30_000;
+const DEFAULT_PREFIRE_WINDOW = 60_000;
 
 export class TaskScheduler {
   private store: SqliteSchedulerTaskStore;
   private adapterRegistry: AdapterRegistry | null;
   private interval: number;
   private enabled: boolean;
+  private preFireWindow: number;
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking: boolean = false;
+
+  /** Callback for pre-fire events. When set, tasks in the pre-fire window
+   *  are sent to the model instead of firing directly. */
+  onPreFire: OnPreFireCallback | null = null;
 
   constructor(
     store: SqliteSchedulerTaskStore,
@@ -42,6 +62,7 @@ export class TaskScheduler {
     this.adapterRegistry = adapterRegistry ?? null;
     this.interval = config?.interval ?? DEFAULT_INTERVAL;
     this.enabled = config?.enabled ?? true;
+    this.preFireWindow = config?.preFireWindow ?? DEFAULT_PREFIRE_WINDOW;
   }
 
   /** Set the adapter registry (used for proactive message delivery). */
@@ -59,7 +80,7 @@ export class TaskScheduler {
     if (typeof this.timer === "object" && "unref" in this.timer) {
       this.timer.unref();
     }
-    console.log(`[TaskScheduler] Started (interval: ${this.interval}ms).`);
+    console.log(`[TaskScheduler] Started (interval: ${this.interval}ms, preFireWindow: ${this.preFireWindow}ms).`);
   }
 
   stop(): void {
@@ -75,6 +96,7 @@ export class TaskScheduler {
     this.stop();
     if (config.interval !== undefined) this.interval = config.interval;
     if (config.enabled !== undefined) this.enabled = config.enabled;
+    if (config.preFireWindow !== undefined) this.preFireWindow = config.preFireWindow;
     if (wasRunning) this.start();
   }
 
@@ -84,10 +106,32 @@ export class TaskScheduler {
       return;
     }
     this.ticking = true;
+    let prefired = 0;
     let fired = 0;
     let skipped = 0;
     try {
-      const dueTasks = this.store.getDueTasks(new Date());
+      const now = new Date();
+
+      // Phase 1: Pre-fire — send tasks to the model within the window
+      if (this.onPreFire && this.preFireWindow > 0) {
+        const preFireTasks = this.store.getPreFireTasks(now, this.preFireWindow);
+        for (const task of preFireTasks) {
+          try {
+            // Atomically transition pending → notifying
+            const marked = this.store.markNotifying(task.id);
+            if (!marked) continue; // Already advanced by another path
+            this.onPreFire(task);
+            prefired++;
+            console.log(`[TaskScheduler] Pre-fired task "${task.title}" (${task.id}) to model.`);
+          } catch (e) {
+            console.error(`[TaskScheduler] Error pre-firing task ${task.id}:`, e);
+          }
+        }
+      }
+
+      // Phase 2: Fallback — fire tasks that are due (including those still
+      // in "notifying" status, meaning the model didn't respond in time)
+      const dueTasks = this.store.getDueTasks(now);
       for (const task of dueTasks) {
         try {
           const ok = await this.fireTask(task);
@@ -107,8 +151,8 @@ export class TaskScheduler {
     } finally {
       this.ticking = false;
     }
-    if (fired > 0 || skipped > 0) {
-      console.log(`[TaskScheduler] Tick complete: ${fired} fired, ${skipped} skipped.`);
+    if (prefired > 0 || fired > 0 || skipped > 0) {
+      console.log(`[TaskScheduler] Tick complete: ${prefired} pre-fired, ${fired} fired, ${skipped} skipped.`);
     }
   }
 
@@ -116,12 +160,18 @@ export class TaskScheduler {
    * Fire a single task: build a reminder message and push it directly to
    * the user via the platform adapter's proactive message channel.
    *
+   * This is the fallback path — it fires when the model didn't respond
+   * in time (task is still "notifying") or when no pre-fire callback
+   * is configured (task is still "pending").
+   *
    * Returns true if the message was delivered (or attempted), false if it
    * was skipped (no routing info or adapter unavailable). In all cases
    * the task is marked fired.
    */
   private async fireTask(task: SchedulerTask): Promise<boolean> {
-    // Mark fired first (advances next_fire_at for recurring tasks)
+    // Mark fired first (advances next_fire_at for recurring tasks).
+    // The conditional WHERE in markFired prevents double-advancing if
+    // the model already responded and called markFired via onResponded.
     this.store.markFired(task.id, new Date());
 
     // Build the user-facing reminder text

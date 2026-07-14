@@ -11,4 +11,4 @@ export { registerActiveRunner, unregisterActiveRunner, tryCaptureFollowUp, prepa
 export { callHandler, callEventHook } from "./handler-utils.js";
 export { MainAgentHooks, MAIN_AGENT_HOOKS } from "./agent-hooks.js";
 export { ensureBuiltinStagesRegistered, isBuiltinStagesRegistered } from "./bootstrap.js";
-export { TaskScheduler, type TaskSchedulerConfig } from "./task-scheduler.js";
+export { TaskScheduler, type TaskSchedulerConfig, type OnPreFireCallback } from "./task-scheduler.js";

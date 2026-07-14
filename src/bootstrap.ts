@@ -448,6 +448,35 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
   // 注入 AdapterRegistry 到 TaskScheduler（用于主动推送定时任务消息）
   taskScheduler.setAdapterRegistry(adapterRegistry);
 
+  // 配置 Pre-fire 回调：提前 60 秒将提醒发送给模型，模型生成自然回复后
+  // 通过 onResponded 标记任务已处理（阻止兜底触发）。模型还应使用 scheduler
+  // 工具删除任务以防止堆积。若模型在到期时仍未响应，则由 fireTask 兜底。
+  taskScheduler.onPreFire = (task) => {
+    if (!task.umo || !task.platformId) return;
+
+    const adapter = adapterRegistry.getAdapter(task.platformId);
+    if (!adapter) {
+      console.warn(`[Bootstrap] Pre-fire: adapter "${task.platformId}" not found for task ${task.id}.`);
+      return;
+    }
+
+    const prompt = buildPreFirePrompt(task);
+    const target = {
+      umo: task.umo,
+      sessionId: task.sessionId ?? task.umo,
+      platformId: task.platformId,
+    };
+
+    // onResponded: model has generated and sent its response. Mark the task
+    // as fired to prevent the fallback from also firing.
+    const onResponded = () => {
+      sqliteSchedulerTaskStore.markFired(task.id, new Date());
+      console.log(`[Bootstrap] Pre-fire: model responded for task "${task.title}" (${task.id}), marked as fired.`);
+    };
+
+    adapter.triggerAgentMessage(target, prompt, onResponded);
+  };
+
   // 启动定时任务调度器
   taskScheduler.start();
 
@@ -535,4 +564,29 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
       dbManager.close();
     },
   };
+}
+
+/**
+ * Build the prompt text fed to the model when a task enters the pre-fire
+ * window. The model should generate a natural, conversational reminder
+ * and then delete the task via the scheduler tool.
+ */
+function buildPreFirePrompt(task: {
+  id: string;
+  type: string;
+  title: string;
+  description: string;
+  payload: string | null;
+  goal: string | null;
+}): string {
+  const lines: string[] = [];
+  lines.push("[系统提醒触发]");
+  lines.push(`任务类型: ${task.type}`);
+  lines.push(`标题: ${task.title}`);
+  if (task.description) lines.push(`描述: ${task.description}`);
+  if (task.payload) lines.push(`内容: ${task.payload}`);
+  if (task.goal) lines.push(`目标: ${task.goal}`);
+  lines.push("");
+  lines.push(`请以自然、友好的方式向用户传达此提醒。提醒发送后，请使用 scheduler 工具删除此任务（action: "delete", id: "${task.id}"）以防止任务堆积。`);
+  return lines.join("\n");
 }

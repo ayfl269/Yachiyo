@@ -37,6 +37,66 @@ class SyntheticMessageEvent extends MessageEvent {
   }
 }
 
+/**
+ * A system-generated event that flows through the pipeline like a normal
+ * message, but whose `send()` actually pushes the model's response to
+ * the user via the platform adapter's proactive message channel.
+ *
+ * Used by the pre-fire reminder mechanism: the model receives a reminder
+ * prompt, generates a natural response, and `send()` delivers it directly
+ * to the user. The `onResponded` callback fires once when the response
+ * is sent, allowing the caller to mark the task as handled (preventing
+ * the fallback from firing).
+ */
+class ProactiveTriggerEvent extends MessageEvent {
+  private adapter: PlatformAdapter;
+  private target: { umo: string; sessionId: string; platformId: string };
+  private onResponded?: () => void;
+  private hasResponded: boolean = false;
+
+  constructor(
+    messageStr: string,
+    messageObj: PlatformMessage,
+    meta: PlatformMetadata,
+    sessionId: string,
+    adapter: PlatformAdapter,
+    target: { umo: string; sessionId: string; platformId: string },
+    onResponded?: () => void,
+  ) {
+    super(messageStr, messageObj, meta, sessionId);
+    this.adapter = adapter;
+    this.target = target;
+    this.onResponded = onResponded;
+    this.isSystem = true;
+  }
+
+  get unifiedMsgOrigin(): string {
+    return this.target.umo;
+  }
+
+  async send(components: MessageComponent[]): Promise<void> {
+    if (!this.hasResponded) {
+      this.hasResponded = true;
+      this.onResponded?.();
+    }
+    await this.adapter.sendProactiveMessage(this.target, components);
+  }
+
+  async sendStreaming(generator: AsyncGenerator<MessageChain, void>): Promise<void> {
+    const parts: string[] = [];
+    for await (const chunk of generator) {
+      if (chunk.message) parts.push(chunk.message);
+    }
+    if (parts.length > 0) {
+      await this.send([{
+        type: ComponentType.Plain,
+        text: parts.join(""),
+        toDict() { return { type: "text", data: { text: parts.join("") } }; },
+      } as MessageComponent]);
+    }
+  }
+}
+
 export abstract class PlatformAdapter {
   protected eventQueue: AsyncQueue<MessageEvent>;
   protected errors: unknown[] = [];
@@ -141,5 +201,50 @@ export abstract class PlatformAdapter {
 
   async healthCheck(): Promise<string | null> {
     return this.isRunning ? null : "Adapter not running";
+  }
+
+  /**
+   * Inject a system-generated message into the pipeline for the model to
+   * process. The model's response is pushed directly to the user via
+   * sendProactiveMessage. Used by the pre-fire reminder mechanism to let
+   * the model generate a natural reminder before the strict deadline.
+   *
+   * @param target Routing info (umo, sessionId, platformId)
+   * @param messageStr The prompt text for the model
+   * @param onResponded Optional callback invoked once when the model's
+   *   response is about to be sent (used to mark the task as handled,
+   *   preventing the fallback from firing)
+   */
+  triggerAgentMessage(
+    target: { umo: string; sessionId: string; platformId: string },
+    messageStr: string,
+    onResponded?: () => void,
+  ): void {
+    const isGroup = target.umo.includes(":group:");
+    const platformMsg = new PlatformMessage();
+    platformMsg.type = isGroup ? MessageType.GROUP_MESSAGE : MessageType.FRIEND_MESSAGE;
+    platformMsg.selfId = this.meta().id;
+    platformMsg.sessionId = target.sessionId;
+    platformMsg.messageId = generateId();
+    platformMsg.sender = { userId: "system", nickname: "System" };
+    platformMsg.components = [{
+      type: ComponentType.Plain,
+      text: messageStr,
+      toDict() { return { type: "text", data: { text: messageStr } }; },
+    } as MessageComponent];
+    platformMsg.messageStr = messageStr;
+    platformMsg.timestamp = Date.now();
+
+    const event = new ProactiveTriggerEvent(
+      messageStr,
+      platformMsg,
+      this.meta(),
+      target.sessionId,
+      this,
+      target,
+      onResponded,
+    );
+
+    this.commitEvent(event);
   }
 }

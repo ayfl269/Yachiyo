@@ -19,6 +19,14 @@ export class WakingCheckStage extends PipelineStage {
   }
 
   async process(event: MessageEvent): Promise<void> {
+    // System-generated events (e.g. proactive reminders) bypass all
+    // wake checks — they are always processed by the pipeline.
+    if (event.isSystem) {
+      event.isWake = true;
+      event.isAtOrWakeCommand = true;
+      return;
+    }
+
     if (event.getSenderId() === event.getSelfId()) {
       event.stopEvent();
       return;
