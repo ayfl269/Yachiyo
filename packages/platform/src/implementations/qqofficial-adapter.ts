@@ -118,15 +118,12 @@ const INTENTS = {
   GUILD_MESSAGES: 1 << 9,                  // 私域消息事件 (需申请)
   GUILD_MESSAGE_REACTIONS: 1 << 10,        // 表情表态事件 (需申请)
   DIRECT_MESSAGE: 1 << 12,                 // 私信事件 (默认有权限)
+  GROUP_AND_C2C_EVENT: 1 << 25,            // 群@消息和C2C私聊消息事件
   INTERACTION: 1 << 26,                    // 互动事件 (按钮回调)
   MESSAGE_AUDIT: 1 << 27,                  // 消息审核事件
   FORUMS_EVENT: 1 << 28,                   // 论坛事件 (仅私域)
   AUDIO_ACTION: 1 << 29,                   // 音频事件
   PUBLIC_GUILD_MESSAGES: 1 << 30,          // 公域消息事件 (默认有权限)
-  // 注: 群@消息和C2C消息事件不通过 intents 订阅 (由机器人能力配置控制)
-  // 保留常量名为 0 以保持向后兼容, OR 0 为无操作
-  GROUP_AT_MESSAGE_CREATE: 0,              // 群@消息事件 (无需订阅)
-  C2C_MESSAGE_CREATE: 0,                   // C2C 消息事件 (无需订阅)
 } as const;
 
 /** 事件订阅类型 (用于配置) */
@@ -136,13 +133,12 @@ export type QQOfficialIntentName =
   | "GUILD_MESSAGES"
   | "GUILD_MESSAGE_REACTIONS"
   | "DIRECT_MESSAGE"
+  | "GROUP_AND_C2C_EVENT"
   | "INTERACTION"
   | "MESSAGE_AUDIT"
   | "FORUMS_EVENT"
   | "AUDIO_ACTION"
-  | "PUBLIC_GUILD_MESSAGES"
-  | "GROUP_AT_MESSAGE_CREATE"
-  | "C2C_MESSAGE_CREATE";
+  | "PUBLIC_GUILD_MESSAGES";
 
 interface AccessTokenResponse {
   access_token: string;
@@ -1256,9 +1252,10 @@ export class QQOfficialAdapter extends PlatformAdapter {
       }
       return bits;
     }
-    // Default: guilds + public guild messages (群@和C2C无需订阅)
+    // Default: guilds + public guild messages + group/C2C messages
     return INTENTS.GUILDS
-      | INTENTS.PUBLIC_GUILD_MESSAGES;
+      | INTENTS.PUBLIC_GUILD_MESSAGES
+      | INTENTS.GROUP_AND_C2C_EVENT;
   }
 
   /** 获取 API 基础 URL (沙箱/生产) */
@@ -1530,6 +1527,9 @@ export class QQOfficialAdapter extends PlatformAdapter {
       groupOpenId,
       data.id,
     );
+    // GROUP_AT_MESSAGE_CREATE inherently means the bot was @'ed — bypass wake check
+    event.isWake = true;
+    event.isAtOrWakeCommand = true;
 
     this.commitEvent(event);
   }
@@ -1602,6 +1602,9 @@ export class QQOfficialAdapter extends PlatformAdapter {
       channelId,
       data.id,
     );
+    // AT_MESSAGE_CREATE inherently means the bot was @'ed — bypass wake check
+    event.isWake = true;
+    event.isAtOrWakeCommand = true;
 
     this.commitEvent(event);
   }

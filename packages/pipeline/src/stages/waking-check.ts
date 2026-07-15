@@ -27,6 +27,12 @@ export class WakingCheckStage extends PipelineStage {
       return;
     }
 
+    // Adapters may pre-set isWake for events that inherently require a
+    // response (e.g. QQ Official GROUP_AT_MESSAGE_CREATE is always @'ed).
+    if (event.isWake) {
+      return;
+    }
+
     if (event.getSenderId() === event.getSelfId()) {
       event.stopEvent();
       return;
