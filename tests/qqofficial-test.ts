@@ -1726,10 +1726,10 @@ async function testSharding(): Promise<void> {
 // ══════════════════════════════════════════════════════
 
 async function testIntents(): Promise<void> {
-  console.log("\n=== Intents: default = GUILDS | PUBLIC_GUILD_MESSAGES ===");
+  console.log("\n=== Intents: default = GUILDS | PUBLIC_GUILD_MESSAGES | GROUP_AND_C2C_EVENT ===");
   {
     const { adapter, fetchMock, internals } = await createAdapter();
-    const expected = (1 << 0) | (1 << 30);
+    const expected = (1 << 0) | (1 << 30) | (1 << 25);
     assert(internals.getIntents() === expected, `Default intents should be ${expected}, got ${internals.getIntents()}`);
     await cleanup(adapter, fetchMock);
   }
@@ -1749,19 +1749,20 @@ async function testIntents(): Promise<void> {
     await cleanup(adapter, fetchMock);
   }
 
-  console.log("\n=== Intents: GROUP_AT_MESSAGE_CREATE contributes 0 ===");
+  console.log("\n=== Intents: GROUP_AND_C2C_EVENT contributes 1<<25 ===");
   {
-    const { adapter, fetchMock, internals } = await createAdapter({ intentNames: ["GROUP_AT_MESSAGE_CREATE", "C2C_MESSAGE_CREATE"] });
-    assert(internals.getIntents() === 0, `GROUP_AT_MESSAGE_CREATE + C2C_MESSAGE_CREATE should be 0, got ${internals.getIntents()}`);
+    const { adapter, fetchMock, internals } = await createAdapter({ intentNames: ["GROUP_AND_C2C_EVENT"] });
+    const expected = 1 << 25;
+    assert(internals.getIntents() === expected, `GROUP_AND_C2C_EVENT should be ${expected}, got ${internals.getIntents()}`);
     await cleanup(adapter, fetchMock);
   }
 
   console.log("\n=== Intents: full set combines all bits ===");
   {
     const { adapter, fetchMock, internals } = await createAdapter({
-      intentNames: ["GUILDS", "GUILD_MEMBERS", "GUILD_MESSAGES", "GUILD_MESSAGE_REACTIONS", "DIRECT_MESSAGE", "INTERACTION", "MESSAGE_AUDIT", "FORUMS_EVENT", "AUDIO_ACTION", "PUBLIC_GUILD_MESSAGES"],
+      intentNames: ["GUILDS", "GUILD_MEMBERS", "GUILD_MESSAGES", "GUILD_MESSAGE_REACTIONS", "DIRECT_MESSAGE", "GROUP_AND_C2C_EVENT", "INTERACTION", "MESSAGE_AUDIT", "FORUMS_EVENT", "AUDIO_ACTION", "PUBLIC_GUILD_MESSAGES"],
     });
-    const expected = (1<<0)|(1<<1)|(1<<9)|(1<<10)|(1<<12)|(1<<26)|(1<<27)|(1<<28)|(1<<29)|(1<<30);
+    const expected = (1<<0)|(1<<1)|(1<<9)|(1<<10)|(1<<12)|(1<<25)|(1<<26)|(1<<27)|(1<<28)|(1<<29)|(1<<30);
     assert(internals.getIntents() === expected, `All intentNames should be ${expected}, got ${internals.getIntents()}`);
     await cleanup(adapter, fetchMock);
   }
