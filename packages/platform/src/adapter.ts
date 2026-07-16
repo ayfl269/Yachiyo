@@ -214,11 +214,15 @@ export abstract class PlatformAdapter {
    * @param onResponded Optional callback invoked once when the model's
    *   response is about to be sent (used to mark the task as handled,
    *   preventing the fallback from firing)
+   * @param historyMessage Optional clean text to persist to conversation
+   *   history instead of the raw `messageStr` (which may contain internal
+   *   instructions). When provided, ProcessStage will save this version.
    */
   triggerAgentMessage(
     target: { umo: string; sessionId: string; platformId: string },
     messageStr: string,
     onResponded?: () => void,
+    historyMessage?: string,
   ): void {
     const isGroup = target.umo.includes(":group:");
     const platformMsg = new PlatformMessage();
@@ -244,6 +248,12 @@ export abstract class PlatformAdapter {
       target,
       onResponded,
     );
+
+    // Persist a clean summary to conversation history instead of the raw
+    // prompt (which contains internal instructions like "delete this task").
+    if (historyMessage) {
+      event.setExtra("_historyUserMessage", historyMessage);
+    }
 
     this.commitEvent(event);
   }

@@ -460,7 +460,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
       return;
     }
 
-    const prompt = buildPreFirePrompt(task);
+    const { prompt, historyMessage } = buildPreFirePrompt(task);
     const target = {
       umo: task.umo,
       sessionId: task.sessionId ?? task.umo,
@@ -474,7 +474,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
       console.log(`[Bootstrap] Pre-fire: model responded for task "${task.title}" (${task.id}), marked as fired.`);
     };
 
-    adapter.triggerAgentMessage(target, prompt, onResponded);
+    adapter.triggerAgentMessage(target, prompt, onResponded, historyMessage);
   };
 
   // 启动定时任务调度器
@@ -570,6 +570,11 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
  * Build the prompt text fed to the model when a task enters the pre-fire
  * window. The model should generate a natural, conversational reminder
  * and then delete the task via the scheduler tool.
+ *
+ * Returns both the full `prompt` (sent to the model, includes internal
+ * instructions) and a `historyMessage` (a clean, user-facing summary that
+ * gets persisted to conversation history instead of the raw prompt, so
+ * internal instructions don't pollute future context).
  */
 function buildPreFirePrompt(task: {
   id: string;
@@ -578,7 +583,8 @@ function buildPreFirePrompt(task: {
   description: string;
   payload: string | null;
   goal: string | null;
-}): string {
+}): { prompt: string; historyMessage: string } {
+  // Full prompt with internal instructions for the model
   const lines: string[] = [];
   lines.push("[系统提醒触发]");
   lines.push(`任务类型: ${task.type}`);
@@ -588,5 +594,11 @@ function buildPreFirePrompt(task: {
   if (task.goal) lines.push(`目标: ${task.goal}`);
   lines.push("");
   lines.push(`请以自然、友好的方式向用户传达此提醒。提醒发送后，请使用 scheduler 工具删除此任务（action: "delete", id: "${task.id}"）以防止任务堆积。`);
-  return lines.join("\n");
+
+  // Clean summary for conversation history (no internal instructions)
+  const summaryParts: string[] = [`[定时提醒] ${task.title}`];
+  if (task.description) summaryParts.push(task.description);
+  if (task.payload) summaryParts.push(task.payload);
+
+  return { prompt: lines.join("\n"), historyMessage: summaryParts.join(" — ") };
 }

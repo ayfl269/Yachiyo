@@ -457,8 +457,16 @@ export class ProcessStage extends PipelineStage {
       conv = await this.ctx.conversationManager.getConversation(umo, convId);
     }
 
+    // System-generated events (e.g. proactive reminders) carry internal
+    // instructions in messageStr that should NOT be persisted to the user's
+    // conversation history. Skip saving the user message entirely — the
+    // model's reply will still be saved by saveAssistantMessage.
+    if (event.getExtra<string>("_historyUserMessage") !== undefined) {
+      return { convId, umo };
+    }
+
     const history: Array<{ role: string; content: string }> = conv ? (() => { try { return JSON.parse(conv.history); } catch { return []; } })() : [];
-    
+
     let userContent = event.messageStr ?? "";
     const hasImageUrls = event.messageObj.components.some(c => c.type === ComponentType.Image);
     const hasAudioUrls = event.messageObj.components.some(c => c.type === ComponentType.Record);
@@ -629,30 +637,40 @@ export class ProcessStage extends PipelineStage {
 
     try {
       const umo = event.unifiedMsgOrigin;
-      const userMessage = event.messageStr?.trim() ?? "";
+      // System-generated events (e.g. proactive reminders) should not
+      // persist the internal prompt to memory — only save the assistant reply.
+      const isSystemTrigger = event.getExtra<string>("_historyUserMessage") !== undefined;
+      const userMessage = (event.messageStr ?? "").trim();
       // Try result first; fall back to cached text (respond stage clears result after sending)
       const result = event.getResult();
       const assistantMessage = (result?.getPlainText()?.trim())
         || event.getExtra<string>("_cachedAssistantText")?.trim()
         || "";
 
-      if (!userMessage || !assistantMessage) return;
+      if (isSystemTrigger) {
+        if (!assistantMessage) return;
+      } else {
+        if (!userMessage || !assistantMessage) return;
+      }
 
-      // Save user message as short-term memory.
-      // All memories are global in single-user design; the session id (umo)
-      // is embedded in the key so archiveSession(umo) can still locate them.
       const timestamp = Date.now();
-      store.save(
-        `short_term_${umo}_${timestamp}_user`,
-        userMessage,
-        ["conversation", "short_term"],
-        {
-          memoryType: "short_term",
-          scope: "global",
-          scopeId: "",
-          priority: 0,
-        }
-      );
+
+      if (!isSystemTrigger) {
+        // Save user message as short-term memory.
+        // All memories are global in single-user design; the session id (umo)
+        // is embedded in the key so archiveSession(umo) can still locate them.
+        store.save(
+          `short_term_${umo}_${timestamp}_user`,
+          userMessage,
+          ["conversation", "short_term"],
+          {
+            memoryType: "short_term",
+            scope: "global",
+            scopeId: "",
+            priority: 0,
+          }
+        );
+      }
 
       // Save assistant response as short-term memory
       store.save(
