@@ -265,11 +265,26 @@ export class SqliteVectorStore extends VectorStore {
     index: number,
     kbId: string,
   ): Promise<void> {
-    this.db.prepare(`
-      INSERT OR REPLACE INTO kb_vectors
-        (chunk_id, embedding, content, doc_id, doc_name, chunk_index, kb_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(chunkId, embeddingToBuffer(embedding), content, docId, docName, index, kbId);
+    this.db.transaction(() => {
+      // 1. Insert/Replace Document metadata
+      this.db.prepare(`
+        INSERT OR REPLACE INTO kb_documents (id, kb_id, name, type, chunk_count, created_at)
+        VALUES (?, ?, ?, '', 1, ?)
+      `).run(docId, kbId, docName, Date.now());
+
+      // 2. Insert/Replace Chunk metadata
+      this.db.prepare(`
+        INSERT OR REPLACE INTO kb_chunks (id, doc_id, kb_id, content, chunk_index)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(chunkId, docId, kbId, content, index);
+
+      // 3. Insert/Replace Vector data
+      this.db.prepare(`
+        INSERT OR REPLACE INTO kb_vectors
+          (chunk_id, embedding, content, doc_id, doc_name, chunk_index, kb_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(chunkId, embeddingToBuffer(embedding), content, docId, docName, index, kbId);
+    })();
   }
 
   async batchUpsert(
@@ -283,14 +298,46 @@ export class SqliteVectorStore extends VectorStore {
       kbId: string;
     }>,
   ): Promise<void> {
-    const stmt = this.db.prepare(`
+    if (items.length === 0) return;
+
+    // Group items by docId to calculate chunk counts and insert documents
+    const docMap = new Map<string, { kbId: string; name: string; count: number }>();
+    for (const item of items) {
+      const existing = docMap.get(item.docId);
+      if (existing) {
+        existing.count = Math.max(existing.count, item.index + 1);
+      } else {
+        docMap.set(item.docId, { kbId: item.kbId, name: item.docName, count: item.index + 1 });
+      }
+    }
+
+    const docStmt = this.db.prepare(`
+      INSERT OR REPLACE INTO kb_documents (id, kb_id, name, type, chunk_count, created_at)
+      VALUES (?, ?, ?, '', ?, ?)
+    `);
+
+    const chunkStmt = this.db.prepare(`
+      INSERT OR REPLACE INTO kb_chunks (id, doc_id, kb_id, content, chunk_index)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+
+    const vectorStmt = this.db.prepare(`
       INSERT OR REPLACE INTO kb_vectors
         (chunk_id, embedding, content, doc_id, doc_name, chunk_index, kb_id)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
+
     this.db.transaction(() => {
+      // 1. Insert documents
+      const now = Date.now();
+      for (const [docId, doc] of docMap.entries()) {
+        docStmt.run(docId, doc.kbId, doc.name, doc.count, now);
+      }
+
+      // 2. Insert chunks and vectors
       for (const item of items) {
-        stmt.run(
+        chunkStmt.run(item.chunkId, item.docId, item.kbId, item.content, item.index);
+        vectorStmt.run(
           item.chunkId,
           embeddingToBuffer(item.embedding),
           item.content,

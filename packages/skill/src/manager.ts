@@ -91,7 +91,7 @@ export class SkillManager {
 
   private parseSkillsMdContent(content: string): ParsedSkillMd[] {
     const results: ParsedSkillMd[] = [];
-    const lines = content.split("\n");
+    const lines = content.split(/\r?\n/);
     let i = 0;
 
     while (i < lines.length) {
@@ -124,7 +124,7 @@ export class SkillManager {
           } else if (fm.name) {
             results.push({
               name: String(fm.name),
-              description: fm.description ? String(fm.description) : body.split("\n")[0]?.replace(/^#\s*/, "") || "",
+              description: fm.description ? String(fm.description) : body.split(/\r?\n/)[0]?.replace(/^#\s*/, "") || "",
               active: fm.active as boolean | undefined,
               readonly: fm.readonly as boolean | undefined,
             });
@@ -169,7 +169,7 @@ export class SkillManager {
 
   private parseYamlFrontmatter(yamlText: string): Record<string, string | boolean | number | unknown[]> {
     const result: Record<string, string | boolean | number | unknown[]> = {};
-    for (const rawLine of yamlText.split("\n")) {
+    for (const rawLine of yamlText.split(/\r?\n/)) {
       const line = rawLine.trim();
       if (!line || line.startsWith("#")) continue;
       const colonIdx = line.indexOf(":");
@@ -287,7 +287,7 @@ export class SkillManager {
   }
 
   private parseSkillMdContent(content: string, fallbackName: string): Partial<SkillManifest> {
-    const lines = content.split("\n");
+    const lines = content.split(/\r?\n/);
     let hasFrontmatter = false;
     let frontmatterEnd = -1;
 

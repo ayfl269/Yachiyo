@@ -60,7 +60,9 @@ export function createEmbeddingProvider(type: EmbeddingProviderType, config: Emb
   if (!factory) {
     throw new Error(`Unknown embedding provider type: ${type}`);
   }
-  return factory(config);
+  const provider = factory(config);
+  provider.providerConfig = config as unknown as Record<string, unknown>;
+  return provider;
 }
 
 // ─── Rerank Provider Factory ────────────────────────────────────────────────
@@ -83,7 +85,9 @@ export function createRerankProvider(type: RerankProviderType, config: RerankPro
   if (!factory) {
     throw new Error(`Unknown rerank provider type: ${type}`);
   }
-  return factory(config);
+  const provider = factory(config);
+  provider.providerConfig = config as unknown as Record<string, unknown>;
+  return provider;
 }
 
 // ─── Preset Rerank Configs ──────────────────────────────────────────────────
@@ -147,7 +151,9 @@ export function createTtsProvider(type: TTSProviderType, config: TTSProviderConf
   if (!factory) {
     throw new Error(`Unknown TTS provider type: ${type}`);
   }
-  return factory(config);
+  const provider = factory(config);
+  provider.providerConfig = config as unknown as Record<string, unknown>;
+  return provider;
 }
 
 // ─── STT Provider Factory ────────────────────────────────────────────────────
@@ -170,7 +176,9 @@ export function createSttProvider(type: STTProviderType, config: STTProviderConf
   if (!factory) {
     throw new Error(`Unknown STT provider type: ${type}`);
   }
-  return factory(config);
+  const provider = factory(config);
+  provider.providerConfig = config as unknown as Record<string, unknown>;
+  return provider;
 }
 
 // ─── Register TTS/STT Built-in Factories ─────────────────────────────────────
@@ -294,12 +302,16 @@ export async function dynamicCreateEmbeddingProvider(
 ): Promise<EmbeddingProvider | null> {
   const staticFactory = embeddingProviderFactories.get(type as EmbeddingProviderType);
   if (staticFactory) {
-    return staticFactory(config);
+    const provider = staticFactory(config);
+    provider.providerConfig = config as unknown as Record<string, unknown>;
+    return provider;
   }
 
   const cls = await dynamicImportProviderModule(type);
   if (cls) {
-    return new cls(config) as EmbeddingProvider;
+    const provider = new cls(config) as EmbeddingProvider;
+    provider.providerConfig = config as unknown as Record<string, unknown>;
+    return provider;
   }
 
   return null;
@@ -314,12 +326,16 @@ export async function dynamicCreateRerankProvider(
 ): Promise<RerankProvider | null> {
   const staticFactory = rerankProviderFactories.get(type as RerankProviderType);
   if (staticFactory) {
-    return staticFactory(config);
+    const provider = staticFactory(config);
+    provider.providerConfig = config as unknown as Record<string, unknown>;
+    return provider;
   }
 
   const cls = await dynamicImportProviderModule(type);
   if (cls) {
-    return new cls(config) as RerankProvider;
+    const provider = new cls(config) as RerankProvider;
+    provider.providerConfig = config as unknown as Record<string, unknown>;
+    return provider;
   }
 
   return null;
@@ -334,12 +350,16 @@ export async function dynamicCreateTtsProvider(
 ): Promise<TTSProvider | null> {
   const staticFactory = ttsProviderFactories.get(type as TTSProviderType);
   if (staticFactory) {
-    return staticFactory(config);
+    const provider = staticFactory(config);
+    provider.providerConfig = config as unknown as Record<string, unknown>;
+    return provider;
   }
 
   const cls = await dynamicImportProviderModule(type);
   if (cls) {
-    return new cls(config) as TTSProvider;
+    const provider = new cls(config) as TTSProvider;
+    provider.providerConfig = config as unknown as Record<string, unknown>;
+    return provider;
   }
 
   return null;
@@ -354,12 +374,16 @@ export async function dynamicCreateSttProvider(
 ): Promise<STTProvider | null> {
   const staticFactory = sttProviderFactories.get(type as STTProviderType);
   if (staticFactory) {
-    return staticFactory(config);
+    const provider = staticFactory(config);
+    provider.providerConfig = config as unknown as Record<string, unknown>;
+    return provider;
   }
 
   const cls = await dynamicImportProviderModule(type);
   if (cls) {
-    return new cls(config) as STTProvider;
+    const provider = new cls(config) as STTProvider;
+    provider.providerConfig = config as unknown as Record<string, unknown>;
+    return provider;
   }
 
   return null;
