@@ -28,6 +28,12 @@ export interface BackgroundTaskResult {
   toolArgs: Record<string, unknown>;
   note: string;
   summaryName: string;
+  /** Routing: unified message origin of the originating session */
+  umo: string;
+  /** Routing: session ID of the originating session */
+  sessionId: string;
+  /** Routing: platform adapter ID of the originating session */
+  platformId: string;
 }
 
 /**
@@ -593,14 +599,26 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
   }
 
   protected async wakeMainAgentForBackgroundResult(
-    _runContext: ContextWrapper<TContext>,
-    params: BackgroundTaskResult
+    runContext: ContextWrapper<TContext>,
+    params: Omit<BackgroundTaskResult, "umo" | "sessionId" | "platformId">
   ): Promise<void> {
+    // Extract routing info from the run context's event so the waker
+    // can deliver the result back to the originating user session.
+    const ctx = runContext.context as unknown as {
+      unifiedMsgOrigin?: string;
+      sessionId?: string;
+      getPlatformId?: () => string;
+    };
+    const routing = {
+      umo: ctx.unifiedMsgOrigin ?? "",
+      sessionId: ctx.sessionId ?? "",
+      platformId: typeof ctx.getPlatformId === "function" ? ctx.getPlatformId() : "",
+    };
     // Delegate to the background task bus which handles:
     // 1. Emitting "task_completed" event
     // 2. Calling the registered BackgroundTaskWaker (if any)
     // 3. Logging the result
-    await backgroundTaskBus.notifyCompleted(params);
+    await backgroundTaskBus.notifyCompleted({ ...params, ...routing });
   }
 
   /**

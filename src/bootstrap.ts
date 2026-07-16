@@ -52,6 +52,7 @@ import { proxyManager } from "@yachiyo/agent/proxy-manager.js";
 import { getSubAgentManagementTools } from "@yachiyo/agent/subagent-create-tool.js";
 import { SCHEDULER_MIGRATIONS, SqliteSchedulerTaskStore } from "@yachiyo/agent/scheduler-task-store.js";
 import { createSchedulerTool } from "@yachiyo/agent/scheduler-tool.js";
+import { backgroundTaskBus, type BackgroundTaskResult } from "@yachiyo/agent/tool-executor.js";
 import { createCrossPlatformSendTool } from "@yachiyo/agent/cross-platform-send-tool.js";
 import { createSavePlatformFileTool } from "@yachiyo/agent/save-platform-file-tool.js";
 import { TaskScheduler } from "@yachiyo/pipeline/task-scheduler.js";
@@ -477,6 +478,33 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
     adapter.triggerAgentMessage(target, prompt, onResponded, historyMessage);
   };
 
+  // 注册后台任务唤醒器：后台任务（isBackgroundTask=true 的工具或 background_task=true
+  // 的 handoff）完成后，通过 triggerAgentMessage 将结果回传给发起会话的模型，使其能
+  // 向用户汇报结果或执行后续操作。结果作为系统提示注入，不计入对话历史（仅模型回复入库）。
+  backgroundTaskBus.setWaker({
+    async wake(result: BackgroundTaskResult) {
+      if (!result.umo || !result.platformId) {
+        console.warn(`[BackgroundTaskWaker] Missing routing info for task ${result.taskId} (${result.summaryName}); result dropped.`);
+        return;
+      }
+      const adapter = adapterRegistry.getAdapter(result.platformId);
+      if (!adapter) {
+        console.warn(`[BackgroundTaskWaker] Adapter "${result.platformId}" not found for task ${result.taskId}; result dropped.`);
+        return;
+      }
+      const prompt = buildBackgroundResultPrompt(result);
+      const target = {
+        umo: result.umo,
+        sessionId: result.sessionId || result.umo,
+        platformId: result.platformId,
+      };
+      // historyMessage marks this as a system trigger: the raw prompt won't
+      // be saved to conversation history, but the model's reply will be.
+      adapter.triggerAgentMessage(target, prompt, undefined, result.summaryName);
+      console.log(`[BackgroundTaskWaker] Woke main agent for task ${result.taskId} (${result.summaryName}) on ${result.platformId}.`);
+    },
+  });
+
   // 启动定时任务调度器
   taskScheduler.start();
 
@@ -601,4 +629,32 @@ function buildPreFirePrompt(task: {
   if (task.payload) summaryParts.push(task.payload);
 
   return { prompt: lines.join("\n"), historyMessage: summaryParts.join(" — ") };
+}
+
+/**
+ * Build the prompt fed to the model when a background task completes.
+ * The model should read the result and decide whether to inform the user,
+ * execute follow-up actions, or simply acknowledge completion.
+ *
+ * Like pre-fire reminders, the raw prompt is NOT persisted to conversation
+ * history (via the historyMessage mechanism) — only the model's reply is saved.
+ */
+function buildBackgroundResultPrompt(result: {
+  taskId: string;
+  toolName: string;
+  resultText: string;
+  note: string;
+  summaryName: string;
+}): string {
+  const lines: string[] = [];
+  lines.push("[后台任务完成通知]");
+  lines.push(`任务: ${result.toolName}`);
+  lines.push(`任务ID: ${result.taskId}`);
+  lines.push(`说明: ${result.note}`);
+  lines.push("");
+  lines.push("执行结果:");
+  lines.push(result.resultText || "(无输出)");
+  lines.push("");
+  lines.push("请根据此结果向用户汇报，或执行后续操作。");
+  return lines.join("\n");
 }
