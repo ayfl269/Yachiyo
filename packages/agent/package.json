@@ -17,7 +17,7 @@
     "build": "tsc"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.15.0",
+    "@modelcontextprotocol/sdk": "^1.25.4",
     "@yachiyo/common": "workspace:*",
     "@yachiyo/provider": "workspace:*",
     "better-sqlite3": "^12.10.0",

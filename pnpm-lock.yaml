@@ -129,8 +129,8 @@ importers:
   packages/agent:
     dependencies:
       '@modelcontextprotocol/sdk':
-        specifier: 1.15.0
-        version: 1.15.0
+        specifier: ^1.25.4
+        version: 1.29.0(zod@3.25.3)
       '@yachiyo/common':
         specifier: workspace:*
         version: link:../common
@@ -787,10 +787,6 @@ packages:
   '@mixmark-io/domino@2.2.0':
     resolution: {integrity: sha512-Y28PR25bHXUg88kCV7nivXrP2Nj2RueZ3/l/jdx6J9f8J4nsEGcgX0Qe6lt7Pa+J79+kPiJU3LguR6O/6zrLOw==}
 
-  '@modelcontextprotocol/sdk@1.15.0':
-    resolution: {integrity: sha512-67hnl/ROKdb03Vuu0YOr+baKTvf1/5YBHBm9KnZdjdAh8hjt4FRCPD5ucwxGB237sBpzlqQsLy1PFu7z/ekZ9Q==}
-    engines: {node: '>=18'}
-
   '@modelcontextprotocol/sdk@1.29.0':
     resolution: {integrity: sha512-zo37mZA9hJWpULgkRpowewez1y6ML5GsXJPY8FI0tBBCd77HEvza4jDqRKOXgHNn867PVGCyTdzqpz0izu5ZjQ==}
     engines: {node: '>=18'}
@@ -1177,12 +1173,6 @@ packages:
   expand-template@2.0.3:
     resolution: {integrity: sha512-XYfuKMvj4O35f/pOXLObndIRvyQ+/+6AhODh+OKWj9S9498pHHn/IMszH+gt0fBCRWMNfk1ZSp5x3AifmnI2vg==}
     engines: {node: '>=6'}
-
-  express-rate-limit@7.5.0:
-    resolution: {integrity: sha512-eB5zbQh5h+VenMPM3fh+nw1YExi5nMr6HUCR62ELSP11huvxm/Uir1H1QEyTkk5QX6A58pX6NmaTMceKZ0Eodg==}
-    engines: {node: '>= 16'}
-    peerDependencies:
-      express: ^4.11 || 5 || ^5.0.0-beta.1
 
   express-rate-limit@8.5.2:
     resolution: {integrity: sha512-5Kb34ipNX694DH48vN9irak1Qx30nb0PLYHXfJgw4YEjiC3ZEmZJhwOp+VfiCYwFzvFTdB9QkArYS5kXa2cx2A==}
@@ -2109,23 +2099,6 @@ snapshots:
 
   '@mixmark-io/domino@2.2.0': {}
 
-  '@modelcontextprotocol/sdk@1.15.0':
-    dependencies:
-      ajv: 6.15.0
-      content-type: 1.0.5
-      cors: 2.8.6
-      cross-spawn: 7.0.6
-      eventsource: 3.0.7
-      eventsource-parser: 3.1.0
-      express: 5.2.1
-      express-rate-limit: 7.5.0(express@5.2.1)
-      pkce-challenge: 5.0.0
-      raw-body: 3.0.2
-      zod: 3.25.3
-      zod-to-json-schema: 3.25.2(zod@3.25.3)
-    transitivePeerDependencies:
-      - supports-color
-
   '@modelcontextprotocol/sdk@1.29.0(zod@3.25.3)':
     dependencies:
       '@hono/node-server': 1.19.14(hono@4.12.25)
@@ -2564,10 +2537,6 @@ snapshots:
       eventsource-parser: 3.1.0
 
   expand-template@2.0.3: {}
-
-  express-rate-limit@7.5.0(express@5.2.1):
-    dependencies:
-      express: 5.2.1
 
   express-rate-limit@8.5.2(express@5.2.1):
     dependencies:
