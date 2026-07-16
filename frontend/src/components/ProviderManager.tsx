@@ -572,6 +572,7 @@ export default function ProviderManager() {
     selectProviderSource(newSource)
     setIsSourceModified(true)
     setIsNewProviderSource(true)
+    setShowSourceApiKey(false)
     setShowAddSourceMenu(false)
     setShowSourceDrawer(true)
   }
@@ -624,6 +625,7 @@ export default function ProviderManager() {
   function openSourceDrawer(source: ProviderSource) {
     selectProviderSource(source)
     setIsNewProviderSource(false)
+    setShowSourceApiKey(false)
     setShowAddSourceMenu(false)
     setShowSourceDrawer(true)
   }
@@ -636,6 +638,7 @@ export default function ProviderManager() {
     setShowSourceDrawer(false)
     selectProviderSource(null)
     setIsNewProviderSource(false)
+    setShowSourceApiKey(false)
     // Clear cached real API keys so plaintext secrets don't persist in
     // component state after the drawer closes. Keys are re-fetched via
     // reveal_key only when the user explicitly clicks the eye icon again.
@@ -916,6 +919,7 @@ export default function ProviderManager() {
     if (!template) return
     setNonChatConfigData(structuredClone(template))
     setNonChatConfigMode('add')
+    setShowNonChatPassword({})
     setShowAddProviderDialog(false)
     setShowNonChatConfigDialog(true)
   }
@@ -928,13 +932,16 @@ export default function ProviderManager() {
   // Non-chat provider full config edit
   function openNonChatProviderEdit(provider: Provider) {
     const cloned = structuredClone(provider)
-    // Clear masked key — user enters new key or leaves empty to keep existing
-    if (cloned.key === '********' || cloned.key === '***') {
-      cloned.key = ''
-    }
     setNonChatConfigData(cloned)
     setNonChatConfigMode('edit')
+    setShowNonChatPassword({})
     setShowNonChatConfigDialog(true)
+  }
+
+  function closeNonChatConfigDialog() {
+    setShowNonChatConfigDialog(false)
+    setShowNonChatPassword({})
+    setRevealedKeys({})
   }
 
   async function saveNonChatConfig() {
@@ -959,7 +966,7 @@ export default function ProviderManager() {
       const json = await parseResponseJson(res)
       if (json.status === 'error') throw new Error(json.message)
       showMessage(json.message || (isEditing ? '更新成功' : '添加成功'))
-      setShowNonChatConfigDialog(false)
+      closeNonChatConfigDialog()
       loadConfig()
     } catch (error: any) {
       showMessage(error.message || '保存失败', 'error')
@@ -1622,12 +1629,12 @@ export default function ProviderManager() {
       {/* Non-Chat Provider Full Config Dialog */}
       <Modal
         open={showNonChatConfigDialog}
-        onClose={() => { setShowNonChatConfigDialog(false); setRevealedKeys({}) }}
+        onClose={closeNonChatConfigDialog}
         title={`${nonChatConfigMode === 'add' ? '添加' : '编辑'} ${nonChatProviderLabel} 提供商`}
         size="lg"
         footer={
           <>
-            <button className="btn" disabled={nonChatConfigSaving} onClick={() => setShowNonChatConfigDialog(false)}>取消</button>
+            <button className="btn" disabled={nonChatConfigSaving} onClick={closeNonChatConfigDialog}>取消</button>
             <button className="btn primary" disabled={nonChatConfigSaving} onClick={() => void saveNonChatConfig()}>
               {nonChatConfigSaving ? '保存中...' : (nonChatConfigMode === 'add' ? '创建' : '保存')}
             </button>
