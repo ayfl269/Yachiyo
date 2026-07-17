@@ -169,9 +169,30 @@ export class SkillManager {
 
   private parseYamlFrontmatter(yamlText: string): Record<string, string | boolean | number | unknown[]> {
     const result: Record<string, string | boolean | number | unknown[]> = {};
+    let currentKey = ""; // 追踪当前 key，用于将块序列项 (- item) 归属到正确的 key
+
     for (const rawLine of yamlText.split(/\r?\n/)) {
       const line = rawLine.trim();
       if (!line || line.startsWith("#")) continue;
+
+      // YAML 块序列项：以 - 或 * 开头的行
+      // 将其值追加到 currentKey 的数组中
+      if (line.startsWith("- ") || line.startsWith("* ") || line === "-") {
+        if (!currentKey) continue;
+        const item = line === "-" ? "" : line.replace(/^[-*]\s+/, "");
+        const parsedItem = this.parseScalarValue(item);
+        const existing = result[currentKey];
+        if (Array.isArray(existing)) {
+          existing.push(parsedItem);
+        } else if (existing !== undefined && existing !== "") {
+          result[currentKey] = [existing, parsedItem];
+        } else {
+          // existing 为 undefined 或空串（key: 后无内联值），创建数组
+          result[currentKey] = [parsedItem];
+        }
+        continue;
+      }
+
       const colonIdx = line.indexOf(":");
       if (colonIdx < 0) continue;
       const key = line.substring(0, colonIdx).trim();
@@ -187,6 +208,7 @@ export class SkillManager {
         try { value = JSON.parse(value.replace(/'/g, '"')); } catch { /* keep as string */ }
       }
 
+      currentKey = key; // 更新当前 key，供后续块序列项使用
       const existing = result[key];
       if (Array.isArray(existing)) {
         existing.push(value);
@@ -197,6 +219,20 @@ export class SkillManager {
       }
     }
     return result;
+  }
+
+  /**
+   * 将标量字符串解析为合适的类型（boolean/number/inline-array/string）。
+   * 用于解析 YAML 块序列项的值。
+   */
+  private parseScalarValue(raw: string): string | boolean | number | unknown[] {
+    if (raw === "true") return true;
+    if (raw === "false") return false;
+    if (/^-?\d+(\.\d+)?$/.test(raw)) return Number(raw);
+    if (raw.startsWith("[") && raw.endsWith("]")) {
+      try { return JSON.parse(raw.replace(/'/g, '"')); } catch { /* keep as string */ }
+    }
+    return raw;
   }
 
   private async scanSkillsDirectory(): Promise<void> {
