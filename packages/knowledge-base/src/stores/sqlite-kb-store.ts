@@ -266,23 +266,43 @@ export class SqliteVectorStore extends VectorStore {
     kbId: string,
   ): Promise<void> {
     this.db.transaction(() => {
-      // 1. Insert/Replace Document metadata
+      // 1. Upsert Document metadata
+      // 使用 ON CONFLICT(id) DO UPDATE 而非 INSERT OR REPLACE，避免触发
+      // kb_chunks.doc_id 的 ON DELETE CASCADE 级联删除已有 chunks/vectors。
       this.db.prepare(`
-        INSERT OR REPLACE INTO kb_documents (id, kb_id, name, type, chunk_count, created_at)
+        INSERT INTO kb_documents (id, kb_id, name, type, chunk_count, created_at)
         VALUES (?, ?, ?, '', 1, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          kb_id = excluded.kb_id,
+          name = excluded.name,
+          type = excluded.type,
+          chunk_count = excluded.chunk_count,
+          created_at = excluded.created_at
       `).run(docId, kbId, docName, Date.now());
 
-      // 2. Insert/Replace Chunk metadata
+      // 2. Upsert Chunk metadata
       this.db.prepare(`
-        INSERT OR REPLACE INTO kb_chunks (id, doc_id, kb_id, content, chunk_index)
+        INSERT INTO kb_chunks (id, doc_id, kb_id, content, chunk_index)
         VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          doc_id = excluded.doc_id,
+          kb_id = excluded.kb_id,
+          content = excluded.content,
+          chunk_index = excluded.chunk_index
       `).run(chunkId, docId, kbId, content, index);
 
-      // 3. Insert/Replace Vector data
+      // 3. Upsert Vector data（chunk_id 上有 UNIQUE 约束）
       this.db.prepare(`
-        INSERT OR REPLACE INTO kb_vectors
+        INSERT INTO kb_vectors
           (chunk_id, embedding, content, doc_id, doc_name, chunk_index, kb_id)
         VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(chunk_id) DO UPDATE SET
+          embedding = excluded.embedding,
+          content = excluded.content,
+          doc_id = excluded.doc_id,
+          doc_name = excluded.doc_name,
+          chunk_index = excluded.chunk_index,
+          kb_id = excluded.kb_id
       `).run(chunkId, embeddingToBuffer(embedding), content, docId, docName, index, kbId);
     })();
   }
@@ -312,19 +332,37 @@ export class SqliteVectorStore extends VectorStore {
     }
 
     const docStmt = this.db.prepare(`
-      INSERT OR REPLACE INTO kb_documents (id, kb_id, name, type, chunk_count, created_at)
+      INSERT INTO kb_documents (id, kb_id, name, type, chunk_count, created_at)
       VALUES (?, ?, ?, '', ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        kb_id = excluded.kb_id,
+        name = excluded.name,
+        type = excluded.type,
+        chunk_count = excluded.chunk_count,
+        created_at = excluded.created_at
     `);
 
     const chunkStmt = this.db.prepare(`
-      INSERT OR REPLACE INTO kb_chunks (id, doc_id, kb_id, content, chunk_index)
+      INSERT INTO kb_chunks (id, doc_id, kb_id, content, chunk_index)
       VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        doc_id = excluded.doc_id,
+        kb_id = excluded.kb_id,
+        content = excluded.content,
+        chunk_index = excluded.chunk_index
     `);
 
     const vectorStmt = this.db.prepare(`
-      INSERT OR REPLACE INTO kb_vectors
+      INSERT INTO kb_vectors
         (chunk_id, embedding, content, doc_id, doc_name, chunk_index, kb_id)
       VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(chunk_id) DO UPDATE SET
+        embedding = excluded.embedding,
+        content = excluded.content,
+        doc_id = excluded.doc_id,
+        doc_name = excluded.doc_name,
+        chunk_index = excluded.chunk_index,
+        kb_id = excluded.kb_id
     `);
 
     this.db.transaction(() => {

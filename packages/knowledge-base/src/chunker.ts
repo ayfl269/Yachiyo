@@ -65,7 +65,9 @@ export class TextChunker {
   }
 
   private getOverlapTail(text: string, overlapSize: number): string {
-    if (overlapSize <= 0 || text.length <= overlapSize) return text;
+    // overlapSize <= 0 时无重叠，返回空串；text 短于 overlapSize 时全部作为重叠尾部
+    if (overlapSize <= 0) return "";
+    if (text.length <= overlapSize) return text;
     return text.slice(-overlapSize);
   }
 }
