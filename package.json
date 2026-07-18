@@ -38,7 +38,7 @@
     "@yachiyo/provider": "workspace:*",
     "@yachiyo/skill": "workspace:*",
     "@yachiyo/t2i": "workspace:*",
-    "adm-zip": "^0.5.17",
+    "adm-zip": "^0.6.0",
     "better-sqlite3": "^12.10.0",
     "eventemitter3": "^5.0.1",
     "playwright": "^1.60.0",
