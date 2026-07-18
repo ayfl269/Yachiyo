@@ -16,21 +16,33 @@ interface FileLockEntry {
   acquiredAt: number;
 }
 
+interface Waiter {
+  path: string;
+  mode: FileLockMode;
+  holderId: string;
+  resolve: (granted: boolean) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
 /**
  * Manages file locks across parallel sub-agents.
  * - Multiple readers can hold a read lock simultaneously.
  * - A write lock is exclusive (blocks both reads and writes).
  * - Prevents race conditions when sub-agents access the same files.
+ *
+ * Data structure: locks and waiters are bucketed by path in Maps, so
+ * all per-path operations (canGrant, release, processQueue) are O(k)
+ * where k = number of waiters for that path (typically tiny). Global
+ * operations like {@link releaseAll} iterate the lock buckets; total
+ * work is O(L) where L = number of distinct locked paths (not number
+ * of waiters across the whole manager, as in the previous flat-array
+ * implementation).
  */
 export class FileLockManager {
-  private locks: FileLockEntry[] = [];
-  private waitQueue: Array<{
-    path: string;
-    mode: FileLockMode;
-    holderId: string;
-    resolve: (granted: boolean) => void;
-    timeout: NodeJS.Timeout;
-  }> = [];
+  /** Locks grouped by path. Each bucket holds all active holders for that path. */
+  private locksByPath: Map<string, FileLockEntry[]> = new Map();
+  /** Waiters grouped by path. Each bucket is a strict FIFO queue. */
+  private waitQueueByPath: Map<string, Waiter[]> = new Map();
 
   /**
    * Try to acquire a file lock.
@@ -44,20 +56,34 @@ export class FileLockManager {
   ): Promise<boolean> {
     // Check if lock can be granted immediately
     if (this.canGrant(path, mode, holderId)) {
-      this.locks.push({ path, mode, holderId, acquiredAt: Date.now() });
+      this.addLock(path, mode, holderId);
       return true;
     }
 
     // Otherwise, queue the request
     return new Promise<boolean>((resolve) => {
       const timeout = setTimeout(() => {
-        // Timeout: remove from queue and reject
-        const idx = this.waitQueue.findIndex((w) => w.resolve === resolve);
-        if (idx !== -1) this.waitQueue.splice(idx, 1);
+        // Timeout: remove this waiter from the per-path queue and reject.
+        const queue = this.waitQueueByPath.get(path);
+        if (queue) {
+          const idx = queue.findIndex((w) => w.resolve === resolve);
+          if (idx !== -1) {
+            queue.splice(idx, 1);
+            if (queue.length === 0) {
+              this.waitQueueByPath.delete(path);
+            }
+          }
+        }
         resolve(false);
       }, timeoutMs);
 
-      this.waitQueue.push({ path, mode, holderId, resolve, timeout });
+      const waiter: Waiter = { path, mode, holderId, resolve, timeout };
+      const queue = this.waitQueueByPath.get(path);
+      if (queue) {
+        queue.push(waiter);
+      } else {
+        this.waitQueueByPath.set(path, [waiter]);
+      }
     });
   }
 
@@ -65,14 +91,17 @@ export class FileLockManager {
    * Release a file lock held by a specific holder.
    */
   release(path: string, holderId: string): void {
-    const before = this.locks.length;
-    this.locks = this.locks.filter(
-      (l) => !(l.path === path && l.holderId === holderId)
-    );
-
-    if (this.locks.length < before) {
-      // Try to grant queued requests
-      this.processQueue();
+    const bucket = this.locksByPath.get(path);
+    if (!bucket) return;
+    const before = bucket.length;
+    const remaining = bucket.filter((l) => l.holderId !== holderId);
+    if (remaining.length === 0) {
+      this.locksByPath.delete(path);
+    } else {
+      this.locksByPath.set(path, remaining);
+    }
+    if (remaining.length < before) {
+      this.processQueue(path);
     }
   }
 
@@ -80,8 +109,21 @@ export class FileLockManager {
    * Release all locks held by a specific holder (e.g., when a sub-agent finishes).
    */
   releaseAll(holderId: string): void {
-    this.locks = this.locks.filter((l) => l.holderId !== holderId);
-    this.processQueue();
+    const affectedPaths: string[] = [];
+    for (const [path, bucket] of this.locksByPath) {
+      const remaining = bucket.filter((l) => l.holderId !== holderId);
+      if (remaining.length === 0) {
+        this.locksByPath.delete(path);
+        affectedPaths.push(path);
+      } else if (remaining.length < bucket.length) {
+        this.locksByPath.set(path, remaining);
+        affectedPaths.push(path);
+      }
+    }
+    // Process queues for each affected path.
+    for (const path of affectedPaths) {
+      this.processQueue(path);
+    }
   }
 
   /**
@@ -90,41 +132,63 @@ export class FileLockManager {
    * otherwise leaks locks across test runs, causing mysterious deadlocks.
    */
   reset(): void {
-    this.locks = [];
-    const queue = this.waitQueue.splice(0);
-    queue.forEach((w) => {
-      clearTimeout(w.timeout);
-      w.resolve(false);
-    });
+    this.locksByPath.clear();
+    for (const queue of this.waitQueueByPath.values()) {
+      for (const w of queue) {
+        clearTimeout(w.timeout);
+        w.resolve(false);
+      }
+    }
+    this.waitQueueByPath.clear();
   }
 
   /**
    * Check if a path is currently locked (by anyone other than the holder).
    */
   isLocked(path: string, holderId?: string): boolean {
-    return this.locks.some(
-      (l) => l.path === path && (!holderId || l.holderId !== holderId)
-    );
+    const bucket = this.locksByPath.get(path);
+    if (!bucket || bucket.length === 0) return false;
+    if (!holderId) return true;
+    return bucket.some((l) => l.holderId !== holderId);
   }
 
   /**
    * Get all locks currently held.
    */
   getLocks(): ReadonlyArray<Readonly<FileLockEntry>> {
-    return [...this.locks];
+    const result: FileLockEntry[] = [];
+    for (const bucket of this.locksByPath.values()) {
+      result.push(...bucket);
+    }
+    return result;
   }
 
   /**
    * Get all locks held by a specific holder.
    */
   getLocksByHolder(holderId: string): ReadonlyArray<Readonly<FileLockEntry>> {
-    return this.locks.filter((l) => l.holderId === holderId);
+    const result: FileLockEntry[] = [];
+    for (const bucket of this.locksByPath.values()) {
+      for (const l of bucket) {
+        if (l.holderId === holderId) result.push(l);
+      }
+    }
+    return result;
+  }
+
+  private addLock(path: string, mode: FileLockMode, holderId: string): void {
+    const entry: FileLockEntry = { path, mode, holderId, acquiredAt: Date.now() };
+    const bucket = this.locksByPath.get(path);
+    if (bucket) {
+      bucket.push(entry);
+    } else {
+      this.locksByPath.set(path, [entry]);
+    }
   }
 
   private canGrant(path: string, mode: FileLockMode, holderId: string): boolean {
-    const existingLocks = this.locks.filter((l) => l.path === path);
-
-    if (existingLocks.length === 0) return true;
+    const existingLocks = this.locksByPath.get(path);
+    if (!existingLocks || existingLocks.length === 0) return true;
 
     // Same holder can always re-acquire
     if (existingLocks.every((l) => l.holderId === holderId)) return true;
@@ -138,49 +202,44 @@ export class FileLockManager {
     return false;
   }
 
-  private processQueue(): void {
-    // Per-path FIFO fairness.
-    //
-    // Previously this method iterated the entire waitQueue and granted any
-    // request whose lock could be granted, regardless of position. That meant
-    // a later-arriving reader for path A could jump ahead of an earlier
-    // blocked writer for the same path A, potentially starving the writer
-    // indefinitely under heavy read traffic.
-    //
-    // Now we track paths that have already been "blocked" earlier in the
-    // queue: once a waiter for path P cannot be granted, no later waiter
-    // for the same path P is granted in this pass either. This guarantees
-    // strict per-path FIFO ordering while still allowing unrelated paths to
-    // proceed independently.
-    const granted: number[] = [];
-    const blockedPaths = new Set<string>();
+  /**
+   * Process the wait queue for a single path.
+   *
+   * Per-path FIFO fairness: walk the queue front-to-back, granting
+   * requests whose lock can now be acquired. As soon as a waiter
+   * cannot be granted, stop processing further waiters for the same
+   * path — they must wait for the head to be granted or removed.
+   *
+   * This is O(k) where k = number of waiters for this path, since we
+   * only touch the per-path bucket (not the whole global queue as in
+   * the previous flat-array implementation).
+   */
+  private processQueue(path: string): void {
+    const queue = this.waitQueueByPath.get(path);
+    if (!queue || queue.length === 0) return;
 
-    for (let i = 0; i < this.waitQueue.length; i++) {
-      const waiter = this.waitQueue[i];
-      if (blockedPaths.has(waiter.path)) {
-        // An earlier waiter for this same path is still blocked; do not
-        // jump ahead of it.
-        continue;
-      }
-      if (this.canGrant(waiter.path, waiter.mode, waiter.holderId)) {
-        this.locks.push({
-          path: waiter.path,
-          mode: waiter.mode,
-          holderId: waiter.holderId,
-          acquiredAt: Date.now(),
-        });
+    const grantedIdx: number[] = [];
+    for (let i = 0; i < queue.length; i++) {
+      const waiter = queue[i];
+      if (this.canGrant(path, waiter.mode, waiter.holderId)) {
+        this.addLock(path, waiter.mode, waiter.holderId);
         clearTimeout(waiter.timeout);
         waiter.resolve(true);
-        granted.push(i);
+        grantedIdx.push(i);
       } else {
-        // Block all later waiters on the same path from jumping ahead.
-        blockedPaths.add(waiter.path);
+        // Strict FIFO: once a waiter is blocked, all later waiters
+        // for the same path must wait too. Stop processing.
+        break;
       }
     }
 
-    // Remove granted entries from queue (reverse order to preserve indices)
-    for (let i = granted.length - 1; i >= 0; i--) {
-      this.waitQueue.splice(granted[i], 1);
+    if (grantedIdx.length === 0) return;
+    // Remove granted entries (reverse order to preserve indices).
+    for (let i = grantedIdx.length - 1; i >= 0; i--) {
+      queue.splice(grantedIdx[i], 1);
+    }
+    if (queue.length === 0) {
+      this.waitQueueByPath.delete(path);
     }
   }
 }
@@ -227,6 +286,22 @@ export interface SubAgentTaskOptions {
 
   /** Callback when all tasks in a batch are done. */
   onBatchComplete?: (tasks: SubAgentTask[]) => void;
+
+  /**
+   * Maximum number of terminal (completed/failed/cancelled) task
+   * entries to retain in the tasks map for late lookups. Once exceeded,
+   * oldest terminal entries are evicted FIFO. Pending and running
+   * tasks are never evicted. Default: 500.
+   */
+  maxRetainedTasks?: number;
+
+  /**
+   * Time-to-live for terminal task entries in milliseconds. Entries
+   * older than this are eligible for eviction on the next sweep.
+   * Default: 10 minutes. Set to 0 to disable time-based eviction
+   * (count-based eviction via {@link maxRetainedTasks} still applies).
+   */
+  terminalTaskTtlMs?: number;
 }
 
 /**
@@ -241,6 +316,32 @@ export class SubAgentTaskManager extends EventEmitter {
   private onTaskComplete?: (task: SubAgentTask) => void;
   private onTaskFailed?: (task: SubAgentTask) => void;
   private onBatchComplete?: (tasks: SubAgentTask[]) => void;
+  /**
+   * Maximum number of completed/failed/cancelled task entries to retain
+   * in {@link tasks} for late {@link getTask} / {@link waitForAll} lookups.
+   * Once exceeded, oldest terminal entries are evicted (FIFO). Pending
+   * and running tasks are never evicted.
+   *
+   * Default 500 — generous enough for typical fan-out workloads, bounded
+   * enough that a long-lived manager doesn't leak memory if callers
+   * submit tasks without polling results.
+   */
+  private maxRetainedTasks: number;
+  /**
+   * Total number of terminal tasks evicted since startup. Exposed via
+   * the public {@link evictedTaskCount} getter for metrics.
+   */
+  private _evictedTaskCount: number = 0;
+  /**
+   * TTL for terminal task entries in milliseconds. Entries older than
+   * this are eligible for eviction during {@link pruneTerminalTasks}
+   * sweeps (called on every {@link submit}). Default 10 minutes — long
+   * enough for late {@link waitForAll} callers, short enough to bound
+   * memory in long runs. Set to 0 to disable time-based eviction.
+   */
+  private terminalTaskTtlMs: number;
+  /** Timestamp of the last {@link pruneTerminalTasks} sweep. Used to rate-limit sweeps to one per second. */
+  private lastPruneAt: number = 0;
 
   constructor(options?: SubAgentTaskOptions) {
     super();
@@ -249,6 +350,64 @@ export class SubAgentTaskManager extends EventEmitter {
     this.onTaskComplete = options?.onTaskComplete;
     this.onTaskFailed = options?.onTaskFailed;
     this.onBatchComplete = options?.onBatchComplete;
+    this.maxRetainedTasks = options?.maxRetainedTasks ?? 500;
+    this.terminalTaskTtlMs = options?.terminalTaskTtlMs ?? 10 * 60 * 1000;
+  }
+
+  /**
+   * Number of terminal task entries evicted since startup. Useful for
+   * metrics: a non-zero count indicates callers are submitting tasks
+   * without consuming results, which may indicate a leak in caller
+   * code (not in this manager).
+   */
+  get evictedTaskCount(): number {
+    return this._evictedTaskCount;
+  }
+
+  /**
+   * Remove terminal task entries (completed/failed/cancelled) that are
+   * either older than {@link terminalTaskTtlMs} or exceed the
+   * {@link maxRetainedTasks} cap. Pending and running tasks are never
+   * removed. Sweeps are rate-limited to one per second to amortize
+   * cost — callers may invoke freely on every {@link submit}.
+   *
+   * Returns the number of entries removed.
+   */
+  private pruneTerminalTasks(): number {
+    const now = Date.now();
+    // Rate-limit: at most one sweep per second.
+    if (now - this.lastPruneAt < 1000) return 0;
+    this.lastPruneAt = now;
+
+    let removed = 0;
+    // Pass 1: time-based eviction.
+    if (this.terminalTaskTtlMs > 0) {
+      for (const [id, task] of this.tasks) {
+        const isTerminal = task.status === "completed" || task.status === "failed" || task.status === "cancelled";
+        if (!isTerminal) continue;
+        const settledAt = task.completedAt ?? 0;
+        if (settledAt > 0 && now - settledAt > this.terminalTaskTtlMs) {
+          this.tasks.delete(id);
+          removed++;
+        }
+      }
+    }
+    // Pass 2: count-based eviction (FIFO by settle time).
+    const terminalEntries: Array<[string, SubAgentTask]> = [];
+    for (const [id, task] of this.tasks) {
+      const isTerminal = task.status === "completed" || task.status === "failed" || task.status === "cancelled";
+      if (isTerminal) terminalEntries.push([id, task]);
+    }
+    if (terminalEntries.length > this.maxRetainedTasks) {
+      terminalEntries.sort((a, b) => (a[1].completedAt ?? 0) - (b[1].completedAt ?? 0));
+      const evictCount = terminalEntries.length - this.maxRetainedTasks;
+      for (let i = 0; i < evictCount; i++) {
+        this.tasks.delete(terminalEntries[i][0]);
+        removed++;
+      }
+    }
+    this._evictedTaskCount += removed;
+    return removed;
   }
 
   /**
@@ -256,6 +415,10 @@ export class SubAgentTaskManager extends EventEmitter {
    * Returns the task ID.
    */
   submit(agentName: string, input: string): string {
+    // Opportunistic cleanup of terminal task entries. Rate-limited
+    // internally to one sweep per second; safe to call on every submit.
+    this.pruneTerminalTasks();
+
     const id = crypto.randomUUID();
     const task: SubAgentTask = {
       id,

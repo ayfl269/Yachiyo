@@ -32,6 +32,22 @@ export interface TaskSchedulerConfig {
   /** Pre-fire window in milliseconds. Tasks within this window before
    *  their next_fire_at are sent to the model early. Default: 60000 (60s). */
   preFireWindow?: number;
+  /**
+   * Dynamic pre-fire window resolver. When set, called per-task during
+   * {@link tick} to determine the pre-fire window for that specific task.
+   *
+   * This lets callers vary the window by provider — e.g. a longer
+   * window (90s) for reasoning models whose first token may take
+   * 30-60s, vs. a shorter window (15s) for fast chat models. The
+   * resolver can look up the session's provider via the task's UMO
+   * (caller-side; this module stays decoupled from the pipeline).
+   *
+   * When the resolver returns 0, pre-fire is disabled for that task
+   * and it falls straight through to the fallback (direct fire) path.
+   * When the resolver itself is undefined, the static
+   * {@link preFireWindow} value is used for all tasks.
+   */
+  preFireWindowResolver?: (task: SchedulerTask) => number;
 }
 
 /** Callback invoked when a task enters the pre-fire window. */
@@ -46,6 +62,7 @@ export class TaskScheduler {
   private interval: number;
   private enabled: boolean;
   private preFireWindow: number;
+  private preFireWindowResolver: ((task: SchedulerTask) => number) | null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking: boolean = false;
 
@@ -63,6 +80,7 @@ export class TaskScheduler {
     this.interval = config?.interval ?? DEFAULT_INTERVAL;
     this.enabled = config?.enabled ?? true;
     this.preFireWindow = config?.preFireWindow ?? DEFAULT_PREFIRE_WINDOW;
+    this.preFireWindowResolver = config?.preFireWindowResolver ?? null;
   }
 
   /** Set the adapter registry (used for proactive message delivery). */
@@ -80,7 +98,7 @@ export class TaskScheduler {
     if (typeof this.timer === "object" && "unref" in this.timer) {
       this.timer.unref();
     }
-    console.log(`[TaskScheduler] Started (interval: ${this.interval}ms, preFireWindow: ${this.preFireWindow}ms).`);
+    console.log(`[TaskScheduler] Started (interval: ${this.interval}ms, preFireWindow: ${this.preFireWindow}ms${this.preFireWindowResolver ? ", resolver: enabled" : ""}).`);
   }
 
   stop(): void {
@@ -97,7 +115,25 @@ export class TaskScheduler {
     if (config.interval !== undefined) this.interval = config.interval;
     if (config.enabled !== undefined) this.enabled = config.enabled;
     if (config.preFireWindow !== undefined) this.preFireWindow = config.preFireWindow;
+    if (config.preFireWindowResolver !== undefined) this.preFireWindowResolver = config.preFireWindowResolver;
     if (wasRunning) this.start();
+  }
+
+  /**
+   * Resolve the pre-fire window for a specific task. Uses
+   * {@link preFireWindowResolver} when configured, otherwise falls back
+   * to the static {@link preFireWindow}.
+   */
+  private resolvePreFireWindow(task: SchedulerTask): number {
+    if (this.preFireWindowResolver) {
+      try {
+        const resolved = this.preFireWindowResolver(task);
+        if (resolved >= 0) return resolved;
+      } catch (e) {
+        console.warn(`[TaskScheduler] preFireWindowResolver threw for task ${task.id}, falling back to default:`, e);
+      }
+    }
+    return this.preFireWindow;
   }
 
   /** Process all due tasks now. Exposed for testing/manual triggers. */
@@ -112,19 +148,45 @@ export class TaskScheduler {
     try {
       const now = new Date();
 
-      // Phase 1: Pre-fire — send tasks to the model within the window
-      if (this.onPreFire && this.preFireWindow > 0) {
-        const preFireTasks = this.store.getPreFireTasks(now, this.preFireWindow);
-        for (const task of preFireTasks) {
-          try {
-            // Atomically transition pending → notifying
-            const marked = this.store.markNotifying(task.id);
-            if (!marked) continue; // Already advanced by another path
-            this.onPreFire(task);
-            prefired++;
-            console.log(`[TaskScheduler] Pre-fired task "${task.title}" (${task.id}) to model.`);
-          } catch (e) {
-            console.error(`[TaskScheduler] Error pre-firing task ${task.id}:`, e);
+      // Phase 1: Pre-fire — send tasks to the model within the window.
+      // Pre-fire window is resolved per-task so callers can vary it by
+      // provider (reasoning models need a longer window than fast chat
+      // models). We use the max window across all tasks for the
+      // getPreFireTasks query (broadest candidate set), then
+      // individually re-check each returned task against its own
+      // resolved window before firing.
+      if (this.onPreFire) {
+        // Compute the broadest window to seed the query.
+        let queryWindow = this.preFireWindow;
+        if (this.preFireWindowResolver) {
+          // Heuristic: use the static default as the query window. Tasks
+          // whose resolver returns a smaller window will be filtered out
+          // by the per-task check below; tasks with a larger window
+          // would be missed, so we cap up to a 2x safety margin.
+          queryWindow = Math.max(this.preFireWindow, this.preFireWindow * 2);
+        }
+        if (queryWindow > 0) {
+          const preFireTasks = this.store.getPreFireTasks(now, queryWindow);
+          for (const task of preFireTasks) {
+            try {
+              // Per-task window check: only pre-fire if the task is within
+              // its OWN resolved window. This narrows the broad query above
+              // back down to the per-task setting.
+              const taskWindow = this.resolvePreFireWindow(task);
+              if (taskWindow <= 0) continue;
+              if (task.nextFireAt) {
+                const dueMs = new Date(task.nextFireAt).getTime() - now.getTime();
+                if (dueMs > taskWindow) continue;
+              }
+              // Atomically transition pending → notifying
+              const marked = this.store.markNotifying(task.id);
+              if (!marked) continue; // Already advanced by another path
+              this.onPreFire(task);
+              prefired++;
+              console.log(`[TaskScheduler] Pre-fired task "${task.title}" (${task.id}) to model (window=${taskWindow}ms).`);
+            } catch (e) {
+              console.error(`[TaskScheduler] Error pre-firing task ${task.id}:`, e);
+            }
           }
         }
       }

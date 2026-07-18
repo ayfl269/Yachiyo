@@ -87,6 +87,20 @@ class BackgroundTaskEventBus extends EventEmitter {
    * across long-lived runs.
    */
   private taskAborts: Map<string, AbortController> = new Map();
+  /**
+   * Cumulative counters for observability. Exposed via
+   * {@link getStats} for metrics endpoints.
+   *
+   * - `droppedPendingCount`: results dropped because the pending buffer
+   *   was full AND no waker was registered. Indicates the caller failed
+   *   to call {@link setWaker} in time, or the waker died and was never
+   *   replaced.
+   * - `totalCompletedCount`: total results ever reported to
+   *   {@link notifyCompleted}. Useful as a denominator for
+   *   `droppedPendingCount / totalCompletedCount` to compute drop rate.
+   */
+  private droppedPendingCount: number = 0;
+  private totalCompletedCount: number = 0;
 
   static getInstance(): BackgroundTaskEventBus {
     if (!BackgroundTaskEventBus.instance) {
@@ -147,6 +161,34 @@ class BackgroundTaskEventBus extends EventEmitter {
   }
 
   /**
+   * Snapshot of background task bus counters for observability.
+   *
+   * - `pendingResults`: current size of the no-waker replay buffer.
+   * - `droppedPendingCount`: cumulative results dropped because the
+   *   buffer was full AND no waker was registered. Non-zero indicates
+   *   the caller failed to register a waker in time, or the waker
+   *   died and was never replaced.
+   * - `totalCompletedCount`: total results ever reported to
+   *   {@link notifyCompleted}. Useful as denominator for drop rate:
+   *   `droppedPendingCount / totalCompletedCount`.
+   * - `activeTaskCount`: number of currently-running background tasks
+   *   (i.e. AbortControllers currently registered).
+   */
+  getStats(): {
+    pendingResults: number;
+    droppedPendingCount: number;
+    totalCompletedCount: number;
+    activeTaskCount: number;
+  } {
+    return {
+      pendingResults: this.pendingResults.length,
+      droppedPendingCount: this.droppedPendingCount,
+      totalCompletedCount: this.totalCompletedCount,
+      activeTaskCount: this.taskAborts.size,
+    };
+  }
+
+  /**
    * Register a waker that will be called when any background task completes.
    * If results were produced before a waker was set, they are replayed
    * asynchronously (best-effort) so no completion is silently lost.
@@ -184,6 +226,7 @@ class BackgroundTaskEventBus extends EventEmitter {
   async notifyCompleted(result: BackgroundTaskResult): Promise<void> {
     // 1. Emit event for subscribers
     this.emit("task_completed", result);
+    this.totalCompletedCount++;
 
     // 2. Call waker if registered
     if (this.waker) {
@@ -197,9 +240,10 @@ class BackgroundTaskEventBus extends EventEmitter {
       this.pendingResults.push(result);
       if (this.pendingResults.length > BackgroundTaskEventBus.MAX_PENDING) {
         const dropped = this.pendingResults.shift();
+        this.droppedPendingCount++;
         console.warn(
           `[BackgroundTask] Pending buffer full; dropping oldest result ` +
-          `for task ${dropped?.taskId}.`
+          `for task ${dropped?.taskId}. (dropped=${this.droppedPendingCount}/${this.totalCompletedCount})`
         );
       }
       console.warn(
@@ -349,6 +393,20 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
    */
   isBackgroundTaskRunning(taskId: string): boolean {
     return backgroundTaskBus.isTaskRunning(taskId);
+  }
+
+  /**
+   * Snapshot of background task bus counters. Intended for metrics
+   * endpoints — see {@link BackgroundTaskEventBus.getStats} for field
+   * semantics.
+   */
+  getBackgroundTaskStats(): {
+    pendingResults: number;
+    droppedPendingCount: number;
+    totalCompletedCount: number;
+    activeTaskCount: number;
+  } {
+    return backgroundTaskBus.getStats();
   }
 
   async *execute(
