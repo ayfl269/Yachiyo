@@ -376,28 +376,84 @@ export class SubAgentTaskManager extends EventEmitter {
   /**
    * Wait for all tasks to complete (pending + running).
    * Returns all tasks once all are in a terminal state.
+   *
+   * Event-driven: subscribes to the manager's own `task_completed`,
+   * `task_failed`, and `task_cancelled` events and resolves as soon as
+   * every task is in a terminal state. Falls back to a periodic timeout
+   * re-check (every {@link WAIT_FOR_ALL_POLL_INTERVAL_MS}) only when an
+   * explicit `timeoutMs` is provided, so the deadline is still honoured
+   * even if no events fire (defensive — should not normally happen).
    */
   async waitForAll(timeoutMs?: number): Promise<SubAgentTask[]> {
+    const isAllDone = (): boolean => [...this.tasks.values()].every(
+      (t) => t.status === "completed" || t.status === "failed" || t.status === "cancelled"
+    );
+
+    // Fast path: already done (e.g. empty batch or synchronous failures).
+    if (isAllDone()) return [...this.tasks.values()];
+
     const deadline = timeoutMs ? Date.now() + timeoutMs : Infinity;
 
-    while (Date.now() < deadline) {
-      const allDone = [...this.tasks.values()].every(
-        (t) => t.status === "completed" || t.status === "failed" || t.status === "cancelled"
-      );
-      if (allDone) return [...this.tasks.values()];
+    // Event-driven wait. Each terminal-status event re-checks `isAllDone`.
+    // We attach the listener to `task_completed`/`task_failed`/`task_cancelled`
+    // rather than `batch_complete` because `batch_complete` is only emitted
+    // from `checkBatchComplete` (which itself runs on the same events), and
+    // listening to the terminal events directly makes the wait resolve
+    // exactly when the last task transitions.
+    await new Promise<void>((resolve) => {
+      const onTerminal = (): void => {
+        if (isAllDone()) {
+          this.removeListener("task_completed", onTerminal);
+          this.removeListener("task_failed", onTerminal);
+          this.removeListener("task_cancelled", onTerminal);
+          resolve();
+        }
+      };
+      this.addListener("task_completed", onTerminal);
+      this.addListener("task_failed", onTerminal);
+      this.addListener("task_cancelled", onTerminal);
 
-      await new Promise((r) => setTimeout(r, WAIT_FOR_ALL_POLL_INTERVAL_MS));
-    }
+      // Defensive deadline timer. When `timeoutMs` is set, also poll on a
+      // long interval so the deadline is enforced even if no events fire
+      // (e.g. tasks stuck in `running` because the executor died without
+      // calling completeTask/failTask). When `timeoutMs` is unset, the
+      // timer never fires (`Infinity` deadline + `unref`).
+      const checkDeadline = (): void => {
+        if (Date.now() >= deadline) {
+          this.removeListener("task_completed", onTerminal);
+          this.removeListener("task_failed", onTerminal);
+          this.removeListener("task_cancelled", onTerminal);
+          resolve();
+          return;
+        }
+        // Re-arm the periodic check. Use unref so the timer doesn't keep
+        // the event loop alive on its own — it's only a safety net.
+        deadlineTimer = setTimeout(checkDeadline, WAIT_FOR_ALL_POLL_INTERVAL_MS);
+        if (deadlineTimer && typeof deadlineTimer === "object" && "unref" in deadlineTimer) {
+          deadlineTimer.unref();
+        }
+      };
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+      if (timeoutMs) {
+        deadlineTimer = setTimeout(checkDeadline, WAIT_FOR_ALL_POLL_INTERVAL_MS);
+        if (deadlineTimer && typeof deadlineTimer === "object" && "unref" in deadlineTimer) {
+          deadlineTimer.unref();
+        }
+      }
+    });
 
     // Timeout: cancel remaining tasks
-    for (const task of this.tasks.values()) {
-      if (task.status === "pending" || task.status === "running") {
-        task.status = "cancelled";
-        task.error = "Timed out waiting for batch completion";
-        task.completedAt = Date.now();
+    const hasTimeout = timeoutMs !== undefined && Date.now() >= deadline;
+    if (hasTimeout) {
+      for (const task of this.tasks.values()) {
+        if (task.status === "pending" || task.status === "running") {
+          task.status = "cancelled";
+          task.error = "Timed out waiting for batch completion";
+          task.completedAt = Date.now();
+        }
       }
+      this.runningCount = 0;
     }
-    this.runningCount = 0;
     return [...this.tasks.values()];
   }
 

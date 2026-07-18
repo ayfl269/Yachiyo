@@ -261,6 +261,10 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
       this.fallbackProviders.push(fb);
       if (fbId) seenProviderIds.add(fbId);
     }
+    // Expose fallback providers on the run context so sub-agent handoff
+    // (see FunctionToolExecutor.executeHandoff) can inherit them and
+    // survive a primary-provider failure instead of failing outright.
+    this.runContext._fallbackProviders = this.fallbackProviders;
 
     // Build context config
     this.contextConfig = createContextConfig({
@@ -428,6 +432,10 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
     }
 
     this.transitionState(AgentState.RUNNING);
+    this.recordTrace("agent.step.start", {
+      step: this.runContext.messages.length,
+      hasFuncTool: Boolean(this.req.funcTool),
+    });
     let llmRespResult: LLMResponse | null = null;
 
     // Context compression/truncation
@@ -784,6 +792,10 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
     this.finalLlmResp = llmResp;
     this.transitionState(AgentState.DONE);
     this.stats.endTime = Date.now();
+    this.recordTrace("agent.step.complete", {
+      reason: "assistant_response",
+      hasTools: Boolean(llmResp.toolsCallName?.length),
+    });
 
     const parts: ContentPartForMsg[] = [];
     if (llmResp.reasoningContent != null || llmResp.reasoningSignature) {
@@ -907,6 +919,20 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
       this.sameToolStreak = 1;
     }
     return this.sameToolStreak;
+  }
+
+  /**
+   * Record a child event onto the trace span attached to the run
+   * context (if any). No-op when no span is attached, which is the
+   * default in tests and standalone usage — this keeps the agent
+   * package decoupled from the pipeline layer that owns the span.
+   *
+   * The span itself decides whether to actually emit output based on
+   * the global `isTraceEnabled()` flag (see {@link TraceSpan.record}),
+   * so callers don't need to gate on trace enabled themselves.
+   */
+  private recordTrace(action: string, fields?: Record<string, unknown>): void {
+    this.runContext._traceSpan?.record(action, fields);
   }
 
   /**
@@ -1234,6 +1260,12 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
         }
 
         console.info(`使用工具：${funcToolName}，参数：${JSON.stringify(funcToolArgs)}`);
+
+        this.recordTrace("agent.tool.call", {
+          tool: funcToolName,
+          callId: funcToolId,
+          streak: toolCallStreak,
+        });
 
         if (!funcTool) {
           console.warn(`未找到指定的工具: ${funcToolName}，将跳过。`);

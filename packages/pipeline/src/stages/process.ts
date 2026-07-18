@@ -101,6 +101,15 @@ export class ProcessStage extends PipelineStage {
         await this.ctx.callEventHook(event, EventType.OnLLMRequestEvent);
         if (event.isStopped()) return;
 
+        // Attach the pipeline-level trace span (created by PipelineScheduler.execute)
+        // to the agent's run context so the agent runner and tool executor can
+        // record child events onto the same trace. No-op when trace is not
+        // configured (e.g. tests that bypass PipelineScheduler).
+        const traceSpan = (event as unknown as { traceSpan?: import("@yachiyo/common/trace.js").TraceSpan }).traceSpan;
+        if (traceSpan && agentRunner.currentRunContext) {
+          agentRunner.currentRunContext._traceSpan = traceSpan;
+        }
+
         registerActiveRunner(event.unifiedMsgOrigin, agentRunner);
         try {
           const enableStreaming = event.getExtra<boolean>("enable_streaming") ?? this.streamingResponse;

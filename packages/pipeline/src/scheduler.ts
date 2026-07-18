@@ -2,6 +2,7 @@ import type { PipelineContext } from "./context.js";
 import type { MessageEvent } from "@yachiyo/message/event.js";
 import { PipelineStage, getRegisteredStages } from "./stage.js";
 import { activeEventRegistry } from "./active-event-registry.js";
+import { TraceSpan } from "@yachiyo/common/trace.js";
 
 export const STAGES_ORDER = [
   "WakingCheckStage",
@@ -111,6 +112,22 @@ export class PipelineScheduler {
 
   async execute(event: MessageEvent): Promise<void> {
     activeEventRegistry.register(event);
+    // Open a top-level trace span for this event's entire pipeline
+    // execution. When trace is disabled (the default) the TraceSpan
+    // constructor and `record()` are no-ops w.r.t. output — they still
+    // allocate a small object but produce no I/O. The span is exposed
+    // via `event.traceSpan` so downstream stages (ProcessStage →
+    // ToolLoopAgentRunner → FunctionToolExecutor) can attach child
+    // events to the same trace without re-deriving UMO/sender context.
+    const traceSpan = new TraceSpan(
+      "pipeline.execute",
+      event.unifiedMsgOrigin,
+      (event as unknown as { senderName?: string }).senderName ?? undefined,
+      (event as unknown as { messageOutline?: string }).messageOutline ?? undefined,
+    );
+    (event as unknown as { traceSpan?: TraceSpan }).traceSpan = traceSpan;
+    traceSpan.record("pipeline.start", { stages: this.stages.length });
+
     // Total wall-clock timeout watchdog. Force-stops the event so the
     // processStages loop breaks at the next stage boundary. The timer
     // is unref'd so it doesn't keep the event loop alive on its own;
@@ -130,10 +147,16 @@ export class PipelineScheduler {
         timeoutTimer.unref();
       }
     }
+    const startedAt = Date.now();
     try {
       await this.processStages(event);
+      traceSpan.record("pipeline.complete", { stopped: event.isStopped() });
+    } catch (e) {
+      traceSpan.record("pipeline.error", { error: String(e) });
+      throw e;
     } finally {
       if (timeoutTimer) clearTimeout(timeoutTimer);
+      traceSpan.record("pipeline.end", { elapsed: Date.now() - startedAt });
       event.cleanupTemporaryLocalFiles();
       activeEventRegistry.unregister(event);
     }

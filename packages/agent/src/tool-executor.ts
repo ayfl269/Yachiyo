@@ -76,6 +76,17 @@ class BackgroundTaskEventBus extends EventEmitter {
   private pendingResults: BackgroundTaskResult[] = [];
   /** Cap to prevent unbounded growth if no waker is ever set. */
   private static readonly MAX_PENDING = 100;
+  /**
+   * Per-task AbortControllers registered by {@link executeBackground}.
+   * Used by {@link cancelTask} to abort a running background task so
+   * users can stop a runaway task without waiting for the 1-hour
+   * timeout to elapse.
+   *
+   * Entries are removed by {@link unregisterAbortController} once the
+   * task settles (completes/fails/cancels) so the map doesn't leak
+   * across long-lived runs.
+   */
+  private taskAborts: Map<string, AbortController> = new Map();
 
   static getInstance(): BackgroundTaskEventBus {
     if (!BackgroundTaskEventBus.instance) {
@@ -83,6 +94,56 @@ class BackgroundTaskEventBus extends EventEmitter {
       BackgroundTaskEventBus.instance.setMaxListeners(50);
     }
     return BackgroundTaskEventBus.instance;
+  }
+
+  /**
+   * Register an AbortController for a background task so it can be
+   * cancelled later via {@link cancelTask}. The executor that started
+   * the task should pass the same controller through the run context
+   * (`_toolAbortController`) so tool handlers that respect the signal
+   * stop cleanly.
+   */
+  registerAbortController(taskId: string, controller: AbortController): void {
+    this.taskAborts.set(taskId, controller);
+  }
+
+  /**
+   * Remove a task's AbortController entry. Called when the task settles
+   * (completes, fails, or is cancelled) to prevent the map from
+   * growing without bound across long runs.
+   */
+  unregisterAbortController(taskId: string): void {
+    this.taskAborts.delete(taskId);
+  }
+
+  /**
+   * Cancel a running background task by ID. Returns `true` if a task
+   * with the given ID was found and its AbortController was aborted,
+   * `false` if no controller is registered for that ID (task already
+   * settled, or never registered).
+   *
+   * Cancellation is best-effort: tool handlers must respect the
+   * `AbortSignal` to actually stop. Handlers that don't check the
+   * signal will run to completion (or until the 1-hour background
+   * timeout fires).
+   */
+  cancelTask(taskId: string, reason: string = "Cancelled by user"): boolean {
+    const controller = this.taskAborts.get(taskId);
+    if (!controller) return false;
+    if (!controller.signal.aborted) {
+      console.info(`[BackgroundTask] Cancelling task ${taskId}: ${reason}`);
+      controller.abort(reason);
+    }
+    return true;
+  }
+
+  /**
+   * Check whether a background task is still running (i.e. its
+   * AbortController is still registered). Returns `false` once the
+   * task has settled and been unregistered.
+   */
+  isTaskRunning(taskId: string): boolean {
+    return this.taskAborts.has(taskId);
   }
 
   /**
@@ -266,6 +327,30 @@ function extractOrderedArgs(
 }
 
 export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolExecutor<TContext> {
+  /**
+   * Cancel a running background task by ID. Returns `true` if a task
+   * with the given ID was found and its AbortController was aborted,
+   * `false` if the task already settled or was never registered.
+   *
+   * This is the public entry point for user-initiated cancellation of
+   * long-running background tasks (e.g. via an admin API or a
+   * `cancel_background_task` tool exposed to the agent itself). Tool
+   * handlers that respect `runContext._toolAbortController.signal`
+   * will stop cleanly; others will run to the 1-hour timeout.
+   */
+  cancelBackgroundTask(taskId: string, reason: string = "Cancelled by user"): boolean {
+    return backgroundTaskBus.cancelTask(taskId, reason);
+  }
+
+  /**
+   * Check whether a background task is still running. Returns `false`
+   * once the task has settled (completed/failed/cancelled) and its
+   * AbortController has been unregistered.
+   */
+  isBackgroundTaskRunning(taskId: string): boolean {
+    return backgroundTaskBus.isTaskRunning(taskId);
+  }
+
   async *execute(
     tool: FunctionTool<TContext>,
     runContext: ContextWrapper<TContext>,
@@ -395,6 +480,16 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
     const subContext = createContextWrapper(runContext.context, {
       toolCallTimeout: runContext.toolCallTimeout,
     });
+    // Inherit fallback providers from the parent run context so the
+    // sub-agent can survive a primary-provider failure (empty output,
+    // network error, etc.) instead of failing outright. The primary
+    // provider above is excluded from the fallback list inside
+    // ToolLoopAgentRunner.reset to avoid redundant retries.
+    subContext._fallbackProviders = runContext._fallbackProviders;
+    // Inherit the trace span so sub-agent tool calls and LLM steps are
+    // recorded onto the same parent trace. No-op when the parent context
+    // has no span attached (e.g. tests, standalone usage).
+    subContext._traceSpan = runContext._traceSpan;
 
     await subRunner.reset(subContext, new EmptyAgentHooks(), {
       provider,
@@ -410,6 +505,11 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
       toolExecutor: this,
       agentHooks: new EmptyAgentHooks(),
       streaming: false,
+      // Pass the inherited fallback providers through the standard
+      // channel so ToolLoopAgentRunner.reset dedupes them against
+      // the primary provider (subContext._fallbackProviders is also
+      // set above so deeper handoffs can inherit in turn).
+      fallbackProviders: subContext._fallbackProviders,
     });
 
     // ── Sub-agent loop detection ──
@@ -692,11 +792,19 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
     // or cancellation). The shallow copy above would otherwise share the
     // same AbortController reference, causing the foreground abort to kill
     // the background task.
+    //
+    // We DO still install a fresh AbortController dedicated to this
+    // background task and register it with the BackgroundTaskEventBus so
+    // users can cancel a runaway task via `cancelBackgroundTask(taskId)`
+    // without waiting for the 1-hour timeout. Tool handlers that respect
+    // `runContext._toolAbortController.signal` will stop cleanly on cancel.
+    const backgroundAbort = new AbortController();
     const backgroundContext: ContextWrapper<TContext> = {
       ...runContext,
       toolCallTimeout: BACKGROUND_TASK_TIMEOUT_SECONDS,
-      _toolAbortController: undefined,
+      _toolAbortController: backgroundAbort,
     };
+    backgroundTaskBus.registerAbortController(taskId, backgroundAbort);
     let resultText = "";
     try {
       const iter = this.executeLocal(tool, backgroundContext, toolArgs);
@@ -714,8 +822,19 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
         }
       }
     } catch (e) {
-      resultText = `error: Background task execution failed: ${e}`;
-      console.error(`Background task error: ${e}`);
+      const abortReason = backgroundAbort.signal.reason;
+      if (backgroundAbort.signal.aborted && abortReason) {
+        resultText = `cancelled: Background task aborted (${String(abortReason)}).`;
+        console.info(`Background task ${taskId} cancelled: ${abortReason}`);
+      } else {
+        resultText = `error: Background task execution failed: ${e}`;
+        console.error(`Background task error: ${e}`);
+      }
+    } finally {
+      // Always unregister so `isTaskRunning` returns false after settle
+      // and the map doesn't leak. Subsequent `cancelTask` calls for
+      // this taskId become no-ops (return false).
+      backgroundTaskBus.unregisterAbortController(taskId);
     }
 
     // Notify the background task bus so the main agent can be woken (if a
@@ -752,6 +871,14 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
 
     const timeout = runContext.toolCallTimeout;
     console.log(`[ToolExecutor] ${tool.name} executing via ${methodName}, timeout=${timeout}s`);
+
+    // Record tool execution start onto the trace span attached to the run
+    // context (if any). No-op when no span is attached.
+    runContext._traceSpan?.record("tool.execute.start", {
+      tool: tool.name,
+      timeout,
+    });
+    const toolStartedAt = Date.now();
 
     try {
       let readyToCall: unknown;
@@ -807,12 +934,21 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
         }
       }
     } catch (e: unknown) {
+      runContext._traceSpan?.record("tool.execute.error", {
+        tool: tool.name,
+        error: String(e),
+        elapsed: Date.now() - toolStartedAt,
+      });
       if (e instanceof ToolTimeoutError) {
         throw new Error(`tool ${tool.name} execution timeout after ${timeout} seconds.`);
       }
       console.error(`[ToolExecutor] ${tool.name} execution error:`, e);
       throw e;
     }
+    runContext._traceSpan?.record("tool.execute.end", {
+      tool: tool.name,
+      elapsed: Date.now() - toolStartedAt,
+    });
   }
 }
 

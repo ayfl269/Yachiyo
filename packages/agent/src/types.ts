@@ -64,6 +64,29 @@ export interface ContextWrapper<TContext = unknown> {
   _toolMgr?: import("./func-tool-manager.js").FunctionToolManager;
   _funcToolSet?: import("./tool.js").ToolSet;
   _provider?: Provider;
+  /**
+   * Fallback providers inherited from the parent agent's run context.
+   * Sub-agent handoff uses these when the sub-agent's primary provider
+   * fails (empty output, network error, etc.), mirroring the main
+   * agent's `iterLlmResponsesWithFallback` behaviour.
+   *
+   * Set by {@link ToolLoopAgentRunner.reset} on the main agent's
+   * runContext; sub-agents inherit it via `createContextWrapper` /
+   * the shallow copy in `executeHandoff`. May be undefined when no
+   * fallback providers are configured.
+   */
+  _fallbackProviders?: Provider[];
+  /**
+   * Trace span attached by the pipeline layer ({@link PipelineScheduler})
+   * so the agent runner and tool executor can record child events onto
+   * the same trace without taking a hard dependency on the pipeline
+   * package. The agent package only depends on the framework-agnostic
+   * `TraceSpan` type from `@yachiyo/common/trace`.
+   *
+   * Undefined when trace is not configured (e.g. tests, standalone
+   * usage). `recordTrace` helpers must no-op when this is undefined.
+   */
+  _traceSpan?: import("@yachiyo/common/trace.js").TraceSpan;
 }
 
 /**
