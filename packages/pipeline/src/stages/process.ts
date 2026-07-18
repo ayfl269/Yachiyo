@@ -123,6 +123,11 @@ export class ProcessStage extends PipelineStage {
               maxStep: this.maxStep,
               shouldStop: () => event.isStopped(),
               onError: (err) => console.error(`[ProcessStage] Agent error: ${err}`),
+              // Renew the session lock TTL on each step so the watchdog
+              // does not force-release it during long multi-step tool
+              // execution. The streaming path (runAgentStreaming) does the
+              // same thing inline.
+              onStepStart: () => this.ctx.sessionLockManager.renewLock(event.unifiedMsgOrigin),
             });
 
             // Record provider token stats after agent run completes

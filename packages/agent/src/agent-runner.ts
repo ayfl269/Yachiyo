@@ -16,6 +16,15 @@ export interface RunAgentOptions {
   onStreamingDelta?: (chain: MessageChain) => void;
   onLlmResult?: (chain: MessageChain) => void;
   onError?: (error: string) => void;
+  /**
+   * Called at the start of each agent step (before `agentRunner.step()`).
+   *
+   * Used by the pipeline to renew the session lock TTL so the watchdog
+   * does not force-release it during long multi-step tool execution.
+   * The callback is framework-agnostic so this module stays decoupled
+   * from {@link SessionLockManager}.
+   */
+  onStepStart?: () => void;
 }
 
 export interface RunAgentResult {
@@ -46,6 +55,7 @@ export async function runAgent<TContext = unknown>(
     onStreamingDelta,
     onLlmResult,
     onError,
+    onStepStart,
   } = options;
 
   const chains: MessageChain[] = [];
@@ -56,6 +66,16 @@ export async function runAgent<TContext = unknown>(
 
   while (steps < maxStep + 1) {
     steps++;
+
+    // Renew session lock TTL at the start of each step so the watchdog
+    // does not force-release it during long multi-step tool execution.
+    // Mirrors the same logic in runAgentStreaming() (see process.ts).
+    try {
+      onStepStart?.();
+    } catch (e) {
+      // Renewal is best-effort; never fail the step because of it.
+      console.warn(`[runAgent] onStepStart callback failed: ${e}`);
+    }
 
     // Max steps enforcement
     if (steps === maxStep + 1) {

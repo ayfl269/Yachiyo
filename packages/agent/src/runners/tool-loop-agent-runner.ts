@@ -96,6 +96,26 @@ const REPEATED_TOOL_NOTICE_L3_TEMPLATE =
   "Otherwise, change strategy, adjust arguments, or explain the limitation " +
   "to the user.";
 
+// ── Main-agent loop detection (hard limits) ──
+//
+// The soft notices above only nudge the model via prompt injection. Once
+// thresholds are exceeded, we apply hard limits by stripping the tool
+// set so the next step cannot call any tool, forcing a final summary.
+// Mirrors the sub-agent loop detection in tool-executor.ts so behaviour
+// is consistent between main agent and handoff sub-agents.
+
+/** Same tool called N times consecutively → hard stop. */
+const MAIN_AGENT_LOOP_MAX_SAME_TOOL = 5;
+/** Same tool + same arguments called N times → hard stop. */
+const MAIN_AGENT_LOOP_MAX_SAME_ARGS = 3;
+
+const MAIN_AGENT_LOOP_HARD_STOP_TEMPLATE =
+  "\n\n[SYSTEM NOTICE - HARD LIMIT] You have triggered the loop-detection " +
+  "hard limit: {reason}. " +
+  "Tool calls are now disabled. Based on the information you have gathered, " +
+  "summarize your task and findings, and reply to the user directly. " +
+  "Do NOT attempt to call any more tools in your next response.";
+
 const TOOL_RESULT_OVERFLOW_NOTICE_TEMPLATE =
   "Truncated tool output preview shown above. " +
   "The tool output was too large to include directly and was written to " +
@@ -173,6 +193,21 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
   private followUpSeq = 0;
   private lastToolName: string | null = null;
   private sameToolStreak = 0;
+  /**
+   * Per-(toolName+argsFingerprint) invocation counter for main-agent loop
+   * detection. Reset on each {@link reset} call (new run).
+   *
+   * Unlike the soft streak counter, this catches the case where the model
+   * alternates between tools but repeatedly invokes the SAME tool with the
+   * SAME arguments — a clear stuck signal that should hard-stop the run.
+   */
+  private mainAgentArgFingerprints: Map<string, number> = new Map();
+  /**
+   * Once true, the runner strips `req.funcTool` so the next LLM step cannot
+   * produce tool calls, forcing a final summary reply. Set when any
+   * hard-limit threshold is crossed in {@link handleFunctionTools}.
+   */
+  private mainAgentLoopHardStopped = false;
   private stats: AgentStats = createAgentStats();
   private contextManager!: ContextManager;
   private contextConfig!: ContextConfig;
@@ -210,6 +245,8 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
     this.followUpSeq = 0;
     this.lastToolName = null;
     this.sameToolStreak = 0;
+    this.mainAgentArgFingerprints = new Map();
+    this.mainAgentLoopHardStopped = false;
     this.toolResultOverflowDir = params.toolResultOverflowDir ?? null;
     this.readTool = params.readTool ?? null;
     this.toolResultTokenCounter = new EstimateTokenCounter();
@@ -369,6 +406,18 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
 
   async *step(): AsyncGenerator<AgentResponse, void, unknown> {
     if (!this.req) throw new Error("Request is not set. Please call reset() first.");
+
+    // If a previous step triggered the loop-detection hard limit, strip the
+    // tool set so this step's LLM call cannot produce any tool calls. The
+    // model will fall back to producing a final summary reply, which is the
+    // desired behaviour after a hard stop. The flag is reset on the next
+    // `reset()` call (i.e. a brand new run).
+    if (this.mainAgentLoopHardStopped && this.req.funcTool) {
+      console.warn(
+        `[AgentRunner] Loop-detection hard stop active — stripping funcTool for this step.`
+      );
+      this.req.funcTool = undefined;
+    }
 
     if (this.state === AgentState.IDLE) {
       try {
@@ -860,6 +909,45 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
     return this.sameToolStreak;
   }
 
+  /**
+   * Detect main-agent tool-calling loops that warrant a hard stop.
+   *
+   * Two independent signals:
+   * 1. Same tool called {@link MAIN_AGENT_LOOP_MAX_SAME_TOOL} times
+   *    consecutively (matches sub-agent loop detection).
+   * 2. Same tool + same arguments called
+   *    {@link MAIN_AGENT_LOOP_MAX_SAME_ARGS} times (catches alternating-tool
+   *    loops where the model ping-pongs between two tools but the args
+   *    repeat — a clearer stuck signal than streak alone).
+   *
+   * Returns `null` if no hard limit is triggered, otherwise a human-readable
+   * reason string suitable for inclusion in a [SYSTEM NOTICE] to the model.
+   *
+   * Side effects: updates the argument-fingerprint counter. The streak
+   * counter is updated by {@link trackToolCallStreak} which must be called
+   * first.
+   */
+  private detectMainAgentLoop(
+    toolName: string,
+    toolArgs: Record<string, unknown>,
+    streak: number
+  ): string | null {
+    // Signal 1: same-tool streak
+    if (streak >= MAIN_AGENT_LOOP_MAX_SAME_TOOL) {
+      return `tool "${toolName}" called ${streak} times consecutively`;
+    }
+
+    // Signal 2: same tool + same args fingerprint
+    const fingerprint = `${toolName}:${stableStringifyForLoop(toolArgs)}`;
+    const count = (this.mainAgentArgFingerprints.get(fingerprint) ?? 0) + 1;
+    this.mainAgentArgFingerprints.set(fingerprint, count);
+    if (count >= MAIN_AGENT_LOOP_MAX_SAME_ARGS) {
+      return `tool "${toolName}" called ${count} times with identical arguments`;
+    }
+
+    return null;
+  }
+
   private buildRepeatedToolCallGuidance(toolName: string, streak: number): string {
     if (streak < REPEATED_TOOL_NOTICE_L1_THRESHOLD) return "";
 
@@ -1086,6 +1174,34 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
 
       const toolResultBlocksStart = toolCallResultBlocks.length;
       const toolCallStreak = this.trackToolCallStreak(funcToolName);
+
+      // Main-agent loop detection (hard limit). Soft notices are still
+      // produced by `buildRepeatedToolCallGuidance` below; the hard limit
+      // fires when streak/arg-repeat crosses the configured threshold and
+      // forces the next step to drop the tool set so the model must
+      // produce a final summary.
+      const hardStopReason = this.detectMainAgentLoop(
+        funcToolName,
+        funcToolArgs as Record<string, unknown>,
+        toolCallStreak,
+      );
+      if (hardStopReason) {
+        this.mainAgentLoopHardStopped = true;
+        console.warn(
+          `[AgentRunner] Loop-detection hard stop triggered: ${hardStopReason}`
+        );
+        appendToolCallResult(
+          funcToolId,
+          `Tool "${funcToolName}" executed, but the loop-detection hard limit ` +
+          `was triggered (${hardStopReason}). ` +
+          MAIN_AGENT_LOOP_HARD_STOP_TEMPLATE.replace("{reason}", hardStopReason).trim()
+        );
+        // Stop processing remaining tool calls in this batch — the model
+        // needs to see the hard-stop notice and produce a final reply.
+        // Also request stop so any in-flight LLM stream is cancelled.
+        this.requestStop();
+        break;
+      }
 
       // Yield tool call notification
       yield HandleFunctionToolsResult.fromMessageChain(
@@ -1549,6 +1665,23 @@ class HandleFunctionToolsResult {
 // Fixes common LLM type mismatches (e.g. "123" for integer, true for
 // string) so handlers don't receive NaN/undefined. Does NOT reject —
 // just best-effort coerces and logs a warning on mismatch.
+
+/**
+ * Deterministic JSON stringification for main-agent loop detection.
+ * Sorts object keys recursively so {a:1,b:2} and {b:2,a:1} produce the
+ * same fingerprint. Mirrors the `stableStringify` helper used for sub-agent
+ * loop detection in tool-executor.ts so behaviour stays consistent.
+ */
+function stableStringifyForLoop(value: unknown): string {
+  if (value == null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return "[" + value.map(stableStringifyForLoop).join(",") + "]";
+  }
+  const keys = Object.keys(value as Record<string, unknown>).sort();
+  return "{" + keys.map((k) => JSON.stringify(k) + ":" + stableStringifyForLoop((value as Record<string, unknown>)[k])).join(",") + "}";
+}
 
 function coerceToolParams(
   params: Record<string, unknown>,

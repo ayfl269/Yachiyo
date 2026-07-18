@@ -23,12 +23,41 @@ function isAsyncGenerator(obj: unknown): obj is AsyncGenerator<void, void> {
     typeof (obj as AsyncGenerator<void, void>).next === "function";
 }
 
+export interface PipelineSchedulerOptions {
+  /**
+   * Hard wall-clock timeout for a single event's full pipeline execution
+   * (all stages combined). When exceeded, the event is force-stopped via
+   * {@link MessageEvent.stopEvent} so {@link processStages} can break out
+   * of its loop at the next stage boundary.
+   *
+   * This is a safety net: per-tool timeouts ({@link ContextWrapper.toolCallTimeout}),
+   * per-subagent timeouts (sandbox `maxExecutionTimeSeconds`), and the
+   * `maxStep` limit already bound most runs. This total timeout catches
+   * pathological cases where a stage hangs without any inner timeout
+   * (e.g. a plugin handler stuck in an infinite loop, or a network call
+   * ignoring the abort signal).
+   *
+   * Default: 30 minutes. Set to 0 or negative to disable.
+   */
+  totalTimeoutMs?: number;
+}
+
+/**
+ * Default total execution timeout for a single event across all pipeline
+ * stages. 30 minutes is intentionally generous — the goal is to catch
+ * pathological hangs, not to constrain normal long-running agent tasks
+ * (which have their own per-step and per-tool timeouts).
+ */
+const DEFAULT_TOTAL_TIMEOUT_MS = 30 * 60 * 1000;
+
 export class PipelineScheduler {
   private ctx: PipelineContext;
   private stages: PipelineStage[] = [];
+  private totalTimeoutMs: number;
 
-  constructor(context: PipelineContext) {
+  constructor(context: PipelineContext, options?: PipelineSchedulerOptions) {
     this.ctx = context;
+    this.totalTimeoutMs = options?.totalTimeoutMs ?? DEFAULT_TOTAL_TIMEOUT_MS;
   }
 
   async initialize(): Promise<void> {
@@ -82,9 +111,29 @@ export class PipelineScheduler {
 
   async execute(event: MessageEvent): Promise<void> {
     activeEventRegistry.register(event);
+    // Total wall-clock timeout watchdog. Force-stops the event so the
+    // processStages loop breaks at the next stage boundary. The timer
+    // is unref'd so it doesn't keep the event loop alive on its own;
+    // it only fires if the pipeline is genuinely still running.
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+    if (this.totalTimeoutMs > 0) {
+      timeoutTimer = setTimeout(() => {
+        if (!event.isStopped()) {
+          console.warn(
+            `[PipelineScheduler] Event ${event.unifiedMsgOrigin} exceeded ` +
+            `total timeout (${this.totalTimeoutMs}ms), force-stopping.`
+          );
+          event.stopEvent();
+        }
+      }, this.totalTimeoutMs);
+      if (typeof timeoutTimer === "object" && "unref" in timeoutTimer) {
+        timeoutTimer.unref();
+      }
+    }
     try {
       await this.processStages(event);
     } finally {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
       event.cleanupTemporaryLocalFiles();
       activeEventRegistry.unregister(event);
     }
