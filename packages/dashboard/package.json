@@ -30,7 +30,7 @@
     "@yachiyo/plugin": "workspace:*",
     "@yachiyo/provider": "workspace:*",
     "@yachiyo/skill": "workspace:*",
-    "adm-zip": "^0.5.17"
+    "adm-zip": "^0.6.0"
   },
   "devDependencies": {
     "@types/adm-zip": "^0.5.8"
