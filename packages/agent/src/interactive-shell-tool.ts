@@ -319,6 +319,131 @@ export function closeAllInteractiveSessions(): number {
   return count;
 }
 
+/**
+ * Wait for an interactive session to exit.
+ *
+ * Polls the session state at a low frequency (50ms) until either:
+ *   - the child process exits (returns `{ exited: true, exitCode, signalCode }`)
+ *   - `timeoutMs` elapses (returns `{ exited: false, exitCode: null }`)
+ *   - the optional `AbortSignal` aborts (returns `{ exited: false, aborted: true }`)
+ *
+ * This is the recommended way to wait for long-running commands that the
+ * agent cannot predict the duration of — e.g. `agently-cli auth login`
+ * (waits for user to complete browser OAuth), `npm install` on a slow
+ * network, long-running test suites, etc. Avoids the need for callers
+ * to repeatedly poll `interactiveShellRead` + `interactiveShellList`.
+ *
+ * Returns null if the session id is not found.
+ */
+export async function interactiveShellWait(
+  id: string,
+  options: { timeoutMs?: number; abortSignal?: AbortSignal } = {}
+): Promise<{
+  exited: boolean;
+  exitCode: number | null;
+  signalCode: string | null;
+  aborted: boolean;
+} | null> {
+  const session = sessions.get(id);
+  if (!session) return null;
+
+  const timeoutMs = options.timeoutMs ?? 60_000;
+  const abortSignal = options.abortSignal;
+  const deadline = Date.now() + timeoutMs;
+  const POLL_INTERVAL_MS = 50;
+
+  while (true) {
+    // Already exited?
+    if (session.exitCode !== null || session.signalCode !== null || session.closed) {
+      return {
+        exited: true,
+        exitCode: session.exitCode,
+        signalCode: session.signalCode,
+        aborted: false,
+      };
+    }
+    // Aborted by caller?
+    if (abortSignal?.aborted) {
+      return { exited: false, exitCode: null, signalCode: null, aborted: true };
+    }
+    // Timed out?
+    if (Date.now() >= deadline) {
+      return { exited: false, exitCode: null, signalCode: null, aborted: false };
+    }
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  }
+}
+
+/**
+ * Wait for an interactive session's combined stdout+stderr to match a
+ * regular expression.
+ *
+ * Scans the full accumulated output (since session start, not just
+ * since last read) on every poll. Returns as soon as a match is found,
+ * or when one of the following conditions is met:
+ *   - `timeoutMs` elapses (returns `{ matched: false, reason: "timeout" }`)
+ *   - the child process exits before a match (returns
+ *     `{ matched: false, reason: "exited", exitCode }`)
+ *   - the optional `AbortSignal` aborts (returns
+ *     `{ matched: false, reason: "aborted" }`)
+ *
+ * Use this to wait for a specific output pattern without busy-polling
+ * `interactiveShellRead` — e.g. wait for an OAuth URL
+ * (`https?://\S+`), a REPL prompt (`>>> `), a build success marker
+ * (`BUILD SUCCEEDED`), etc.
+ *
+ * Implementation note: we scan `stdoutAll` + `stderrAll` (cumulative
+ * buffers) rather than `*SinceRead` so that callers don't need to
+ * worry about whether they've already `read` the output. This is
+ * safe because the buffers are capped at {@link MAX_BUFFER_SIZE}.
+ *
+ * Returns null if the session id is not found. Throws if the regex
+ * pattern is invalid.
+ */
+export async function interactiveShellWaitForPattern(
+  id: string,
+  pattern: string,
+  options: { timeoutMs?: number; abortSignal?: AbortSignal; flags?: string } = {}
+): Promise<{
+  matched: boolean;
+  reason: "found" | "timeout" | "exited" | "aborted";
+  match?: string;
+  exitCode?: number | null;
+} | null> {
+  const session = sessions.get(id);
+  if (!session) return null;
+
+  let regex: RegExp;
+  try {
+    regex = new RegExp(pattern, options.flags ?? "");
+  } catch (e) {
+    throw new Error(`Invalid regex pattern '${pattern}': ${(e as Error).message}`);
+  }
+
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const abortSignal = options.abortSignal;
+  const deadline = Date.now() + timeoutMs;
+  const POLL_INTERVAL_MS = 50;
+
+  while (true) {
+    const combined = session.stdoutAll + session.stderrAll;
+    const m = combined.match(regex);
+    if (m) {
+      return { matched: true, reason: "found", match: m[0] };
+    }
+    if (abortSignal?.aborted) {
+      return { matched: false, reason: "aborted" };
+    }
+    if (session.exitCode !== null || session.signalCode !== null || session.closed) {
+      return { matched: false, reason: "exited", exitCode: session.exitCode };
+    }
+    if (Date.now() >= deadline) {
+      return { matched: false, reason: "timeout" };
+    }
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  }
+}
+
 // ── Tool factories ──
 
 function getToolContext(_ctx: unknown): ComputerToolContext {
@@ -564,6 +689,185 @@ export function createInteractiveShellCloseTool(): FunctionTool<ComputerToolCont
 }
 
 /**
+ * `interactive_shell_wait` — block until an interactive session exits.
+ *
+ * Use this to wait for long-running commands whose duration the agent
+ * cannot predict: OAuth flows that wait for browser interaction, `npm
+ * install` on slow networks, test suites, builds, etc.
+ *
+ * Returns when the child exits, the timeout elapses, or the tool call
+ * is aborted. The since-read buffers are NOT cleared — call
+ * `interactive_shell_read` afterwards to collect any final output.
+ */
+export function createInteractiveShellWaitTool(): FunctionTool<ComputerToolContext> {
+  return createFunctionTool<ComputerToolContext>({
+    name: "interactive_shell_wait",
+    description:
+      "Wait for an interactive shell session to exit. Returns when the child process exits, the timeout elapses, " +
+      "or the tool call is aborted. Does NOT read or clear the output buffer — call interactive_shell_read afterwards " +
+      "to collect any final output. Use this instead of polling interactive_shell_read/list when waiting for " +
+      "long-running commands (OAuth flows, npm install, test suites, builds) to complete.",
+    parameters: {
+      type: "object",
+      properties: {
+        session_id: { type: "string", description: "The session id returned by interactive_shell_start." },
+        timeout_ms: {
+          type: "integer",
+          description:
+            "Maximum time to wait in milliseconds. Default: 60000 (60s). " +
+            "Set to a high value for OAuth-style flows that wait for user interaction (e.g. 600000 = 10 min).",
+          default: 60000,
+          minimum: 0,
+          maximum: 600000,
+        },
+      },
+      required: ["session_id"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const sessionId = String(args[0] ?? "");
+      const timeoutMs = args[1] != null ? Number(args[1]) : undefined;
+      const abortSignal = getAbortSignal(_ctx);
+
+      const result = await interactiveShellWait(sessionId, { timeoutMs, abortSignal });
+      if (!result) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `error: Session '${sessionId}' not found. Use interactive_shell_list to see active sessions.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      let text: string;
+      if (result.exited) {
+        text =
+          `Session ${sessionId} exited.` +
+          (result.exitCode !== null ? ` Exit code: ${result.exitCode}.` : "") +
+          (result.signalCode ? ` Signal: ${result.signalCode}.` : "") +
+          ` Call interactive_shell_read to collect any final output.`;
+      } else if (result.aborted) {
+        text = `Wait aborted for session ${sessionId}. The session is still running.`;
+      } else {
+        text =
+          `Timeout waiting for session ${sessionId} to exit (waited ${timeoutMs ?? 60000}ms). ` +
+          `The session is still running. Call interactive_shell_read to inspect partial output, ` +
+          `or call interactive_shell_wait again with a longer timeout.`;
+      }
+      return { content: [{ type: "text", text }] };
+    },
+  });
+}
+
+/**
+ * `interactive_shell_wait_for_pattern` — block until the session's
+ * combined stdout+stderr matches a regex.
+ *
+ * Use this to wait for a specific output pattern without busy-polling
+ * `interactive_shell_read`. Common use cases:
+ *   - Wait for an OAuth URL to appear: pattern `https?://\\S+`
+ *   - Wait for a REPL prompt: pattern `>>> ` or `\\$ `
+ *   - Wait for build success: pattern `BUILD SUCCEEDED`
+ *   - Wait for a server to be ready: pattern `Listening on|Ready|started on port`
+ *
+ * Scans the full accumulated output (since session start, not just
+ * since last read). Returns as soon as a match is found, the timeout
+ * elapses, the child exits without a match, or the tool call is aborted.
+ */
+export function createInteractiveShellWaitForPatternTool(): FunctionTool<ComputerToolContext> {
+  return createFunctionTool<ComputerToolContext>({
+    name: "interactive_shell_wait_for_pattern",
+    description:
+      "Wait for an interactive shell session's combined stdout+stderr to match a regular expression. " +
+      "Returns as soon as a match is found, the timeout elapses, the child process exits without a match, " +
+      "or the tool call is aborted. Scans the full accumulated output since session start. " +
+      "Use this to wait for specific output (OAuth URLs, prompts, success markers) without busy-polling interactive_shell_read.",
+    parameters: {
+      type: "object",
+      properties: {
+        session_id: { type: "string", description: "The session id returned by interactive_shell_start." },
+        pattern: {
+          type: "string",
+          description:
+            "JavaScript regular expression pattern (without surrounding /). Example: `https?://\\\\S+` to match a URL. " +
+            "Use double backslashes in JSON to escape backslashes (e.g. `\\\\S` for non-whitespace).",
+        },
+        flags: {
+          type: "string",
+          description: "Regex flags. Default: empty. Use `i` for case-insensitive, `m` for multiline, etc.",
+          default: "",
+        },
+        timeout_ms: {
+          type: "integer",
+          description: "Maximum time to wait in milliseconds. Default: 30000 (30s).",
+          default: 30000,
+          minimum: 0,
+          maximum: 600000,
+        },
+      },
+      required: ["session_id", "pattern"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const sessionId = String(args[0] ?? "");
+      const pattern = String(args[1] ?? "");
+      const flags = args[2] != null ? String(args[2]) : undefined;
+      const timeoutMs = args[3] != null ? Number(args[3]) : undefined;
+      const abortSignal = getAbortSignal(_ctx);
+
+      let result: Awaited<ReturnType<typeof interactiveShellWaitForPattern>>;
+      try {
+        result = await interactiveShellWaitForPattern(sessionId, pattern, {
+          flags,
+          timeoutMs,
+          abortSignal,
+        });
+      } catch (e) {
+        return {
+          content: [{ type: "text", text: `error: ${(e as Error).message}` }],
+          isError: true,
+        };
+      }
+
+      if (!result) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `error: Session '${sessionId}' not found. Use interactive_shell_list to see active sessions.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      let text: string;
+      if (result.matched) {
+        text =
+          `Pattern matched in session ${sessionId}.\n` +
+          `Match: ${result.match}\n` +
+          `Call interactive_shell_read to collect the surrounding output.`;
+      } else if (result.reason === "aborted") {
+        text = `Wait aborted for session ${sessionId}.`;
+      } else if (result.reason === "exited") {
+        text =
+          `Session ${sessionId} exited before pattern matched.` +
+          (result.exitCode !== null ? ` Exit code: ${result.exitCode}.` : "") +
+          ` Call interactive_shell_read to see the full output.`;
+      } else {
+        text =
+          `Timeout waiting for pattern '${pattern}' in session ${sessionId} (waited ${timeoutMs ?? 30000}ms). ` +
+          `Call interactive_shell_read to inspect partial output, or call this tool again with a longer timeout.`;
+      }
+      return { content: [{ type: "text", text }] };
+    },
+  });
+}
+
+/**
  * Get the full set of interactive shell tools.
  */
 export function getInteractiveShellTools(
@@ -573,6 +877,8 @@ export function getInteractiveShellTools(
     createInteractiveShellStartTool(workspaceRoot),
     createInteractiveShellSendTool(),
     createInteractiveShellReadTool(),
+    createInteractiveShellWaitTool(),
+    createInteractiveShellWaitForPatternTool(),
     createInteractiveShellListTool(),
     createInteractiveShellCloseTool(),
   ];

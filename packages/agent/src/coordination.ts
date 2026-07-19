@@ -345,7 +345,7 @@ export class SubAgentTaskManager extends EventEmitter {
 
   constructor(options?: SubAgentTaskOptions) {
     super();
-    this.maxConcurrency = options?.maxConcurrency ?? 5;
+    this.maxConcurrency = options?.maxConcurrency ?? 8;
     this.defaultTimeoutSeconds = options?.defaultTimeoutSeconds ?? 120;
     this.onTaskComplete = options?.onTaskComplete;
     this.onTaskFailed = options?.onTaskFailed;

@@ -170,7 +170,6 @@ export class OpenAIProvider implements Provider {
     if (message) {
       // Handle content: may be string, null, or array of content parts (e.g. [{type:"text", text:"..."}])
       const rawContent = message.content;
-      // Diagnostic: log raw content to debug empty response issues
       if (rawContent === undefined || rawContent === null || (typeof rawContent === "string" && !rawContent.trim()) || (Array.isArray(rawContent) && rawContent.length === 0)) {
         console.warn(
           `[OpenAIProvider] Empty/missing content detected. ` +
