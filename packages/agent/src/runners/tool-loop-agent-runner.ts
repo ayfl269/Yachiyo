@@ -1193,6 +1193,34 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
       });
     };
 
+    // ── Parallel handoff pre-launch ──
+    //
+    // When the LLM returns multiple tool calls in a single step, the
+    // original implementation processed them strictly serially inside
+    // the for-loop below. For handoff tools (delegation to sub-agents)
+    // this is wasteful: independent sub-agents could run concurrently.
+    //
+    // Pre-launch phase: scan all tool calls, identify handoffs, and
+    // start each one's executor as a concurrent Promise that fully
+    // drains the underlying async generator. The Promises run in
+    // parallel; their results are collected into a map keyed by
+    // toolCallId. The for-loop below consumes results from the map
+    // in toolCallId order — so yield order is preserved exactly as
+    // before, while execution is parallelised.
+    //
+    // Non-handoff tools are NOT pre-launched: they may have shared
+    // state dependencies on previous tool calls in the same batch
+    // (e.g. shell sessions, memory writes) and must remain serial.
+    //
+    // Cancellation: if the for-loop breaks early (e.g. hard stop),
+    // any still-running pre-launched handoffs are abandoned. Their
+    // sub-context AbortController is independent of the foreground
+    // agent's, so they will run to completion in the background
+    // unless explicitly cancelled. This matches the existing
+    // behaviour for non-prelaunched tools that were already in
+    // flight when a hard stop fires.
+    const handoffResults = await this.prelaunchHandoffs(req, llmResponse);
+
     for (let i = 0; i < (llmResponse.toolsCallName?.length ?? 0); i++) {
       const funcToolName = llmResponse.toolsCallName![i];
       let funcToolArgs = llmResponse.toolsCallArgs?.[i] ?? {};
@@ -1301,104 +1329,35 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
           console.error("Error in onToolStart hook:", e);
         }
 
-        const executor = this.toolExecutor.execute(funcTool, this.runContext, validParams);
-
+        // Choose executor source: pre-launched handoffs read from the
+        // map populated by `prelaunchHandoffs` above; non-handoff tools
+        // create a fresh executor inline (serial execution path).
+        const prelaunched = handoffResults.get(funcToolId);
         let finalResp: CallToolResult | null = null;
-        for await (const resp of this.iterToolExecutorResults(executor)) {
-          if (resp && typeof resp === "object" && "content" in resp) {
-            const res = resp as CallToolResult;
-            finalResp = res;
 
-            if (!res.content || res.content.length === 0) {
-              appendToolCallResult(funcToolId, "The tool returned no content.");
-              continue;
-            }
-
-            const resultParts: string[] = [];
-            const cachedImages: CachedImage[] = [];
-            for (const contentItem of res.content) {
-              if (contentItem.type === "text") {
-                resultParts.push((contentItem as TextContent).text);
-              } else if (contentItem.type === "image") {
-                const imgContent = contentItem as ImageContent;
-                // Cache the image for later retrieval
-                try {
-                  const cached = await toolImageCache.saveImage(
-                    imgContent.data,
-                    funcToolId,
-                    funcToolName,
-                    cachedImages.length,
-                    imgContent.mimeType
-                  );
-                  cachedImages.push(cached);
-                  resultParts.push(
-                    `Image returned (base64, ${imgContent.mimeType}). ` +
-                    `Cached at: ${cached.filePath}. ` +
-                    `Use send_message_to_user to send it to the user.`
-                  );
-                } catch (e) {
-                  console.warn(`[ToolLoop] Failed to cache image from tool ${funcToolName}:`, e);
-                  resultParts.push(
-                    `Image returned (base64, ${imgContent.mimeType}). ` +
-                    `Use send_message_to_user to send it to the user.`
-                  );
-                }
-              } else if (contentItem.type === "resource") {
-                const resource = (contentItem as EmbeddedResource).resource;
-                if ("text" in resource) {
-                  resultParts.push(resource.text);
-                } else if ("blob" in resource) {
-                  // Binary resource - save as image if it's an image MIME type
-                  const blobResource = resource as import("../types.js").BlobResourceContents;
-                  const mimeType = blobResource.mimeType ?? "application/octet-stream";
-                  if (mimeType.startsWith("image/")) {
-                    try {
-                      const cached = await toolImageCache.saveImage(
-                        blobResource.blob,
-                        funcToolId,
-                        funcToolName,
-                        cachedImages.length,
-                        mimeType
-                      );
-                      cachedImages.push(cached);
-                      resultParts.push(
-                        `Image resource returned (${mimeType}). Cached at: ${cached.filePath}. ` +
-                        `Use send_message_to_user to send it to the user.`
-                      );
-                      yield HandleFunctionToolsResult.fromCachedImage(cached);
-                    } catch (e) {
-                      console.warn(`[ToolLoop] Failed to cache image resource from tool ${funcToolName}:`, e);
-                      resultParts.push(`Image resource returned (${mimeType}), but failed to cache.`);
-                    }
-                  } else {
-                    resultParts.push(`Binary resource returned (${mimeType}). Content not displayable as text.`);
-                  }
-                } else {
-                  resultParts.push("The tool has returned a data type that is not supported.");
-                }
-              }
-            }
-
-            // Yield cached images for downstream processing
-            for (const cached of cachedImages) {
-              yield HandleFunctionToolsResult.fromCachedImage(cached);
-            }
-
-            if (resultParts.length > 0) {
-              let inlineResult = resultParts.join("\n\n");
-              inlineResult = await this.materializeLargeToolResult(funcToolId, inlineResult);
-              appendToolCallResult(
-                funcToolId,
-                inlineResult + this.buildRepeatedToolCallGuidance(funcToolName, toolCallStreak)
-              );
-            }
-          } else if (resp === null) {
-            this.transitionState(AgentState.DONE);
-            this.stats.endTime = Date.now();
-            appendToolCallResult(
-              funcToolId,
-              "The tool has no return value, or has sent the result directly to the user." +
-                this.buildRepeatedToolCallGuidance(funcToolName, toolCallStreak)
+        if (prelaunched) {
+          // Consume the pre-collected results from the parallel launch.
+          // The underlying sub-agent already ran to completion (or
+          // errored); here we just replay its results through the same
+          // yield/appendToolCallResult pipeline as the serial path so
+          // downstream processing is identical.
+          if (prelaunched.error) {
+            throw prelaunched.error;
+          }
+          for (const resp of prelaunched.results) {
+            // Mirror the serial-path body below. Extracted into a
+            // helper to keep the two paths in sync.
+            finalResp = resp;
+            yield* this.processToolExecutorResult(
+              resp, funcToolId, funcToolName, toolCallStreak, appendToolCallResult
+            );
+          }
+        } else {
+          const executor = this.toolExecutor.execute(funcTool, this.runContext, validParams);
+          for await (const resp of this.iterToolExecutorResults(executor)) {
+            finalResp = resp;
+            yield* this.processToolExecutorResult(
+              resp, funcToolId, funcToolName, toolCallStreak, appendToolCallResult
             );
           }
         }
@@ -1435,6 +1394,213 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
     if (toolCallResultBlocks.length > 0) {
       yield HandleFunctionToolsResult.fromToolCallResultBlocks(toolCallResultBlocks);
     }
+  }
+
+  /**
+   * Process a single {@link CallToolResult} from a tool executor and
+   * yield any cached-image notifications. Text/resource content is
+   * appended to `toolCallResultBlocks` via `appendToolCallResult`.
+   *
+   * Extracted from {@link handleFunctionTools} so the serial and
+   * parallel-handoff paths share the exact same result handling —
+   * preventing drift between the two execution paths.
+   */
+  private async *processToolExecutorResult(
+    resp: CallToolResult | null,
+    funcToolId: string,
+    funcToolName: string,
+    toolCallStreak: number,
+    appendToolCallResult: (toolCallId: string, content: string) => void,
+  ): AsyncGenerator<HandleFunctionToolsResult, void, unknown> {
+    if (!resp || typeof resp !== "object" || !("content" in resp)) {
+      if (resp === null) {
+        this.transitionState(AgentState.DONE);
+        this.stats.endTime = Date.now();
+        appendToolCallResult(
+          funcToolId,
+          "The tool has no return value, or has sent the result directly to the user." +
+            this.buildRepeatedToolCallGuidance(funcToolName, toolCallStreak)
+        );
+      }
+      return;
+    }
+
+    const res = resp as CallToolResult;
+    if (!res.content || res.content.length === 0) {
+      appendToolCallResult(funcToolId, "The tool returned no content.");
+      return;
+    }
+
+    const resultParts: string[] = [];
+    const cachedImages: CachedImage[] = [];
+    for (const contentItem of res.content) {
+      if (contentItem.type === "text") {
+        resultParts.push((contentItem as TextContent).text);
+      } else if (contentItem.type === "image") {
+        const imgContent = contentItem as ImageContent;
+        try {
+          const cached = await toolImageCache.saveImage(
+            imgContent.data,
+            funcToolId,
+            funcToolName,
+            cachedImages.length,
+            imgContent.mimeType
+          );
+          cachedImages.push(cached);
+          resultParts.push(
+            `Image returned (base64, ${imgContent.mimeType}). ` +
+            `Cached at: ${cached.filePath}. ` +
+            `Use send_message_to_user to send it to the user.`
+          );
+        } catch (e) {
+          console.warn(`[ToolLoop] Failed to cache image from tool ${funcToolName}:`, e);
+          resultParts.push(
+            `Image returned (base64, ${imgContent.mimeType}). ` +
+            `Use send_message_to_user to send it to the user.`
+          );
+        }
+      } else if (contentItem.type === "resource") {
+        const resource = (contentItem as EmbeddedResource).resource;
+        if ("text" in resource) {
+          resultParts.push(resource.text);
+        } else if ("blob" in resource) {
+          const blobResource = resource as import("../types.js").BlobResourceContents;
+          const mimeType = blobResource.mimeType ?? "application/octet-stream";
+          if (mimeType.startsWith("image/")) {
+            try {
+              const cached = await toolImageCache.saveImage(
+                blobResource.blob,
+                funcToolId,
+                funcToolName,
+                cachedImages.length,
+                mimeType
+              );
+              cachedImages.push(cached);
+              resultParts.push(
+                `Image resource returned (${mimeType}). Cached at: ${cached.filePath}. ` +
+                `Use send_message_to_user to send it to the user.`
+              );
+              yield HandleFunctionToolsResult.fromCachedImage(cached);
+            } catch (e) {
+              console.warn(`[ToolLoop] Failed to cache image resource from tool ${funcToolName}:`, e);
+              resultParts.push(`Image resource returned (${mimeType}), but failed to cache.`);
+            }
+          } else {
+            resultParts.push(`Binary resource returned (${mimeType}). Content not displayable as text.`);
+          }
+        } else {
+          resultParts.push("The tool has returned a data type that is not supported.");
+        }
+      }
+    }
+
+    for (const cached of cachedImages) {
+      yield HandleFunctionToolsResult.fromCachedImage(cached);
+    }
+
+    if (resultParts.length > 0) {
+      let inlineResult = resultParts.join("\n\n");
+      inlineResult = await this.materializeLargeToolResult(funcToolId, inlineResult);
+      appendToolCallResult(
+        funcToolId,
+        inlineResult + this.buildRepeatedToolCallGuidance(funcToolName, toolCallStreak)
+      );
+    }
+  }
+
+  /**
+   * Pre-launch all handoff tools in the LLM response concurrently.
+   *
+   * Returns a map keyed by toolCallId whose values are either:
+   *   - `{ results: CallToolResult[], error?: undefined }` on success, or
+   *   - `{ results: [], error: Error }` if the handoff threw.
+   *
+   * Non-handoff tool calls are skipped (the caller — `handleFunctionTools`
+   * — will execute them serially in the for-loop). When the LLM only
+   * returned one handoff (or none), this still works correctly: the
+   * single handoff runs as one entry in the map and is awaited just
+   * like any other Promise, with no parallelism gain but no overhead
+   * beyond the wrapper Promise.
+   *
+   * Cancellation semantics: if `handleFunctionTools` breaks out of
+   * its for-loop early (e.g. loop-detection hard stop), pre-launched
+   * handoffs that haven't been consumed yet will still complete in
+   * the background — their sub-agent context owns an independent
+   * AbortController (see `executeHandoff`), so a foreground
+   * `requestStop()` does NOT cancel them. This is consistent with
+   * the previous serial behaviour: a foreground stop only halts the
+   * foreground LLM stream, not already-running sub-agents.
+   */
+  private async prelaunchHandoffs(
+    req: ProviderRequest,
+    llmResponse: LLMResponse,
+  ): Promise<Map<string, { results: CallToolResult[]; error?: Error }>> {
+    const result = new Map<string, { results: CallToolResult[]; error?: Error }>();
+    if (!req.funcTool || !llmResponse.toolsCallIds?.length) return result;
+
+    // Scan all tool calls and collect handoff launch descriptors.
+    const handoffLaunches: Array<{
+      toolCallId: string;
+      tool: FunctionTool;
+      args: Record<string, unknown>;
+    }> = [];
+    for (let i = 0; i < llmResponse.toolsCallName!.length; i++) {
+      const toolName = llmResponse.toolsCallName![i];
+      let toolArgs = llmResponse.toolsCallArgs?.[i] ?? {};
+      const toolCallId = llmResponse.toolsCallIds![i];
+
+      let funcTool: FunctionTool | undefined;
+      if (this.toolSchemaMode === "skills_like" && this.skillLikeRawToolSet) {
+        funcTool = this.skillLikeRawToolSet.getTool(toolName);
+      } else {
+        const funcToolSet = req.funcTool as ToolSet;
+        funcTool = funcToolSet.getTool(toolName);
+      }
+      if (!funcTool) continue;
+      // Identify handoff tools by the same check used in execute().
+      if (!("agent" in funcTool) || (funcTool as { agent?: unknown }).agent == null) continue;
+
+      // Apply the same parameter filtering as the serial path so the
+      // pre-launched handoff receives validated args.
+      let validParams: Record<string, unknown> = {};
+      const params = funcTool.parameters as Record<string, unknown>;
+      if (params?.properties && typeof params.properties === "object") {
+        const expectedParams = new Set(Object.keys(params.properties as Record<string, unknown>));
+        for (const [k, v] of Object.entries(toolArgs as Record<string, unknown>)) {
+          if (expectedParams.has(k)) validParams[k] = v;
+        }
+        validParams = coerceToolParams(validParams, params);
+      } else {
+        validParams = toolArgs as Record<string, unknown>;
+      }
+
+      handoffLaunches.push({ toolCallId, tool: funcTool, args: validParams });
+    }
+
+    if (handoffLaunches.length === 0) return result;
+
+    // Pre-launch each handoff as a concurrent Promise. Each Promise
+    // drains its executor generator fully — this is what gives us
+    // parallelism: all sub-agents make progress simultaneously while
+    // we await them together via Promise.all below.
+    const launchPromises = handoffLaunches.map(async (launch) => {
+      const results: CallToolResult[] = [];
+      try {
+        const iter = this.toolExecutor.execute(launch.tool, this.runContext, launch.args);
+        for await (const resp of this.iterToolExecutorResults(iter)) {
+          if (resp) results.push(resp);
+        }
+        return { toolCallId: launch.toolCallId, results, error: undefined as Error | undefined };
+      } catch (e) {
+        return { toolCallId: launch.toolCallId, results, error: e instanceof Error ? e : new Error(String(e)) };
+      }
+    });
+
+    const settled = await Promise.all(launchPromises);
+    for (const s of settled) {
+      result.set(s.toolCallId, { results: s.results, error: s.error });
+    }
+    return result;
   }
 
   private async *iterToolExecutorResults(
