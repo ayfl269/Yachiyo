@@ -185,6 +185,39 @@ pnpm test
 | `pnpm test:interactive-shell` | `tests/interactive-shell-test.ts` | 交互式 Shell 工具测试 |
 | `pnpm test:conversation` | `tests/conversation-test.ts` | 对话管理测试 |
 
+以下测试文件未绑定 npm 脚本，可通过 `tsx tests/<file>` 直接运行：
+
+| 测试文件 | 测试内容 |
+|----------|---------|
+| `tests/ask-user-tool-test.ts` | ask_user 工具（澄清交互、选项卡片） |
+| `tests/knowledge-base-test.ts` | 知识库分块、向量检索与 RAG |
+| `tests/proxy-tool-test.ts` | proxy_manage 工具（运行时代理切换） |
+| `tests/scheduler-system-test.ts` | 定时任务两阶段触发与状态机 |
+
+---
+
+## 环境变量
+
+`src/server.ts` 启动入口读取以下环境变量进行配置：
+
+| 变量 | 说明 | 默认值 |
+|------|------|-------|
+| `PROVIDER_TYPE` | LLM Provider 类型：`openai` / `openai_responses` / `gemini` / `anthropic` | — |
+| `PROVIDER_API_KEY` | Provider API Key | — |
+| `PROVIDER_MODEL` | 模型名称 | `gpt-4o-mini` |
+| `PROVIDER_BASE_URL` | 自定义 API Base URL（可选） | — |
+| `WEBHOOK_PORT` | OneBot11 WebSocket 监听端口 | `8080` |
+| `WEBHOOK_HOST` | OneBot11 WebSocket 监听地址 | `0.0.0.0` |
+| `DASHBOARD_ENABLED` | 是否启用管理后台（设为 `false` 关闭） | 启用 |
+| `DASHBOARD_PORT` | 管理后台端口 | `8000` |
+| `DASHBOARD_HOST` | 管理后台监听地址 | `0.0.0.0` |
+| `DASHBOARD_DEFAULT_USER` | 管理后台默认用户名 | `admin` |
+| `DASHBOARD_DEFAULT_PASSWORD` | 管理后台默认密码（≥ 8 字符，未设置时自动生成） | — |
+| `DATA_DIR` | 数据目录路径（存放 SQLite 数据库与密钥） | `./data` |
+| `HTTPS_PROXY` / `HTTP_PROXY` | 出站 HTTPS/HTTP 代理地址（同时作用于 undici 与 Playwright） | — |
+
+> 启动时若未设置 `PROVIDER_TYPE` 与 `PROVIDER_API_KEY`，系统将以"无 LLM Provider"模式启动，仍可使用 Dashboard 进行配置。
+
 ---
 
 ## 定时任务系统
@@ -252,6 +285,24 @@ T+0    到期检查（系统兜底）
 ### 调试模式
 
 Dashboard 的 `/api/debug/chat` 端点用于集成测试。调试对话会被标记 `_debugChat`，不写入短期记忆，避免触发记忆整理导致调试响应延迟。通过 `debugChatEnabled` 配置项控制开关（默认关闭）。
+
+---
+
+## 常用命令
+
+| 命令 | 说明 |
+|------|------|
+| `pnpm install` | 安装后端依赖 |
+| `pnpm build` | 编译所有子包（`tsc -b`） |
+| `pnpm typecheck` | 类型检查（不产出文件） |
+| `pnpm lint` | ESLint 代码规范检查 |
+| `pnpm dev` | 启动开发服务器（`tsx watch`） |
+| `pnpm test` | 运行核心测试套件（13 个测试） |
+| `pnpm frontend:install` | 安装前端依赖（独立 lockfile） |
+| `pnpm frontend:dev` | 启动前端 Vite 开发服务器 |
+| `pnpm frontend:build` | 构建前端生产版本 |
+| `pnpm reset-admin` | 交互式重置管理后台账户密码 |
+
 
 ---
 
