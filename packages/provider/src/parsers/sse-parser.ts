@@ -28,7 +28,10 @@ export async function* parseSSEStream(
   response: Response,
   abortSignal?: AbortSignal,
 ): AsyncGenerator<SSEEvent, void, unknown> {
-  const reader = response.body!.getReader();
+  if (!response.body) {
+    throw new Error("parseSSEStream: response.body is null (opaque or empty response).");
+  }
+  const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
 
@@ -69,6 +72,15 @@ export async function* parseSSEStream(
       buffer = "";
     }
   } finally {
+    // Cancel the reader first so the underlying HTTP connection is closed
+    // promptly. `releaseLock()` only detaches the reader; without `cancel()`
+    // the connection stays open until the server times out, leaking sockets
+    // when consumers abort mid-stream.
+    try {
+      await reader.cancel();
+    } catch {
+      // ignore — best-effort cleanup
+    }
     reader.releaseLock();
   }
 }

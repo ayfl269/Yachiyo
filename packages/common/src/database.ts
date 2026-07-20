@@ -159,10 +159,20 @@ export class DatabaseManager {
 
   /**
    * Apply PRAGMA optimizations to a database connection.
+   *
+   * Uses WAL journal mode for significantly better write concurrency:
+   * readers do not block writers and vice versa. This is critical for
+   * chat workloads where many conversations may write while the agent
+   * reads context. WAL also survives crashes better than DELETE mode.
+   *
+   * Note: WAL requires the data directory to be on a filesystem that
+   * supports shared-memory (`/dev/shm` on Linux, default on Windows/macOS).
+   * If that is unavailable, fall back to DELETE explicitly here.
    */
   private applyPragmas(db: Database.Database): void {
-    db.pragma("journal_mode = DELETE");
+    db.pragma("journal_mode = WAL");
     db.pragma("synchronous = NORMAL");
+    db.pragma("wal_autocheckpoint = 1000"); // checkpoint every 1000 pages
     db.pragma("journal_size_limit = 1048576"); // 限制日志文件大小为 1MB
     db.pragma("auto_vacuum = INCREMENTAL");    // 开启增量真空回收模式
     db.pragma("cache_size = 20000");

@@ -39,9 +39,26 @@ const TRANSIENT_NETWORK_CODES = new Set([
  * - Browser `fetch` surfaces DNS failures, connection resets, and TLS
  *   handshake failures as `TypeError: fetch failed` / `Failed to fetch`.
  * - Node surfaces the same conditions via `err.code` (errno).
+ *
+ * Note: NOT every `TypeError` is a network failure. Programmatic errors
+ * (calling a non-function, accessing properties of `undefined`, etc.) are
+ * also `TypeError` instances and must NOT be retried — doing so would mask
+ * real bugs and delay failure by `maxRetries * backoff`. We restrict the
+ * match to TypeError messages known to come from `fetch`/`undici`.
  */
+const NETWORK_TYPE_ERROR_PATTERNS = [
+  "fetch failed",
+  "failed to fetch",
+  "networkerror",
+  "network request failed",
+  "load failed",
+];
+
 function isTransientNetworkError(err: unknown): boolean {
-  if (err instanceof TypeError) return true;
+  if (err instanceof TypeError) {
+    const msg = err.message ?? "";
+    return NETWORK_TYPE_ERROR_PATTERNS.some((p) => msg.toLowerCase().includes(p));
+  }
   if (err !== null && typeof err === "object" && "code" in err) {
     const code = (err as { code?: unknown }).code;
     if (typeof code === "string" && TRANSIENT_NETWORK_CODES.has(code)) {

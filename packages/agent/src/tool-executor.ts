@@ -414,11 +414,15 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
     runContext: ContextWrapper<TContext>,
     toolArgs: Record<string, unknown>
   ): AsyncGenerator<CallToolResult | null, void, unknown> {
-    console.log(`[ToolExecutor] execute() called for tool: ${tool.name}, args keys: [${Object.keys(toolArgs).join(', ')}]`);
+    // Use console.debug instead of console.log so production deployments can
+    // gate tool-dispatch tracing via NODE_DEBUG / log level without paying
+    // the I/O cost on every tool call in the hot path. Includes arg keys
+    // only (not values) to avoid leaking user-supplied data into logs.
+    console.debug(`[ToolExecutor] execute() called for tool: ${tool.name}, args keys: [${Object.keys(toolArgs).join(', ')}]`);
 
     // Check for HandoffTool
     if ("agent" in tool && tool.agent != null) {
-      console.log(`[ToolExecutor] ${tool.name} -> HandoffTool (agent=${(tool as { agent?: { name?: string } }).agent?.name})`);
+      console.debug(`[ToolExecutor] ${tool.name} -> HandoffTool (agent=${(tool as { agent?: { name?: string } }).agent?.name})`);
       const isBg = Boolean(toolArgs.background_task);
       delete toolArgs.background_task;
       if (isBg) {
@@ -430,7 +434,7 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
     }
 
     if ("mcpClient" in tool && tool.mcpClient != null) {
-      console.log(`[ToolExecutor] ${tool.name} -> MCPTool`);
+      console.debug(`[ToolExecutor] ${tool.name} -> MCPTool`);
       yield* this.executeMcp(tool as MCPToolInstance<TContext>, runContext, toolArgs);
       return;
     }
@@ -438,7 +442,7 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
     // Check for background task
     if (tool.isBackgroundTask) {
       const taskId = crypto.randomUUID();
-      console.log(`[ToolExecutor] ${tool.name} -> Background task (taskId=${taskId})`);
+      console.debug(`[ToolExecutor] ${tool.name} -> Background task (taskId=${taskId})`);
       this.executeBackground(tool, runContext, taskId, toolArgs).catch(console.error);
       yield {
         content: [{ type: "text" as const, text: `Background task submitted. task_id=${taskId}` }],
@@ -447,7 +451,7 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
     }
 
     // Local tool execution
-    console.log(`[ToolExecutor] ${tool.name} -> Local execution`);
+    console.debug(`[ToolExecutor] ${tool.name} -> Local execution`);
     yield* this.executeLocal(tool, runContext, toolArgs);
   }
 

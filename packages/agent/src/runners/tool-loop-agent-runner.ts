@@ -329,41 +329,74 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
   private async assembleRequestContextForProvider(
     request: ProviderRequest
   ): Promise<Record<string, unknown>> {
+    // Merge of the former assembleRequestContextForProvider and
+    // assembleContextDefault — they shared most of the body but differed
+    // only in modalities filtering and minor placeholder behaviour.
+    //
+    // When the provider declares no modalities (or supports both image and
+    // audio), we behave like the old "default" path: download every URL,
+    // add a `<attachment>` text placeholder when only media is present, and
+    // log a warning on image-download failure. Otherwise we filter by
+    // supported modalities and add `[Image]`/`[Audio]` placeholders for the
+    // unsupported ones.
     const modalities = this.provider.providerConfig.modalities;
-    if (!Array.isArray(modalities)) {
-      return this.assembleContextDefault(request);
-    }
-
-    const supportsImage = modalities.includes("image");
-    const supportsAudio = modalities.includes("audio");
-    if (supportsImage && supportsAudio) {
-      return this.assembleContextDefault(request);
-    }
+    const hasModalities = Array.isArray(modalities);
+    const supportsImage = !hasModalities || modalities!.includes("image");
+    const supportsAudio = !hasModalities || modalities!.includes("audio");
+    // "fullySupported" ≡ behaves like the old default path.
+    const fullySupported = supportsImage && supportsAudio;
 
     const contentBlocks: Record<string, unknown>[] = [];
+
     if (request.prompt) {
       contentBlocks.push({ type: "text", text: request.prompt });
+    } else if (fullySupported && ((request.imageUrls?.length ?? 0) > 0 || (request.audioUrls?.length ?? 0) > 0)) {
+      // Some providers require text content; add placeholder when only media is present.
+      contentBlocks.push({ type: "text", text: "<attachment>" });
     }
 
-    const imageUrls = supportsImage ? request.imageUrls : [];
-    const audioUrls = supportsAudio ? request.audioUrls : [];
+    // Only download media the provider can actually consume.
+    const imageURLs = supportsImage ? (request.imageUrls ?? []) : [];
+    const audioURLs = supportsAudio ? (request.audioUrls ?? []) : [];
 
-    for (const url of imageUrls) {
-      // Download remote images and convert to base64 data URLs
-      const dataUrl = await resolveImageToDataUrl(url);
-      contentBlocks.push({ type: "image_url", image_url: { url: dataUrl ?? url } });
+    // Download all images and all audio in parallel. For multi-image
+    // messages this turns N sequential round-trips into one wait,
+    // measurably reducing time-to-first-token.
+    const [imageDataUrls, audioDataUrls] = await Promise.all([
+      Promise.all(imageURLs.map((url) => resolveImageToDataUrl(url).catch(() => null))),
+      Promise.all(audioURLs.map((url) => resolveAudioToDataUrl(url).catch(() => null))),
+    ]);
+
+    for (let i = 0; i < imageURLs.length; i++) {
+      const url = imageURLs[i];
+      const dataUrl = imageDataUrls[i];
+      if (dataUrl) {
+        contentBlocks.push({ type: "image_url", image_url: { url: dataUrl } });
+      } else {
+        // Only warn in the default (fullySupported) path to preserve the
+        // original behaviour of the filtered path, which fell back silently.
+        if (fullySupported) {
+          console.warn(
+            `[AgentRunner] Image download FAILED for url=${url.slice(0, 120)}, pushing original URL as fallback`
+          );
+        }
+        contentBlocks.push({ type: "image_url", image_url: { url } });
+      }
     }
-    for (const url of audioUrls) {
-      // Download remote audio and convert to base64 data URLs
-      const dataUrl = await resolveAudioToDataUrl(url);
+    for (let i = 0; i < audioURLs.length; i++) {
+      const url = audioURLs[i];
+      const dataUrl = audioDataUrls[i];
       contentBlocks.push({ type: "audio_url", audio_url: { url: dataUrl ?? url } });
     }
-    if (!supportsImage) {
+
+    // For modalities the provider doesn't support at all, emit text
+    // placeholders so the model still knows the user attached something.
+    if (hasModalities && !supportsImage) {
       for (const _ of request.imageUrls ?? []) {
         contentBlocks.push({ type: "text", text: "[Image]" });
       }
     }
-    if (!supportsAudio) {
+    if (hasModalities && !supportsAudio) {
       for (const _ of request.audioUrls ?? []) {
         contentBlocks.push({ type: "text", text: "[Audio]" });
       }
@@ -373,38 +406,6 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
       contentBlocks.push(...(request.extraUserContentParts as unknown as Record<string, unknown>[]));
     }
 
-    return { role: "user", content: contentBlocks };
-  }
-
-  private async assembleContextDefault(
-    request: ProviderRequest
-  ): Promise<Record<string, unknown>> {
-    const contentBlocks: Record<string, unknown>[] = [];
-
-    if (request.prompt) {
-      contentBlocks.push({ type: "text", text: request.prompt });
-    } else if ((request.imageUrls?.length ?? 0) > 0 || (request.audioUrls?.length ?? 0) > 0) {
-      // Some providers require text content; add placeholder when only media is present
-      contentBlocks.push({ type: "text", text: "<attachment>" });
-    }
-    for (const url of request.imageUrls ?? []) {
-      // Download remote images and convert to base64 data URLs
-      const dataUrl = await resolveImageToDataUrl(url);
-      if (!dataUrl) {
-        console.warn(`[AgentRunner] Image download FAILED for url=${url.slice(0, 120)}, pushing original URL as fallback`);
-        contentBlocks.push({ type: "image_url", image_url: { url } });
-      } else {
-        contentBlocks.push({ type: "image_url", image_url: { url: dataUrl } });
-      }
-    }
-    for (const url of request.audioUrls ?? []) {
-      // Download remote audio and convert to base64 data URLs
-      const dataUrl = await resolveAudioToDataUrl(url);
-      contentBlocks.push({ type: "audio_url", audio_url: { url: dataUrl ?? url } });
-    }
-    if (request.extraUserContentParts) {
-      contentBlocks.push(...(request.extraUserContentParts as unknown as Record<string, unknown>[]));
-    }
     return { role: "user", content: contentBlocks };
   }
 

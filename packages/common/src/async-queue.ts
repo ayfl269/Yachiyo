@@ -1,6 +1,11 @@
 export class AsyncQueue<T> {
   private queue: T[] = [];
-  private waiters: Array<{ resolve: (value: T) => void; reject: (err: Error) => void; onAbort?: () => void }> = [];
+  private waiters: Array<{
+    resolve: (value: T) => void;
+    reject: (err: Error) => void;
+    /** Detaches the abort listener from the signal (no-op if none registered). */
+    cleanup?: () => void;
+  }> = [];
 
   /**
    * Wait for and dequeue the next item.
@@ -20,7 +25,11 @@ export class AsyncQueue<T> {
     }
 
     return new Promise<T>((resolve, reject) => {
-      const waiter = { resolve, reject, onAbort: undefined as (() => void) | undefined };
+      const waiter: {
+        resolve: (value: T) => void;
+        reject: (err: Error) => void;
+        cleanup?: () => void;
+      } = { resolve, reject };
 
       if (abortSignal) {
         const onAbort = () => {
@@ -30,8 +39,12 @@ export class AsyncQueue<T> {
           if (idx >= 0) this.waiters.splice(idx, 1);
           reject(new Error("Aborted"));
         };
-        waiter.onAbort = onAbort;
         abortSignal.addEventListener("abort", onAbort, { once: true });
+        // Provide a cleanup that detaches the listener on normal resolution
+        // so it does not remain attached to a long-lived AbortSignal.
+        waiter.cleanup = () => {
+          abortSignal.removeEventListener("abort", onAbort);
+        };
       }
 
       this.waiters.push(waiter);
@@ -41,6 +54,11 @@ export class AsyncQueue<T> {
   put(item: T): void {
     if (this.waiters.length > 0) {
       const waiter = this.waiters.shift()!;
+      // Detach the abort listener before resolving so we don't leak listeners
+      // onto long-lived AbortSignals across many get/put cycles. `{ once: true }`
+      // only removes the listener when the signal actually aborts — not when
+      // the waiter is resolved normally — so manual removal is required here.
+      waiter.cleanup?.();
       waiter.resolve(item);
     } else {
       this.queue.push(item);

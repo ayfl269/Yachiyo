@@ -37,6 +37,17 @@ export class FunctionToolManager {
   funcList: FunctionTool[] = [];
   /** Provider instances for lookup by ID */
   providers: Provider[] = [];
+  /**
+   * Name → tools-with-that-name index. Each array holds tools in insertion
+   * order, mirroring `funcList`. Used by {@link getFunc} to avoid O(N)
+   * scans on every tool dispatch — important when MCP servers register
+   * hundreds of tools and `getFunc` is called from the hot path of
+   * `tool-executor.ts` and `ToolSet.addTool`.
+   *
+   * Mutated in lockstep with {@link funcList} via {@link indexAdd} and
+   * {@link indexRemove}.
+   */
+  private toolIndex: Map<string, FunctionTool[]> = new Map();
   /** MCP server runtime state */
   private mcpServerRuntime: Map<string, MCPServerRuntime> = new Map();
   private mcpStarting: Set<string> = new Set();
@@ -75,28 +86,49 @@ export class FunctionToolManager {
       delete (p as Record<string, unknown>).name;
       (params.properties as Record<string, unknown>)[paramName] = p;
     }
-    this.funcList.push(
-      createFunctionTool({ name, parameters: params, description: desc, handler })
-    );
+    const tool = createFunctionTool({ name, parameters: params, description: desc, handler });
+    this.funcList.push(tool);
+    this.indexAdd(tool);
     console.info(`Added llm tool: ${name}`);
   }
 
   removeFunc(name: string): void {
     const idx = this.funcList.findIndex((f) => f.name === name);
-    if (idx >= 0) this.funcList.splice(idx, 1);
+    if (idx >= 0) {
+      const [removed] = this.funcList.splice(idx, 1);
+      this.indexRemove(removed);
+    }
   }
 
   getFunc(name: string): FunctionTool | undefined {
-    // Prefer active tools (last loaded wins, matching ToolSet.addTool behavior)
-    for (let i = this.funcList.length - 1; i >= 0; i--) {
-      const f = this.funcList[i];
-      if (f.name === name && (f.active ?? true)) return f;
-    }
-    // Fallback: return last matching tool regardless of active state
-    for (let i = this.funcList.length - 1; i >= 0; i--) {
-      if (this.funcList[i].name === name) return this.funcList[i];
+    // O(1) average lookup via the name index. Falls back to a full scan only
+    // if the index is somehow out of sync (defensive — shouldn't happen).
+    const tools = this.toolIndex.get(name);
+    if (tools && tools.length > 0) {
+      // Prefer active tools (last loaded wins, matching ToolSet.addTool behavior)
+      for (let i = tools.length - 1; i >= 0; i--) {
+        if (tools[i].active ?? true) return tools[i];
+      }
+      // Fallback: return last matching tool regardless of active state
+      return tools[tools.length - 1];
     }
     return undefined;
+  }
+
+  // ---- Index maintenance ----
+
+  private indexAdd(tool: FunctionTool): void {
+    const list = this.toolIndex.get(tool.name);
+    if (list) list.push(tool);
+    else this.toolIndex.set(tool.name, [tool]);
+  }
+
+  private indexRemove(tool: FunctionTool): void {
+    const list = this.toolIndex.get(tool.name);
+    if (!list) return;
+    const idx = list.indexOf(tool);
+    if (idx >= 0) list.splice(idx, 1);
+    if (list.length === 0) this.toolIndex.delete(tool.name);
   }
 
   // ---- Tool Set ----
@@ -212,16 +244,22 @@ export class FunctionToolManager {
       await mcpClient.connectToServer(cfg, name);
       const toolsRes = await mcpClient.listToolsAndSave();
 
-      // Remove previous tools from this MCP server
-      this.funcList = this.funcList.filter(
-        (f) => !isMCPToolOfServer(f, name)
-      );
+      // Remove previous tools from this MCP server. Use in-place splice
+      // (rather than reassigning funcList) so the toolIndex stays in sync
+      // — reassigning funcList would orphan the index.
+      const toRemove = this.funcList.filter((f) => isMCPToolOfServer(f, name));
+      for (const removed of toRemove) {
+        const idx = this.funcList.indexOf(removed);
+        if (idx >= 0) this.funcList.splice(idx, 1);
+        this.indexRemove(removed);
+      }
 
       // Add MCP tools
       for (const tool of mcpClient.tools) {
         const { createMCPTool } = await import("./mcp-tool.js");
         const funcTool = createMCPTool(tool, mcpClient, name);
         this.funcList.push(funcTool);
+        this.indexAdd(funcTool);
       }
 
       const toolNames = toolsRes.tools.map((t) => t.name);
@@ -261,7 +299,14 @@ export class FunctionToolManager {
       this.mcpServerRuntime.delete(name);
       console.info(`Disconnected from MCP server ${name}`);
     }
-    this.funcList = this.funcList.filter((f) => !isMCPToolOfServer(f, name));
+    // Use in-place splice (not funcList = filter(...)) so the toolIndex
+    // stays in sync — reassigning funcList would orphan the index.
+    const toRemove = this.funcList.filter((f) => isMCPToolOfServer(f, name));
+    for (const removed of toRemove) {
+      const idx = this.funcList.indexOf(removed);
+      if (idx >= 0) this.funcList.splice(idx, 1);
+      this.indexRemove(removed);
+    }
     this.mcpStarting.delete(name);
   }
 

@@ -176,14 +176,24 @@ export class ToolImageCache {
 
     try {
       const files = await fs.readdir(this.cacheDir);
-      for (const fileName of files) {
-        const filePath = path.join(this.cacheDir, fileName);
-        const stat = await fs.stat(filePath);
-        if (stat.isFile() && now - stat.mtimeMs > CACHE_EXPIRY_MS) {
-          await fs.unlink(filePath);
-          cleaned++;
+      // Stat all files concurrently to avoid serial syscalls.
+      const statResults = await Promise.allSettled(
+        files.map(async (fileName) => {
+          const filePath = path.join(this.cacheDir, fileName);
+          const stat = await fs.stat(filePath);
+          return { fileName, filePath, isFile: stat.isFile(), mtimeMs: stat.mtimeMs };
+        })
+      );
+      // Then unlink expired files concurrently.
+      const toDelete: Promise<void>[] = [];
+      for (const result of statResults) {
+        if (result.status !== "fulfilled") continue;
+        const info = result.value;
+        if (info.isFile && now - info.mtimeMs > CACHE_EXPIRY_MS) {
+          toDelete.push(fs.unlink(info.filePath).then(() => { cleaned++; }));
         }
       }
+      await Promise.allSettled(toDelete);
     } catch {
       // ignore errors during cleanup
     }
@@ -212,21 +222,36 @@ export class ToolImageCache {
       const entries: Array<{ name: string; size: number; atime: number; mtime: number }> = [];
       let totalSize = 0;
 
-      for (const fileName of files) {
-        const filePath = path.join(this.cacheDir, fileName);
-        try {
+      // Stat all files concurrently instead of serially. With the default
+      // maxFileCount of 5000, serial `await fs.stat(...)` would issue 5000
+      // sequential syscalls and block the event loop for hundreds of ms.
+      // Concurrent stat lets the kernel process them in parallel and keeps
+      // the loop responsive while awaiting.
+      const statResults = await Promise.allSettled(
+        files.map(async (fileName) => {
+          const filePath = path.join(this.cacheDir, fileName);
           const stat = await fs.stat(filePath);
-          if (!stat.isFile()) continue;
-          totalSize += stat.size;
-          entries.push({
-            name: fileName,
+          return {
+            fileName,
+            isFile: stat.isFile(),
             size: stat.size,
             atime: stat.atimeMs,
             mtime: stat.mtimeMs,
-          });
-        } catch {
-          // file may have been deleted between readdir and stat — skip
-        }
+          };
+        })
+      );
+
+      for (const result of statResults) {
+        if (result.status !== "fulfilled") continue; // file may have been deleted
+        const info = result.value;
+        if (!info.isFile) continue;
+        totalSize += info.size;
+        entries.push({
+          name: info.fileName,
+          size: info.size,
+          atime: info.atime,
+          mtime: info.mtime,
+        });
       }
 
       // First: TTL-based expiry (same as cleanupExpired but inline).
@@ -282,16 +307,18 @@ export class ToolImageCache {
     let fileCount = 0;
     try {
       const files = await fs.readdir(this.cacheDir);
-      for (const fileName of files) {
-        const filePath = path.join(this.cacheDir, fileName);
-        try {
+      const statResults = await Promise.allSettled(
+        files.map(async (fileName) => {
+          const filePath = path.join(this.cacheDir, fileName);
           const stat = await fs.stat(filePath);
-          if (stat.isFile()) {
-            totalSizeBytes += stat.size;
-            fileCount++;
-          }
-        } catch {
-          // skip
+          return { isFile: stat.isFile(), size: stat.size };
+        })
+      );
+      for (const result of statResults) {
+        if (result.status !== "fulfilled") continue;
+        if (result.value.isFile) {
+          totalSizeBytes += result.value.size;
+          fileCount++;
         }
       }
     } catch {

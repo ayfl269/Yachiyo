@@ -545,32 +545,40 @@ ${bufferTexts.join("\n")}
   /**
    * Deduplicate similar memories by finding and merging them.
    * Skips user_profile type (fixed schema fields should not be merged).
+   *
+   * The whole pass runs inside one SQLite transaction. Without it,
+   * `better-sqlite3` would issue an `fsync` per SELECT/UPDATE — and the
+   * loop issues ~N×(1 + findSimilar queries) statements for N=500
+   * memories, blocking the event loop for seconds at a time. A single
+   * outer transaction collapses those into one commit at the end.
    */
   private deduplicate(): number {
-    let merged = 0;
-    const allMemories = this.store.list(500);
+    return this.store.withTransaction(() => {
+      let merged = 0;
+      const allMemories = this.store.list(500);
 
-    for (const memory of allMemories) {
-      // Skip user_profile — each field (preferences/background/style) is distinct
-      if (memory.memoryType === "user_profile") continue;
+      for (const memory of allMemories) {
+        // Skip user_profile — each field (preferences/background/style) is distinct
+        if (memory.memoryType === "user_profile") continue;
 
-      const similar = this.store.findSimilar(memory.key, memory.tags, 3);
-      for (const candidate of similar) {
-        // Skip if already processed or different type
-        if (candidate.memoryType !== memory.memoryType) continue;
-        if (candidate.key <= memory.key) continue; // Process each pair once
+        const similar = this.store.findSimilar(memory.key, memory.tags, 3);
+        for (const candidate of similar) {
+          // Skip if already processed or different type
+          if (candidate.memoryType !== memory.memoryType) continue;
+          if (candidate.key <= memory.key) continue; // Process each pair once
 
-        // Check if values are similar enough to merge
-        if (this.shouldMerge(memory, candidate)) {
-          const mergedValue = this.truncateValue(this.mergeValues(memory, candidate));
-          if (this.store.merge(memory.key, candidate.key, mergedValue)) {
-            merged++;
+          // Check if values are similar enough to merge
+          if (this.shouldMerge(memory, candidate)) {
+            const mergedValue = this.truncateValue(this.mergeValues(memory, candidate));
+            if (this.store.merge(memory.key, candidate.key, mergedValue)) {
+              merged++;
+            }
           }
         }
       }
-    }
 
-    return merged;
+      return merged;
+    });
   }
 
   /**
@@ -717,6 +725,9 @@ ${bufferTexts.join("\n")}
     this.timerHandle = setTimeout(() => {
       this.runConsolidateSafe();
     }, delay);
+    // Don't keep the Node.js event loop alive just for the consolidation timer.
+    // Matches the pattern used by SessionLockManager.watchdog in pipeline/session-lock.ts.
+    this.timerHandle.unref?.();
   }
 
   /** 启动周期性记忆整理，使用 config.interval 控制频率（幂等，重复调用安全） */

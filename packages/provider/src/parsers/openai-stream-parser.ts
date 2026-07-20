@@ -52,7 +52,12 @@ export async function* parseOpenAIStream(
     let chunk: OpenAIChunk;
     try {
       chunk = JSON.parse(event.data);
-    } catch {
+    } catch (e) {
+      // Log the parse failure so malformed upstream responses (HTML error
+      // pages, truncated chunks, gateway errors) are visible during debugging
+      // instead of being silently dropped. Truncate to avoid flooding logs.
+      const preview = event.data.length > 200 ? event.data.slice(0, 200) + "…" : event.data;
+      console.warn(`[OpenAIStreamParser] Failed to parse SSE data as JSON: ${e instanceof Error ? e.message : e}; data preview: ${preview}`);
       continue;
     }
 
