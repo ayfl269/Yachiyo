@@ -738,7 +738,12 @@ export default function ProviderManager() {
       modalities = ['text']
       if (supportsImageInput(meta)) modalities.push('image')
       if (supportsAudioInput(meta)) modalities.push('audio')
-      if (supportsToolCall(meta)) modalities.push('tool_use')
+      // 工具调用能力默认开启：仅当 API 元数据显式声明 tool_call: false 时才不加 tool_use。
+      // 历史行为是 Boolean(meta?.tool_call)，但很多模型 API 不返回 tool_call 字段，
+      // 导致大量本支持工具的模型被漏配 tool_use，进而触发 sanitizer 抹除工具上下文。
+      // 现代主流 chat 模型（GPT/Claude/Gemini/GLM/Qwen/DeepSeek 等）默认都支持工具调用，
+      // 因此 undefined 视为支持，仅显式 false 才视为不支持。
+      if (meta?.tool_call !== false) modalities.push('tool_use')
       maxContext = meta?.limit?.context || 0
       isReasoning = supportsReasoning(meta)
     } else {

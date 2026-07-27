@@ -31,7 +31,7 @@ export interface AnthropicToolUseBlock {
 export interface AnthropicToolResultBlock {
   type: "tool_result";
   tool_use_id: string;
-  content: string | AnthropicTextBlock[];
+  content: string | AnthropicContentBlock[];
 }
 
 export type AnthropicContentBlock =
@@ -155,19 +155,21 @@ export function messageToAnthropic(messages: Message[]): AnthropicConversionResu
       const toolResults: AnthropicToolResultBlock[] = [];
       while (i < messages.length && messages[i].role === "tool") {
         const toolMsg = messages[i];
-        const outputText =
-          typeof toolMsg.content === "string"
-            ? toolMsg.content
-            : Array.isArray(toolMsg.content)
-              ? toolMsg.content
-                  .filter((p) => !p._noSave && p.type === "text")
-                  .map((p) => (p as { text: string }).text)
-                  .join("\n")
-              : "";
+        let toolContent: string | AnthropicContentBlock[];
+        if (typeof toolMsg.content === "string") {
+          toolContent = toolMsg.content;
+        } else if (Array.isArray(toolMsg.content)) {
+          const converted = toolMsg.content
+            .map(contentPartToAnthropic)
+            .filter((p): p is AnthropicContentBlock => p !== null);
+          toolContent = converted.length > 0 ? converted : "";
+        } else {
+          toolContent = "";
+        }
         toolResults.push({
           type: "tool_result",
           tool_use_id: toolMsg.tool_call_id ?? "",
-          content: outputText,
+          content: toolContent,
         });
         i++;
       }

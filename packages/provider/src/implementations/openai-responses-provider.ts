@@ -16,6 +16,7 @@ export interface OpenAIResponsesProviderConfig extends ProviderConfig {
 }
 
 export class OpenAIResponsesProvider implements Provider {
+  readonly type = "openai_responses";
   providerConfig: ProviderConfig;
   private apiKey: string;
   private baseUrl: string;

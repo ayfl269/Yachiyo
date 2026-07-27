@@ -116,6 +116,14 @@ export class ProviderManager {
   }
 
   registerProvider(provider: Provider): void {
+    // 自动补全 modalities 默认值：chat provider 默认支持 text + tool_use。
+    // 仅在 modalities 为 undefined / null 时补全；用户显式配置时以用户为准
+    // （即便用户漏配 tool_use，sanitizer 也会通过 warn 日志暴露问题）。
+    // 这避免了"用户没配 modalities 字段 → 模型可能不调工具"的隐性失效路径，
+    // 同时保留用户对能力的显式控制权。
+    if (provider.providerConfig.modalities == null) {
+      provider.providerConfig.modalities = ["text", "tool_use"];
+    }
     this.providerInsts.push(provider);
     const id = this.extractId(provider.providerConfig);
     if (id) {

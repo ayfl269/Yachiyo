@@ -19,6 +19,24 @@ import {
 import { fileLockManager } from "./coordination.js";
 import { EventEmitter } from "events";
 
+// ── Model-Specific Tool Call Prompts for Sub-Agents ──
+
+const SUB_AGENT_OPENAI_TOOL_PROMPT = `You are a tool-augmented assistant. When you need to take action, call a tool by outputting a tool_calls array. Each tool call: {"id":"call_1","type":"function","function":{"name":"<tool>","arguments":"<JSON-stringified-args>"}}`;
+
+const SUB_AGENT_ANTHROPIC_TOOL_PROMPT = `You are a tool-augmented assistant. When you need to take action, call a tool by adding a tool_use content block: {"type":"tool_use","id":"toolu_1","name":"<tool>","input":{<args-object>}}`;
+
+const SUB_AGENT_GEMINI_TOOL_PROMPT = `You are a tool-augmented assistant. When you need to take action, call a tool by outputting a functionCall part: {"functionCall":{"name":"<tool>","args":{<args-object>}}}`;
+
+function getSubAgentToolCallPrompt(providerType: string): string {
+  switch (providerType) {
+    case "openai": return SUB_AGENT_OPENAI_TOOL_PROMPT;
+    case "anthropic": return SUB_AGENT_ANTHROPIC_TOOL_PROMPT;
+    case "gemini": return SUB_AGENT_GEMINI_TOOL_PROMPT;
+    case "openai_responses": return SUB_AGENT_OPENAI_TOOL_PROMPT;
+    default: return SUB_AGENT_OPENAI_TOOL_PROMPT;
+  }
+}
+
 // ── Background Task Wake-up Infrastructure ──
 
 export interface BackgroundTaskResult {
@@ -553,6 +571,15 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
     // has no span attached (e.g. tests, standalone usage).
     subContext._traceSpan = runContext._traceSpan;
 
+    // Inject model-specific tool call prompt for sub-agent
+    let subSystemPrompt = tool.agent?.instructions ?? "";
+    if (toolset && !toolset.empty()) {
+      const toolPrompt = getSubAgentToolCallPrompt(provider.type);
+      subSystemPrompt = subSystemPrompt
+        ? `${subSystemPrompt}\n${toolPrompt}`
+        : toolPrompt;
+    }
+
     await subRunner.reset(subContext, new EmptyAgentHooks(), {
       provider,
       request: {
@@ -560,7 +587,7 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
         imageUrls,
         audioUrls: [],
         contexts: contexts ?? [],
-        systemPrompt: tool.agent?.instructions,
+        systemPrompt: subSystemPrompt || undefined,
         funcTool: toolset,
         extraUserContentParts: [],
       },

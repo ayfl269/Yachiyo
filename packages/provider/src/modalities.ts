@@ -139,11 +139,35 @@ function messageToDict(message: Message | Record<string, unknown>): Record<strin
   return null;
 }
 
+/**
+ * Build a placeholder string for a tool-result message when the active
+ * provider does not support tool_use. The original `role: "tool"` message
+ * is converted to `role: "user"` with this placeholder so the model at
+ * least sees the tool's output text.
+ *
+ * The placeholder explicitly frames the content as a system-injected
+ * tool result rather than user-authored text — without this framing,
+ * models frequently mistake the stripped tool output for the user's own
+ * statement and reply to it as if the user had said it, which breaks
+ * multi-step tool chains.
+ */
 function toolResultPlaceholder(content: unknown): string {
+  const body = extractToolResultText(content);
+  if (!body) {
+    return "[SYSTEM: This message was originally a tool result, but the provider does not support tool_use. The tool returned no textual output.]";
+  }
+  return (
+    "[SYSTEM: This message was originally a tool result, but the active provider " +
+    "does not support tool_use. It has been converted to a user message so the " +
+    "model can still see the tool's output. Do not treat this as the user's own " +
+    "statement — it is the return value of a prior tool call.]\n" +
+    `Tool output:\n${body}`
+  );
+}
+
+function extractToolResultText(content: unknown): string {
   if (typeof content === "string") {
-    const text = content.trim();
-    if (!text) return "[Tool result]";
-    return `[Tool result]\n${text}`;
+    return content.trim();
   }
 
   if (Array.isArray(content)) {
@@ -160,24 +184,61 @@ function toolResultPlaceholder(content: unknown): string {
         }
       }
     }
-    const joined = textParts.filter(Boolean).join("\n").trim();
-    if (!joined) return "[Tool result]";
-    return `[Tool result]\n${joined}`;
+    return textParts.filter(Boolean).join("\n").trim();
   }
 
-  return "[Tool result]";
+  return "";
 }
 
 /**
- * Log context sanitize stats if any changes were made.
+ * Track which provider ids have already emitted the tool_use strip warning.
+ * Each provider should warn at most once per process to avoid log spam on
+ * every request — the underlying misconfiguration doesn't change between
+ * calls, so one prominent warning is enough for the operator to notice.
  */
-export function logContextSanitizeStats(stats: ContextSanitizeStats): void {
+const toolUseStripWarnedProviders = new Set<string>();
+
+/**
+ * Log context sanitize stats if any changes were made.
+ *
+ * Tool-use sanitization (fixedToolMessages / removedToolCalls) is upgraded
+ * to a `warn`-level, deduplicated message because it silently destroys the
+ * model's tool-call history — a severe issue that otherwise goes unnoticed.
+ * Image/audio sanitization stays at `debug` level since it is expected
+ * behaviour for multimodal-incompatible providers.
+ */
+export function logContextSanitizeStats(
+  stats: ContextSanitizeStats,
+  providerId?: string
+): void {
   if (!isSanitizeStatsChanged(stats)) return;
+
+  const toolUseStripped = stats.fixedToolMessages > 0 || stats.removedToolCalls > 0;
+  if (toolUseStripped) {
+    const key = providerId ?? "unknown";
+    if (!toolUseStripWarnedProviders.has(key)) {
+      toolUseStripWarnedProviders.add(key);
+      console.warn(
+        `[modalities] Provider "${key}" does not support tool_use — ` +
+        `tool-call history has been STRIPPED from the context. ` +
+        `The model will not see prior tool invocations and may fail to call ` +
+        `tools proactively. Add "tool_use" to this provider's modalities in ` +
+        `the dashboard to fix this. ` +
+        `(this request: tool_msgs→user=${stats.fixedToolMessages}, ` +
+        `tool_calls_removed=${stats.removedToolCalls})`
+      );
+    } else {
+      console.debug(
+        `[modalities] Provider "${key}" tool_use sanitization: ` +
+        `fixed_tool=${stats.fixedToolMessages}, removed_calls=${stats.removedToolCalls}`
+      );
+    }
+    return;
+  }
+
   console.debug(
     `context modality fix applied: ` +
     `fixed_image_blocks=${stats.fixedImageBlocks}, ` +
-    `fixed_audio_blocks=${stats.fixedAudioBlocks}, ` +
-    `fixed_tool_messages=${stats.fixedToolMessages}, ` +
-    `removed_tool_calls=${stats.removedToolCalls}`
+    `fixed_audio_blocks=${stats.fixedAudioBlocks}`
   );
 }

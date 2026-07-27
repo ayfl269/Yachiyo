@@ -116,13 +116,13 @@ export class ProcessStage extends PipelineStage {
           const platformSupportsStreaming = event.platformMeta.supportStreamingMessage;
 
           if (enableStreaming && platformSupportsStreaming) {
-          const streamGenerator = this.runAgentStreaming(agentRunner, event);
+          const streamGenerator = this.runAgentStreaming(agentRunner, event, umo, convId);
             event.setResult(
               new EventResult()
                 .setResultContentType(ResultContentType.STREAMING_RESULT)
                 .setAsyncStream(streamGenerator)
             );
-            // 设置 extras 供 respond 阶段保存流式助手消息
+            // 设置 extras 供 respond 阶段保存流式助手消息（仅当 _runHistorySaved 未设置时使用）
             event.setExtra("_saveHistory_convId", convId);
             event.setExtra("_saveHistory_umo", umo);
             yield;
@@ -143,6 +143,9 @@ export class ProcessStage extends PipelineStage {
             await this.recordTokenStats(agentRunner);
 
             await this.applyNonStreamingResult(event, runResult, umo, convId);
+
+            // Save full run context with tool metadata (overwrites any text-only save above)
+            await this.saveRunHistory(agentRunner, umo, convId);
             yield;
           }
         } finally {
@@ -412,6 +415,8 @@ export class ProcessStage extends PipelineStage {
   private async *runAgentStreaming(
     agentRunner: ToolLoopAgentRunner,
     event: MessageEvent,
+    umo?: string,
+    convId?: string,
   ): AsyncGenerator<MessageChain, void> {
     let steps = 0;
     try {
@@ -451,6 +456,12 @@ export class ProcessStage extends PipelineStage {
 
       // Record provider token stats after agent run completes
       await this.recordTokenStats(agentRunner);
+
+      // Save full run context with tool metadata
+      if (umo && convId) {
+        await this.saveRunHistory(agentRunner, umo, convId);
+        event.setExtra("_runHistorySaved", true);
+      }
     } catch (e) {
       console.error("Agent streaming error:", e);
     }
@@ -532,6 +543,43 @@ export class ProcessStage extends PipelineStage {
     } catch (e) {
       console.error("Failed to save assistant message:", e);
     }
+  }
+
+  /**
+   * Save the full agent run context to conversation history, preserving
+   * tool_calls, tool_call_id, and tool result metadata that simple text-only
+   * saves would lose. Called after the agent run completes in both the
+   * streaming and non-streaming paths.
+   */
+  private async saveRunHistory(
+    agentRunner: ToolLoopAgentRunner,
+    umo: string,
+    convId: string,
+  ): Promise<void> {
+    const messages = agentRunner.currentRunContext?.messages;
+    if (!messages || messages.length === 0) return;
+
+    const history: Record<string, unknown>[] = [];
+    for (const msg of messages) {
+      if (msg.role === "system" || msg.role === "_checkpoint") continue;
+      if (msg._noSave) continue;
+      const entry: Record<string, unknown> = { role: msg.role };
+      if (msg.content !== undefined) entry.content = msg.content;
+      if (msg.tool_calls) entry.tool_calls = msg.tool_calls;
+      if (msg.tool_call_id) entry.tool_call_id = msg.tool_call_id;
+      history.push(entry);
+    }
+    if (history.length === 0) return;
+
+    // Truncate history to prevent unbounded growth
+    const maxHistoryMessages = this.ctx.config.maxHistoryMessages ?? 200;
+    if (history.length > maxHistoryMessages) {
+      history.splice(0, history.length - maxHistoryMessages);
+    }
+
+    await this.ctx.conversationManager.updateConversation(umo, convId, {
+      history: JSON.stringify(history),
+    });
   }
 
   private async recordTokenStats(agentRunner: ToolLoopAgentRunner): Promise<void> {

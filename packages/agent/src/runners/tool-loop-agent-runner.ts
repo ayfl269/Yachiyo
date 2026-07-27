@@ -74,6 +74,21 @@ const SKILLS_LIKE_REQUERY_REPAIR_INSTRUCTION =
   "Do not return an empty response. " +
   "Do not ignore the selected tools without explanation.";
 
+function getRequeryToolCallFormatHint(providerType: string): string {
+  switch (providerType) {
+    case "openai":
+      return "Output each tool call as a JSON object with id, type:\"function\", function:{name, arguments}.";
+    case "anthropic":
+      return "Output each tool use as a JSON object with type:\"tool_use\", id, name, input.";
+    case "gemini":
+      return "Output each function call as a JSON object with functionCall:{name, args}.";
+    case "openai_responses":
+      return "Output each function call as a JSON object with type:\"function_call\", id, name, arguments.";
+    default:
+      return "Output tool calls through the API's native tool-call mechanism.";
+  }
+}
+
 const REPEATED_TOOL_NOTICE_L1_THRESHOLD = 3;
 const REPEATED_TOOL_NOTICE_L2_THRESHOLD = 4;
 const REPEATED_TOOL_NOTICE_L3_THRESHOLD = 5;
@@ -1134,7 +1149,7 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
       contexts as (Message | Record<string, unknown>)[],
       modalities
     );
-    logContextSanitizeStats(stats);
+    logContextSanitizeStats(stats, this.provider.providerConfig.id as string ?? this.provider.type);
     return sanitized;
   }
 
@@ -1795,6 +1810,11 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
       "{toolNames}",
       toolNames.join(", ")
     );
+
+    // Add model-specific format hint
+    const formatHint = getRequeryToolCallFormatHint(this.provider.type);
+    instruction = `${instruction}\n\n${formatHint}`;
+
     if (extraInstruction) instruction = `${instruction}\n${extraInstruction}`;
 
     if (contexts.length > 0 && contexts[0].role === "system") {

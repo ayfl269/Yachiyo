@@ -201,6 +201,11 @@ export class RespondStage extends PipelineStage {
 
   private async appendAssistantToHistory(event: MessageEvent, assistantText: string): Promise<void> {
     if (!assistantText.trim()) return;
+
+    // Full run history (with tool metadata) already saved by the process stage,
+    // no need to append plain text on top.
+    if (event.getExtra<boolean>("_runHistorySaved")) return;
+
     const convId = event.getExtra<string>("_saveHistory_convId");
     const umo = event.getExtra<string>("_saveHistory_umo");
     if (!convId || !umo) return;
@@ -212,7 +217,7 @@ export class RespondStage extends PipelineStage {
       if (!Array.isArray(parsed)) {
         console.warn(`[RespondStage] Conversation ${convId} history corrupted (not an array), reinitializing.`);
       }
-      const history: Array<{ role: string; content: string }> = Array.isArray(parsed) ? parsed : [];
+      const history: Array<Record<string, unknown>> = Array.isArray(parsed) ? parsed : [];
       history.push({ role: "assistant", content: assistantText });
 
       // Truncate history to prevent unbounded growth

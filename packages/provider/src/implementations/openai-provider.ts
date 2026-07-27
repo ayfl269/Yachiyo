@@ -16,6 +16,7 @@ export interface OpenAIProviderConfig extends ProviderConfig {
 }
 
 export class OpenAIProvider implements Provider {
+  readonly type = "openai";
   providerConfig: ProviderConfig;
   private apiKey: string;
   private baseUrl: string;

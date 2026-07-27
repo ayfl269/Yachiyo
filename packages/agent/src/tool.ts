@@ -64,7 +64,7 @@ export class ToolSet {
   }
 
   empty(): boolean {
-    return this.tools.length === 0;
+    return this.tools.length === 0 || this.tools.every((t) => !t.active);
   }
 
   addTool(tool: FunctionTool): void {

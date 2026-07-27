@@ -140,12 +140,16 @@ export function messageToGemini(messages: Message[]): GeminiConversionResult {
         // for concurrent tool calls. Only the function name should remain.
         funcName = funcName.replace(/__idx_\d+$/, "");
       } else {
-        // Find the actual tool name from previous assistant tool calls in history
-        const currentIndex = messages.indexOf(msg);
-        for (let i = currentIndex - 1; i >= 0; i--) {
+        // Find the actual tool name by searching backwards through messages
+        // using tool_call_id matching (not reference equality), so this works
+        // even when the messages array has been rebuilt (e.g. context compression,
+        // fallback switching, history loading).
+        const targetId = msg.tool_call_id;
+        for (let i = messages.length - 1; i >= 0; i--) {
           const prevMsg = messages[i];
+          if (prevMsg === msg) continue;
           if (prevMsg.role === "assistant" && prevMsg.tool_calls) {
-            const foundTool = (prevMsg.tool_calls as ToolCall[]).find((tc) => tc.id === msg.tool_call_id);
+            const foundTool = (prevMsg.tool_calls as ToolCall[]).find((tc) => tc.id === targetId);
             if (foundTool) {
               funcName = foundTool.function.name;
               break;

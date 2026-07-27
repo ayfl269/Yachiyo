@@ -84,6 +84,7 @@ export interface GeminiProviderConfig extends ProviderConfig {
 }
 
 export class GeminiProvider implements Provider {
+  readonly type = "gemini";
   providerConfig: ProviderConfig;
   private apiKey: string;
   private baseUrl: string;

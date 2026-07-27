@@ -17,6 +17,7 @@ export interface AnthropicProviderConfig extends ProviderConfig {
 }
 
 export class AnthropicProvider implements Provider {
+  readonly type = "anthropic";
   providerConfig: ProviderConfig;
   private apiKey: string;
   private baseUrl: string;
