@@ -4,7 +4,7 @@ import {
   Plus, Save, Trash2, RefreshCw, Search, Download,
   Pencil, Power, Image as ImageIcon,
   AudioWaveform, Wrench, Brain, Globe,
-  Play, Sparkles, Eye, EyeOff, Ruler
+  Play, Eye, EyeOff, Ruler
 } from 'lucide-react'
 import { useToast, ToastPortal, Modal, useAsyncEffect } from './shared'
 import { apiFetch } from '../lib/api'
@@ -152,76 +152,9 @@ function generateUniqueSourceId(baseId: string, existing: ProviderSource[]): str
   return candidate
 }
 
-function autoDetectModelCapabilities(modelName: string) {
-  const name = modelName.toLowerCase();
-
-  const isReasoning = name.includes('o1-') ||
-                      name.includes('o3-') ||
-                      name.includes('r1') ||
-                      name.includes('reasoning') ||
-                      name.startsWith('qwq') ||
-                      name.includes('math');
-
-  let maxContext = 0;
-  if (name.includes('gpt-4o') || name.includes('o1-') || name.includes('o3-')) {
-    maxContext = 128000;
-  } else if (name.includes('gpt-4-turbo') || name.includes('gpt-4-1106') || name.includes('gpt-4-0125')) {
-    maxContext = 128000;
-  } else if (name.includes('gpt-4')) {
-    maxContext = 8192;
-  } else if (name.includes('claude-3-5') || name.includes('claude-3.5')) {
-    maxContext = 200000;
-  } else if (name.includes('claude-3')) {
-    maxContext = 200000;
-  } else if (name.includes('gemini-1.5') || name.includes('gemini-2.0') || name.includes('gemini-exp')) {
-    maxContext = 1048576;
-  } else if (name.includes('deepseek')) {
-    maxContext = 64000;
-  } else if (name.includes('qwen2.5') || name.includes('qwen-2.5')) {
-    maxContext = 128000;
-  } else if (name.includes('qwen2') || name.includes('qwen-2')) {
-    maxContext = 32000;
-  } else if (name.includes('llama3.1') || name.includes('llama-3.1') || name.includes('llama3.2') || name.includes('llama-3.2') || name.includes('llama3.3')) {
-    maxContext = 128000;
-  } else if (name.includes('llama3') || name.includes('llama-3')) {
-    maxContext = 8192;
-  } else if (name.includes('mistral') || name.includes('mixtral')) {
-    maxContext = 32000;
-  }
-
-  const modalities = ['text'];
-
-  const hasVision = name.includes('vision') ||
-                    name.includes('vl') ||
-                    name.includes('-v') ||
-                    name.includes('gpt-4o') ||
-                    name.includes('claude-3-5') ||
-                    name.includes('claude-3-opus') ||
-                    name.includes('claude-3-sonnet') ||
-                    name.includes('gemini');
-  if (hasVision) modalities.push('image');
-
-  const hasAudio = name.includes('audio') ||
-                    name.includes('gemini-1.5') ||
-                    name.includes('gemini-2.0') ||
-                    name.includes('gpt-4o-audio');
-  if (hasAudio) modalities.push('audio');
-
-  const supportsTools = !name.includes('instruct') ||
-                        name.includes('qwen') ||
-                        name.includes('gpt') ||
-                        name.includes('claude') ||
-                        name.includes('gemini') ||
-                        name.includes('deepseek') ||
-                        name.includes('llama');
-  if (supportsTools) modalities.push('tool_use');
-
-  return {
-    maxContext,
-    isReasoning,
-    modalities
-  };
-}
+// 模态能力已不再根据模型名推断：所有 chat 模型默认全部勾选（text + image + audio + tool_use）。
+// 如果 API 元数据可用，max_context_tokens 和 reasoning 仍从 meta 读取（这两个是数值参数，
+// meta 提供的是 API 声明的真实值，不属于"能力识别"范畴）；modalities 一律固定全部勾选。
 
 // Non-chat provider field schema
 const nonChatFieldSchema: Record<string, FieldDef[][]> = {
@@ -730,28 +663,13 @@ export default function ProviderManager() {
     const newId = `${sourceId}/${modelName}`
     const meta = modelMetadata?.[modelName]
 
-    let modalities = ['text', 'image', 'audio', 'tool_use']
-    let maxContext = 0
-    let isReasoning = false
-
-    if (meta) {
-      modalities = ['text']
-      if (supportsImageInput(meta)) modalities.push('image')
-      if (supportsAudioInput(meta)) modalities.push('audio')
-      // 工具调用能力默认开启：仅当 API 元数据显式声明 tool_call: false 时才不加 tool_use。
-      // 历史行为是 Boolean(meta?.tool_call)，但很多模型 API 不返回 tool_call 字段，
-      // 导致大量本支持工具的模型被漏配 tool_use，进而触发 sanitizer 抹除工具上下文。
-      // 现代主流 chat 模型（GPT/Claude/Gemini/GLM/Qwen/DeepSeek 等）默认都支持工具调用，
-      // 因此 undefined 视为支持，仅显式 false 才视为不支持。
-      if (meta?.tool_call !== false) modalities.push('tool_use')
-      maxContext = meta?.limit?.context || 0
-      isReasoning = supportsReasoning(meta)
-    } else {
-      const auto = autoDetectModelCapabilities(modelName)
-      modalities = auto.modalities
-      maxContext = auto.maxContext
-      isReasoning = auto.isReasoning
-    }
+    // modalities 固定全部勾选：不再根据模型名或 API 元数据推断能力。
+    // 后端 sanitizer 会在 provider 真不支持某能力时通过 warn 日志暴露问题。
+    const modalities = ['text', 'image', 'audio', 'tool_use']
+    // max_context_tokens 和 reasoning 仍从 API 元数据读取（数值参数，非能力识别）；
+    // 无 meta 时使用默认值（0 / false），用户可在表单中手动调整。
+    const maxContext = meta?.limit?.context || 0
+    const isReasoning = supportsReasoning(meta)
 
     return {
       id: newId,
@@ -849,6 +767,14 @@ export default function ProviderManager() {
     const data = structuredClone(provider)
     if (data.temperature === undefined) {
       data.temperature = 0.7
+    }
+    // tool_use 强制启用：历史数据可能漏配 tool_use，编辑时统一补全，
+    // 避免用户保存后仍触发后端 sanitizer 抹除工具调用历史。
+    // modalities 为 undefined 时也初始化为 ['text', 'tool_use']。
+    if (!Array.isArray(data.modalities)) {
+      data.modalities = ['text', 'tool_use']
+    } else if (!data.modalities.includes('tool_use')) {
+      data.modalities = [...data.modalities, 'tool_use']
     }
     setProviderEditData(data)
     setProviderEditOriginalId(provider.id)
@@ -1003,6 +929,8 @@ export default function ProviderManager() {
   function toggleModality(mod: string) {
     setProviderEditData(prev => {
       if (!prev) return prev
+      // tool_use 已强制启用，不允许在 UI 层移除（参见 openProviderEdit 中的强制补全逻辑）
+      if (mod === 'tool_use') return prev
       const mods = prev.modalities ? [...prev.modalities] : []
       const idx = mods.indexOf(mod)
       if (idx >= 0) mods.splice(idx, 1)
@@ -1013,18 +941,6 @@ export default function ProviderManager() {
 
   function setNonChatField(key: string, value: any) {
     setNonChatConfigData(prev => prev ? { ...prev, [key]: value } : prev)
-  }
-
-  function handleAutoDetectCapabilities() {
-    if (!providerEditData) return
-    const auto = autoDetectModelCapabilities(providerEditData.model)
-    setProviderEditData(prev => prev ? {
-      ...prev,
-      max_context_tokens: auto.maxContext,
-      reasoning: auto.isReasoning,
-      modalities: auto.modalities
-    } : prev)
-    showMessage('已自动识别并填充模型参数', 'success')
   }
 
   // ===== Lifecycle =====
@@ -1578,12 +1494,7 @@ export default function ProviderManager() {
               <input type="text" value={providerEditData.id} onChange={e => setProviderEditField('id', e.target.value)} className="form-control font-mono" disabled={providerEditMode === 'edit'} />
             </div>
             <div className="form-group">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                <label style={{ marginBottom: 0 }}>模型名称</label>
-                <button className="btn sm" onClick={handleAutoDetectCapabilities} style={{ padding: '2px 6px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', borderRadius: 4 }}>
-                  <Sparkles size={12} /> 自动识别参数
-                </button>
-              </div>
+              <label>模型名称</label>
               <input type="text" value={providerEditData.model} onChange={e => setProviderEditField('model', e.target.value)} className="form-control font-mono" disabled={providerEditMode === 'edit'} />
             </div>
             <div className="form-group">
@@ -1598,9 +1509,9 @@ export default function ProviderManager() {
               <input type="number" value={providerEditData.max_context_tokens ?? 0} onChange={e => setProviderEditField('max_context_tokens', Number(e.target.value))} className="form-control font-mono" />
             </div>
             <div className="form-group span-2">
-              <label>模态能力 (modalities)</label>
+              <label>模态能力 (modalities) <span className="text-muted text-xs">工具调用能力已默认强制启用，无需在此勾选</span></label>
               <div className="checkbox-group">
-                {['text', 'image', 'audio', 'tool_use'].map(mod => (
+                {['text', 'image', 'audio'].map(mod => (
                   <label key={mod} className="checkbox-label">
                     <input
                       type="checkbox"
