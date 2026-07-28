@@ -430,7 +430,6 @@ function handleSetGoal(store: SqliteSchedulerTaskStore, p: {
     }
   }
 
-  const now = new Date();
   const taskId = generateId();
   store.save({
     id: taskId,
@@ -477,7 +476,6 @@ function handleSetPlan(store: SqliteSchedulerTaskStore, id: string | undefined, 
     status: s.status ?? "pending",
   }));
 
-  const now = new Date();
   const taskId = id ?? generateId();
   const existing = id ? store.get(id) : null;
 

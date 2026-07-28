@@ -1322,7 +1322,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
       this.scheduleReconnect();
       // adapter 停止时主动关闭 WebSocket 不会触发此处的延迟告警
       if (this._status !== "running") return;
-      this._deferredCloseWarn?.timer && clearTimeout(this._deferredCloseWarn.timer);
+      if (this._deferredCloseWarn?.timer) clearTimeout(this._deferredCloseWarn.timer);
       const reasonStr = reason.toString();
       this._deferredCloseWarn = {
         code, reason: reasonStr,
