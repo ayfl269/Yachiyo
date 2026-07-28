@@ -1386,9 +1386,23 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
       } catch (e) {
         if (e instanceof ToolExecutionInterrupted) throw e;
         console.warn(`Tool execution error: ${e}`);
+        const errMsg = String(e);
+        // 将常见系统错误码映射为恢复引导提示，帮助模型理解错误原因并采取下一步动作
+        let hint = "";
+        if (errMsg.includes("ENOENT") || errMsg.includes("ENOTDIR")) {
+          hint = " (文件/目录不存在。先用 list_dir 或 file_search 确认路径是否正确)";
+        } else if (errMsg.includes("EACCES") || errMsg.includes("EPERM")) {
+          hint = " (权限不足。请检查文件权限或使用其他路径)";
+        } else if (errMsg.includes("ECONNREFUSED")) {
+          hint = " (连接被拒绝。目标服务可能未启动、地址错误或被防火墙阻止)";
+        } else if (errMsg.includes("EEXIST")) {
+          hint = " (文件/目录已存在。如需覆盖请删除后重试，或使用其他名称)";
+        } else if (errMsg.includes("ENOENTlock")) {
+          hint = " (lockfile 不存在，相关 pnpm/npm 操作尚未执行或已过期)";
+        }
         appendToolCallResult(
           funcToolId,
-          `error: ${e}` + this.buildRepeatedToolCallGuidance(funcToolName, toolCallStreak)
+          `error: ${e}${hint}` + this.buildRepeatedToolCallGuidance(funcToolName, toolCallStreak)
         );
       }
 

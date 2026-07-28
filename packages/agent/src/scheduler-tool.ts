@@ -102,7 +102,14 @@ export function createSchedulerTool(options?: CreateSchedulerToolOptions): Funct
       "\"tomorrow 9am\" → next day at 09:00 in user's timezone, converted to UTC.\n\n" +
       "Typical create call for a reminder: action='create', type='reminder', " +
       "title=<short summary>, scheduled_at=<ISO timestamp>, payload=<message " +
-      "to deliver when the reminder fires>.",
+      "to deliver when the reminder fires>.\n\n" +
+      "Memory association tip: If a recurring task requires context (e.g. \"remind " +
+      "me every Wednesday to check backups — recall the backup strategy first\"), " +
+      "save the relevant context to memory_tool(action=save, type=user_profile) " +
+      "when setting up the task. When the reminder fires, the scheduler delivers " +
+      "the payload message without automatically querying memory; if more context " +
+      "is needed, call memory_tool(action=recall) separately after receiving the " +
+      "reminder.",
     parameters: {
       type: "object",
       properties: {

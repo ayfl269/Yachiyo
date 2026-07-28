@@ -323,9 +323,9 @@ export function closeAllInteractiveSessions(): number {
  * Wait for an interactive session to exit.
  *
  * Polls the session state at a low frequency (50ms) until either:
- *   - the child process exits (returns `{ exited: true, exitCode, signalCode }`)
- *   - `timeoutMs` elapses (returns `{ exited: false, exitCode: null }`)
- *   - the optional `AbortSignal` aborts (returns `{ exited: false, aborted: true }`)
+ *   - the child process exits (returns `{ exited: true, exitCode, signalCode, reason: "exited" }`)
+ *   - `timeoutMs` elapses (returns `{ exited: false, exitCode: null, reason: "timeout" }`)
+ *   - the optional `AbortSignal` aborts (returns `{ exited: false, aborted: true, reason: "aborted" }`)
  *
  * This is the recommended way to wait for long-running commands that the
  * agent cannot predict the duration of — e.g. `agently-cli auth login`
@@ -343,6 +343,8 @@ export async function interactiveShellWait(
   exitCode: number | null;
   signalCode: string | null;
   aborted: boolean;
+  /** 结束原因：exited（正常退出）、timeout（超时）、aborted（被中止） */
+  reason: "exited" | "timeout" | "aborted";
 } | null> {
   const session = sessions.get(id);
   if (!session) return null;
@@ -360,15 +362,16 @@ export async function interactiveShellWait(
         exitCode: session.exitCode,
         signalCode: session.signalCode,
         aborted: false,
+        reason: "exited",
       };
     }
     // Aborted by caller?
     if (abortSignal?.aborted) {
-      return { exited: false, exitCode: null, signalCode: null, aborted: true };
+      return { exited: false, exitCode: null, signalCode: null, aborted: true, reason: "aborted" };
     }
     // Timed out?
     if (Date.now() >= deadline) {
-      return { exited: false, exitCode: null, signalCode: null, aborted: false };
+      return { exited: false, exitCode: null, signalCode: null, aborted: false, reason: "timeout" };
     }
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
@@ -743,19 +746,24 @@ export function createInteractiveShellWaitTool(): FunctionTool<ComputerToolConte
       }
 
       let text: string;
-      if (result.exited) {
-        text =
-          `Session ${sessionId} exited.` +
-          (result.exitCode !== null ? ` Exit code: ${result.exitCode}.` : "") +
-          (result.signalCode ? ` Signal: ${result.signalCode}.` : "") +
-          ` Call interactive_shell_read to collect any final output.`;
-      } else if (result.aborted) {
-        text = `Wait aborted for session ${sessionId}. The session is still running.`;
-      } else {
-        text =
-          `Timeout waiting for session ${sessionId} to exit (waited ${timeoutMs ?? 60000}ms). ` +
-          `The session is still running. Call interactive_shell_read to inspect partial output, ` +
-          `or call interactive_shell_wait again with a longer timeout.`;
+      switch (result.reason) {
+        case "exited":
+          text =
+            `Session ${sessionId} exited.` +
+            (result.exitCode !== null ? ` Exit code: ${result.exitCode}.` : "") +
+            (result.signalCode ? ` Signal: ${result.signalCode}.` : "") +
+            ` Call interactive_shell_read to collect any final output.`;
+          break;
+        case "aborted":
+          text = `Wait aborted for session ${sessionId}. The session is still running.`;
+          break;
+        case "timeout":
+        default:
+          text =
+            `Timeout waiting for session ${sessionId} to exit (waited ${timeoutMs ?? 60000}ms). ` +
+            `The session is still running. Call interactive_shell_read to inspect partial output, ` +
+            `or call interactive_shell_wait again with a longer timeout.`;
+          break;
       }
       return { content: [{ type: "text", text }] };
     },
