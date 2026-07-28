@@ -1416,7 +1416,6 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
             result: toolResultContent,
           }))
         );
-        console.info(`Tool \`${funcToolName}\` Result: ${toolResultContent}`);
       }
     }
 

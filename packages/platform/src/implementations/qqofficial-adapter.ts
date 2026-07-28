@@ -1032,6 +1032,14 @@ export class QQOfficialAdapter extends PlatformAdapter {
   private maxReconnectAttempts: number = 10;
   private msgSeqCounter: number = 0;
 
+  /**
+   * WebSocket 断开时延迟输出的 close 告警。
+   * 如果重连在窗口期（30s）内成功（收到 READY/RESUMED），则该告警自动取消，
+   * 避免每 30 分钟一次的预期断线重连刷屏。
+   * 仅当恢复超时（30s 内未就绪）时才真正输出 warn 日志。
+   */
+  private _deferredCloseWarn: { timer: ReturnType<typeof setTimeout>; code: number; reason: string } | null = null;
+
   // 原生事件分发器 (用于非消息类事件, 如成员变动/消息审核/互动回调等)
   private rawEventEmitter = new EventEmitter();
 
@@ -1150,6 +1158,8 @@ export class QQOfficialAdapter extends PlatformAdapter {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+
+    this.clearDeferredCloseWarn();
 
     if (this.ws) {
       try { this.ws.close(); } catch (e) { console.warn(`[QQOfficial] ws.close() failed:`, e); }
@@ -1284,7 +1294,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     if (this._status !== "running") return;
 
     const url = this.getWsUrl();
-    console.info(`[QQOfficial] Connecting to WebSocket: ${url}${this.config.sandbox ? " (sandbox)" : ""}`);
+    console.debug(`[QQOfficial] Connecting to WebSocket: ${url}${this.config.sandbox ? " (sandbox)" : ""}`);
 
     this.ws = new WebSocket(url, {
       headers: {
@@ -1293,7 +1303,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     });
 
     this.ws.on("open", () => {
-      console.info("[QQOfficial] WebSocket connected");
+      console.debug("[QQOfficial] WebSocket connected");
     });
 
     this.ws.on("message", (raw: Buffer) => {
@@ -1306,9 +1316,21 @@ export class QQOfficialAdapter extends PlatformAdapter {
     });
 
     this.ws.on("close", (code: number, reason: Buffer) => {
-      console.warn(`[QQOfficial] WebSocket closed (code=${code}, reason=${reason})`);
+      // 断开是预期行为（QQ 服务端每约 30 分钟发送 OP.RECONNECT 做负载均衡），
+      // 将 close 告警延迟输出：若 30s 内恢复则自动取消，仅恢复超时才真正 warn。
       this.cleanupWs();
       this.scheduleReconnect();
+      // adapter 停止时主动关闭 WebSocket 不会触发此处的延迟告警
+      if (this._status !== "running") return;
+      this._deferredCloseWarn?.timer && clearTimeout(this._deferredCloseWarn.timer);
+      const reasonStr = reason.toString();
+      this._deferredCloseWarn = {
+        code, reason: reasonStr,
+        timer: setTimeout(() => {
+          console.warn(`[QQOfficial] WebSocket closed (code=${code}, reason=${reasonStr})`);
+          this._deferredCloseWarn = null;
+        }, 30_000),
+      };
     });
 
     this.ws.on("error", (err: Error) => {
@@ -1338,7 +1360,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
       }
 
       case OP.RECONNECT: {
-        console.info("[QQOfficial] Server requested reconnect");
+        console.debug("[QQOfficial] Server requested reconnect");
         this.cleanupWs();
         this.scheduleReconnect();
         break;
@@ -1379,6 +1401,8 @@ export class QQOfficialAdapter extends PlatformAdapter {
           this.sessionId = ready.session_id;
           console.info(`[QQOfficial] Session ready, session_id=${this.sessionId}`);
           this.reconnectAttempts = 0;
+          // 重连成功，取消 close 告警
+          this.clearDeferredCloseWarn();
           this.emitRawEvent("READY", data);
           break;
         }
@@ -1386,6 +1410,8 @@ export class QQOfficialAdapter extends PlatformAdapter {
         case DISPATCH_TYPE.RESUMED: {
           console.info("[QQOfficial] Session resumed successfully");
           this.reconnectAttempts = 0;
+          // 重连成功，取消 close 告警
+          this.clearDeferredCloseWarn();
           this.emitRawEvent("RESUMED", data);
           break;
         }
@@ -1700,7 +1726,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
 
     this.ws.send(JSON.stringify(payload));
     const shardInfo = d.shard as [number, number];
-    console.info(`[QQOfficial] Identify sent (shard: ${shardInfo.join("/")})`);
+    console.debug(`[QQOfficial] Identify sent (shard: ${shardInfo.join("/")})`);
   }
 
   private sendResume(): void {
@@ -1721,7 +1747,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     };
 
     this.ws.send(JSON.stringify(payload));
-    console.info("[QQOfficial] Resume sent");
+    console.debug("[QQOfficial] Resume sent");
   }
 
   private startHeartbeat(intervalMs: number): void {
@@ -1743,7 +1769,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
       }
     }, intervalMs);
 
-    console.info(`[QQOfficial] Heartbeat started, interval=${intervalMs}ms`);
+    console.debug(`[QQOfficial] Heartbeat started, interval=${intervalMs}ms`);
   }
 
   private cleanupWs(): void {
@@ -1754,6 +1780,14 @@ export class QQOfficialAdapter extends PlatformAdapter {
     if (this.ws) {
       try { this.ws.removeAllListeners(); this.ws.close(); } catch { /* ignore */ }
       this.ws = null;
+    }
+  }
+
+  /** 取消延迟的 close 告警（重连成功时调用） */
+  private clearDeferredCloseWarn(): void {
+    if (this._deferredCloseWarn) {
+      clearTimeout(this._deferredCloseWarn.timer);
+      this._deferredCloseWarn = null;
     }
   }
 
@@ -1770,7 +1804,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     const delay = Math.min(baseDelay * Math.pow(2, this.reconnectAttempts), 60000);
     this.reconnectAttempts++;
 
-    console.info(`[QQOfficial] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+    console.debug(`[QQOfficial] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
 
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
