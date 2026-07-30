@@ -1294,7 +1294,6 @@ export class QQOfficialAdapter extends PlatformAdapter {
     if (this._status !== "running") return;
 
     const url = this.getWsUrl();
-    console.debug(`[QQOfficial] Connecting to WebSocket: ${url}${this.config.sandbox ? " (sandbox)" : ""}`);
 
     this.ws = new WebSocket(url, {
       headers: {
@@ -1303,7 +1302,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     });
 
     this.ws.on("open", () => {
-      console.debug("[QQOfficial] WebSocket connected");
+      // WebSocket connected — no log here to avoid noise on routine reconnects
     });
 
     this.ws.on("message", (raw: Buffer) => {
@@ -1329,7 +1328,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
         timer: setTimeout(() => {
           console.warn(`[QQOfficial] WebSocket closed (code=${code}, reason=${reasonStr})`);
           this._deferredCloseWarn = null;
-        }, 30_000),
+        }, 60_000),
       };
     });
 
@@ -1360,7 +1359,6 @@ export class QQOfficialAdapter extends PlatformAdapter {
       }
 
       case OP.RECONNECT: {
-        console.debug("[QQOfficial] Server requested reconnect");
         this.cleanupWs();
         this.scheduleReconnect();
         break;
@@ -1725,8 +1723,6 @@ export class QQOfficialAdapter extends PlatformAdapter {
     };
 
     this.ws.send(JSON.stringify(payload));
-    const shardInfo = d.shard as [number, number];
-    console.debug(`[QQOfficial] Identify sent (shard: ${shardInfo.join("/")})`);
   }
 
   private sendResume(): void {
@@ -1747,7 +1743,6 @@ export class QQOfficialAdapter extends PlatformAdapter {
     };
 
     this.ws.send(JSON.stringify(payload));
-    console.debug("[QQOfficial] Resume sent");
   }
 
   private startHeartbeat(intervalMs: number): void {
@@ -1769,7 +1764,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
       }
     }, intervalMs);
 
-    console.debug(`[QQOfficial] Heartbeat started, interval=${intervalMs}ms`);
+    // Heartbeat started — no log here to avoid noise
   }
 
   private cleanupWs(): void {
@@ -1804,7 +1799,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     const delay = Math.min(baseDelay * Math.pow(2, this.reconnectAttempts), 60000);
     this.reconnectAttempts++;
 
-    console.debug(`[QQOfficial] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+    // Reconnecting — no log here to avoid noise on routine reconnects
 
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
