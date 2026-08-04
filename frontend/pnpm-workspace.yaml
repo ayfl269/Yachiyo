@@ -1,5 +1,9 @@
-minimumReleaseAgeExclude:
-  - '@vitejs/plugin-react@6.0.3'
+# frontend 是独立于根 workspace 的项目（根 workspace 的 packages 仅包含 packages/*）
+# 本文件使 frontend 成为自己的 workspace root，pnpm 读取此处的 overrides
+# 这避免了 pnpm 11.5.3 的 ERR_PNPM_LOCKFILE_CONFIG_MISMATCH（根 workspace overrides 与 frontend lockfile 不匹配）
 
+# CVE-2026-45623 / GHSA-6g55-p6wh-862q：PostCSS sourceMappingURL arbitrary file read
+# 8.5.12 的修复不完整，8.5.23 才完全修复（"Do not load source map without opts.from for security reasons"）
+# 影响范围：< 8.5.23；来自 vite / @vitejs/plugin-react → postcss
 overrides:
-  postcss: 8.5.18
+  postcss: 8.5.25

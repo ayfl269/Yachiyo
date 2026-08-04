@@ -96,14 +96,12 @@ jobs:
           cache-dependency-path: frontend/pnpm-lock.yaml
 
       - name: Install frontend dependencies
-        run: cd frontend && pnpm install --frozen-lockfile --ignore-workspace
+        run: cd frontend && pnpm install --frozen-lockfile
 
       - name: Build frontend
-        run: cd frontend && npx tsc -b && npx vite build
-        # 用 npx 代替 pnpm run build 绕过 pnpm 11.5.3 的 runDepsStatusCheck
-        # runDepsStatusCheck 在 pnpm run/exec 之前会验证 lockfile 的 overrides 字段与当前 pnpm 配置是否一致，
-        # 但 --ignore-workspace 命令行参数在 runDepsStatusCheck 阶段不生效（pnpm 11.5.3 行为差异），
-        # 仍会读到根 workspace 的 overrides 而 frontend lockfile 无 overrides → ERR_PNPM_LOCKFILE_CONFIG_MISMATCH
+        run: cd frontend && pnpm run build
+        # frontend 有自己的 pnpm-workspace.yaml（overrides: postcss 8.5.25），
+        # lockfile 的 overrides 字段与 workspace 配置一致，runDepsStatusCheck 可通过
 
       - name: Run frontend typecheck
         run: cd frontend && npx tsc --noEmit

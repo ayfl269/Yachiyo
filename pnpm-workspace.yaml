@@ -5,6 +5,9 @@ allowBuilds:
   better-sqlite3: true
   esbuild: true
 
+minimumReleaseAgeExclude:
+  - hono@4.13.0
+
 # 锁定已知漏洞的传递依赖到修复版本
 overrides:
   tar-fs: ^2.1.4
@@ -25,5 +28,7 @@ overrides:
   # GHSA-mwp4-54f8-5fhr：ip-address leading-zero octet SSRF / trust-boundary bypass
   # 影响范围：<=10.3.0；来自 @modelcontextprotocol/sdk → express-rate-limit → ip-address
   ip-address: 10.3.1
-  hono: 4.12.27
+  # SB2026080392 / GHSA-8j4g-w8fx-2239：CORS 中间件 ReDoS via Access-Control-Request-Headers
+  # 影响范围：<=4.12.33；仅在使用 cors() 默认/空 allowHeaders 时触发
+  hono: 4.13.0
   '@hono/node-server': 2.0.10
