@@ -31,7 +31,34 @@ interface Conversation {
 interface ChatMessage {
   id: string
   role: string
-  content: string
+  content: string | Array<{ type?: string; text?: string }>
+}
+
+function extractContentText(content: unknown): string {
+  if (typeof content === 'string') {
+    if (content === '') return ''
+    try {
+      const parsed = JSON.parse(content)
+      if (Array.isArray(parsed)) return extractContentText(parsed)
+    } catch {
+      return content
+    }
+    return content
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map(block =>
+        typeof block === 'string'
+          ? block
+          : typeof block === 'object' &&
+              block !== null &&
+              typeof (block as { text?: unknown }).text === 'string'
+            ? (block as { text: string }).text
+            : '',
+      )
+      .join(' ')
+  }
+  return ''
 }
 
 function formatTime(isoString: string): string {
@@ -145,7 +172,7 @@ export default function ChatDataManager() {
 
   const startEdit = (index: number) => {
     setEditingIndex(index)
-    setEditContent(messages[index].content)
+    setEditContent(extractContentText(messages[index].content))
   }
 
   // Focus textarea when entering edit mode (replaces Vue's nextTick)
@@ -466,7 +493,7 @@ export default function ChatDataManager() {
 
                       {/* Normal view */}
                       {editingIndex !== index ? (
-                        <div className="message-text">{msg.content}</div>
+                        <div className="message-text">{extractContentText(msg.content)}</div>
                       ) : (
                         /* Edit mode */
                         <div className="edit-area">
