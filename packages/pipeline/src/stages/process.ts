@@ -390,10 +390,16 @@ export class ProcessStage extends PipelineStage {
       const fallbackProviders = this.ctx.providerManager?.getFallbackProviders?.() ?? [];
 
       const enableStreaming = event.getExtra<boolean>("enable_streaming") ?? this.streamingResponse;
-    const platformSupportsStreaming = event.platformMeta.supportStreamingMessage;
     const modelStreaming = this.ctx.config.modelStreaming ?? true;
-    // 当平台不支持流式或配置禁用模型流式时，LLM 也应使用非流式模式，避免产生大量无用 chunk
-    const useStreaming = enableStreaming && platformSupportsStreaming && modelStreaming;
+    // LLM 是否走流式仅取决于用户配置(enable_streaming / streamingResponse)与模型能力(modelStreaming)。
+    // 下游平台是否支持流式投递(platformMeta.supportStreamingMessage)只决定 process() 是否以
+    // STREAMING_RESULT 逐 chunk 投递给用户（见上方 enableStreaming && platformSupportsStreaming 分支），
+    // 不应影响 LLM 调用本身是否流式。否则在所有平台适配器 supportStreamingMessage 硬编码为 false 的情况下，
+    // 即使配置启用了流式，agent-builder 也会始终收到 streaming:false，runner 只能走 textChat() 非流式调用，
+    // 丧失流式带来的首 token 延迟、可取消性、工具调用早出等收益。
+    // 非流式投递路径(runAgent + applyNonStreamingResult)会正确收集 streaming_delta chunk 并聚合为完整结果，
+    // 因此 LLM 流式 + 平台非流式投递的组合是安全的。
+    const useStreaming = enableStreaming && modelStreaming;
     const result = await buildMainAgent({
       provider,
       request: providerRequest,
