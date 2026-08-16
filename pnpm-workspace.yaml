@@ -21,7 +21,12 @@ overrides:
   'brace-expansion@1.1.15': 1.1.16
   'brace-expansion@2.1.1': 2.1.2
   'brace-expansion@5.0.6': 5.0.8
-  js-yaml: 4.3.0
+  # GHSA-5p4m-2wfm-xmqj / CVE-2026-59870（5.x 编号，修复未回移至 3.x/4.x）：
+  # !!omap 解析时 resolveYamlOmap() 用 objectKeys.indexOf() 线性扫描做键唯一性校验，
+  # 整体复杂度 O(n²)，构造的 YAML 文档可使 yaml.load() 同步阻塞事件循环造成 DoS。
+  # 影响范围：3.x >= 3.0.0 < 3.15.1；4.x >= 4.0.0 < 4.3.1；来自 @eslint/eslintrc → js-yaml
+  # 修复版本：4.x = 4.3.1（本仓库仅 4.x 链路）
+  js-yaml: 4.3.1
   # GHSA-7p8r-x3mc-p8w7：fast-uri host confusion via backslash authority introducer
   # 影响范围：>=3.0.0 <3.1.5；来自 @modelcontextprotocol/sdk → ajv / ajv-formats → fast-uri
   fast-uri: 3.1.5
