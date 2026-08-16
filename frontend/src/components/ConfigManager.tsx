@@ -17,7 +17,6 @@ interface AgentConfig {
   emojiReact: boolean
   pathMappings: [string, string][]
   sttEnabled: boolean
-  streamingResponse: boolean
   modelStreaming: boolean
   maxStep: number
   maxContextLength: number
@@ -956,15 +955,6 @@ export default function ConfigManager() {
                   id="emojiReact"
                 />
                 <label htmlFor="emojiReact">启用自动表情互动回复 (Emoji React)</label>
-              </div>
-              <div className="form-group row-checkbox">
-                <input
-                  type="checkbox"
-                  checked={config.streamingResponse}
-                  onChange={(e) => updateField('streamingResponse', e.target.checked)}
-                  id="streamingResponse"
-                />
-                <label htmlFor="streamingResponse">允许在平台适配器支持下流式打字回复 (Stream)</label>
               </div>
             </div>
           )}

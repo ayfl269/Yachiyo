@@ -6,7 +6,6 @@ import type { MessageComponent, PlainComponent } from "@yachiyo/message/componen
 import { ComponentType } from "@yachiyo/message/components.js";
 import { PlatformMessage } from "@yachiyo/message/platform-message.js";
 import { generateId } from "@yachiyo/common/id-generator.js";
-import type { MessageChain } from "@yachiyo/agent/types.js";
 import { MessageType } from "@yachiyo/message/types.js";
 
 export type AdapterStatus = "idle" | "initialized" | "running" | "stopping" | "stopped" | "error";
@@ -16,20 +15,6 @@ class SyntheticMessageEvent extends MessageEvent {
 
   async send(components: MessageComponent[]): Promise<void> {
     this.responseBuffer.push(...components);
-  }
-
-  async sendStreaming(generator: AsyncGenerator<MessageChain, void>): Promise<void> {
-    const parts: string[] = [];
-    for await (const chunk of generator) {
-      if (chunk.message) parts.push(chunk.message);
-    }
-    if (parts.length > 0) {
-      await this.send([{
-        type: ComponentType.Plain,
-        text: parts.join(""),
-        toDict() { return { type: "text", data: { text: parts.join("") } }; },
-      } as MessageComponent]);
-    }
   }
 
   getResponse(): MessageComponent[] {
@@ -80,20 +65,6 @@ class ProactiveTriggerEvent extends MessageEvent {
       this.onResponded?.();
     }
     await this.adapter.sendProactiveMessage(this.target, components);
-  }
-
-  async sendStreaming(generator: AsyncGenerator<MessageChain, void>): Promise<void> {
-    const parts: string[] = [];
-    for await (const chunk of generator) {
-      if (chunk.message) parts.push(chunk.message);
-    }
-    if (parts.length > 0) {
-      await this.send([{
-        type: ComponentType.Plain,
-        text: parts.join(""),
-        toDict() { return { type: "text", data: { text: parts.join("") } }; },
-      } as MessageComponent]);
-    }
   }
 }
 

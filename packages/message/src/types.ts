@@ -22,7 +22,6 @@ export interface PlatformMetadata {
   name: string;
   description: string;
   id: string;
-  supportStreamingMessage: boolean;
   supportProactiveMessage: boolean;
 }
 

@@ -16,7 +16,6 @@ import { ComponentType } from "@yachiyo/message/components.js";
 import { PlatformMessage } from "@yachiyo/message/platform-message.js";
 import { MessageType } from "@yachiyo/message/types.js";
 import { generateId } from "@yachiyo/common/id-generator.js";
-import type { MessageChain } from "@yachiyo/agent/types.js";
 import type { OneBot11AdapterConfig } from "../config.js";
 
 import { WebSocketServer, WebSocket } from "ws";
@@ -431,20 +430,6 @@ class OneBot11Event extends MessageEvent {
     }
   }
 
-  async sendStreaming(generator: AsyncGenerator<MessageChain, void>): Promise<void> {
-    const parts: string[] = [];
-    for await (const chunk of generator) {
-      if (chunk.message) parts.push(chunk.message);
-    }
-    if (parts.length > 0) {
-      await this.send([{
-        type: ComponentType.Plain,
-        text: parts.join(""),
-        toDict() { return { type: "text", data: { text: parts.join("") } }; },
-      } as MessageComponent]);
-    }
-  }
-
   async sendTyping(): Promise<void> {
     // OneBot 11 doesn't have a standard typing indicator
   }
@@ -654,7 +639,6 @@ export class OneBot11Adapter extends PlatformAdapter {
       name: "onebot11",
       description: `OneBot 11 (${this.config.direction === "forward" ? "反向WS" : "正向WS"})`,
       id: this.config.id,
-      supportStreamingMessage: false,
       supportProactiveMessage: true,
     };
   }

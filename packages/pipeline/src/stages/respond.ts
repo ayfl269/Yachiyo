@@ -4,8 +4,6 @@ import type { MessageEvent } from "@yachiyo/message/event.js";
 import { ComponentType, type MessageComponent, type PlainComponent, type RecordComponent, type AtComponent, type ReplyComponent } from "@yachiyo/message/components.js";
 import { ResultContentType } from "@yachiyo/message/event-result.js";
 import { EventType } from "@yachiyo/plugin/event-type.js";
-import type { MessageChain } from "@yachiyo/agent/types.js";
-import { ContentSafetyStrategySelector } from "./content-safety-check.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -27,10 +25,6 @@ export class RespondStage extends PipelineStage {
   private enableSegmentedReply: boolean = false;
   private onlyLlmResultSegmented: boolean = false;
   private ctx!: PipelineContext;
-  /** Safety selector reused from ContentSafetyCheckStage config so that
-   * streaming responses are filtered in real time. Built from the same
-   * config so the two stages stay consistent without coupling. */
-  private safetySelector!: ContentSafetyStrategySelector;
 
   async initialize(ctx: PipelineContext): Promise<void> {
     this.ctx = ctx;
@@ -38,7 +32,6 @@ export class RespondStage extends PipelineStage {
     this.replyWithQuote = ctx.config.replyWithQuote ?? false;
     this.enableSegmentedReply = ctx.config.segmentedReply ?? false;
     this.onlyLlmResultSegmented = ctx.config.onlyLlmResultSegmented ?? false;
-    this.safetySelector = new ContentSafetyStrategySelector(ctx.config as unknown as Record<string, unknown>);
   }
 
   async process(event: MessageEvent): Promise<void> {
@@ -47,24 +40,6 @@ export class RespondStage extends PipelineStage {
 
     if (!result) {
       console.log(`[RespondStage] No result, returning early`);
-      return;
-    }
-
-    if (event.getExtra("_streaming_finished", false)) return;
-    if (result.resultContentType === ResultContentType.STREAMING_FINISH) {
-      event.setExtra("_streaming_finished", true);
-      return;
-    }
-
-    if (result.resultContentType === ResultContentType.STREAMING_RESULT) {
-      if (!result.asyncStream) return;
-      const collectedText = await this.collectAndSendStreaming(event, result.asyncStream);
-      await this.appendAssistantToHistory(event, collectedText);
-      // Cache streaming text for recordConversationToMemory (result will be cleared)
-      if (collectedText.trim()) {
-        event.setExtra("_cachedAssistantText", collectedText);
-      }
-      await this.ctx.callEventHook(event, EventType.OnAfterMessageSentEvent);
       return;
     }
 
@@ -149,89 +124,5 @@ export class RespondStage extends PipelineStage {
 
   private calcCompInterval(): number {
     return Math.floor(Math.random() * COMP_INTERVAL_SPREAD_MS) + COMP_INTERVAL_MIN_MS;
-  }
-
-  private async collectAndSendStreaming(
-    event: MessageEvent,
-    generator: AsyncGenerator<MessageChain, void>
-  ): Promise<string> {
-    const parts: string[] = [];
-    const checkResponse = this.safetySelector.checkResponse;
-    const safetySelector = this.safetySelector;
-    let safetyBlocked = false;
-
-    async function* teeGenerator(): AsyncGenerator<MessageChain, void> {
-      for await (const chunk of generator) {
-        // Skip reasoning/thinking chunks — only send text content to user
-        if (chunk.type === "reasoning") continue;
-        if (chunk.type === "err") {
-          yield chunk;
-          continue;
-        }
-        if (chunk.message) parts.push(chunk.message);
-
-        // Streaming content safety check: inspect accumulated text on each
-        // chunk. If a violation is detected, stop forwarding subsequent
-        // chunks and emit a placeholder notice. Already-sent chunks cannot
-        // be recalled, but this prevents the rest of the unsafe content
-        // from reaching the user.
-        if (checkResponse && chunk.message) {
-          const accumulated = parts.join("");
-          const check = safetySelector.check(accumulated);
-          if (!check.passed) {
-            safetyBlocked = true;
-            yield { type: "text", message: "\n\n⚠️ 内容未通过安全检查，已停止生成" };
-            return; // Stop forwarding remaining chunks
-          }
-        }
-
-        yield chunk;
-      }
-    }
-    await event.sendStreaming(teeGenerator());
-
-    // If the safety check blocked the stream, return a safe placeholder so
-    // the history record (and memory consolidation) doesn't persist the
-    // blocked content.
-    if (safetyBlocked) {
-      return "[回复内容未通过安全检查]";
-    }
-    return parts.join("");
-  }
-
-  private async appendAssistantToHistory(event: MessageEvent, assistantText: string): Promise<void> {
-    if (!assistantText.trim()) return;
-
-    // Full run history (with tool metadata) already saved by the process stage,
-    // no need to append plain text on top.
-    if (event.getExtra<boolean>("_runHistorySaved")) return;
-
-    const convId = event.getExtra<string>("_saveHistory_convId");
-    const umo = event.getExtra<string>("_saveHistory_umo");
-    if (!convId || !umo) return;
-
-    try {
-      const conv = await this.ctx.conversationManager.getConversation(umo, convId);
-      if (!conv) return;
-      const parsed = JSON.parse(conv.history);
-      if (!Array.isArray(parsed)) {
-        console.warn(`[RespondStage] Conversation ${convId} history corrupted (not an array), reinitializing.`);
-      }
-      const history: Array<Record<string, unknown>> = Array.isArray(parsed) ? parsed : [];
-      history.push({ role: "assistant", content: assistantText });
-
-      // Truncate history to prevent unbounded growth
-      const maxHistoryMessages = this.ctx.config.maxHistoryMessages ?? 200;
-      if (history.length > maxHistoryMessages) {
-        history.splice(0, history.length - maxHistoryMessages);
-      }
-
-      await this.ctx.conversationManager.updateConversation(umo, convId, {
-        history: JSON.stringify(history),
-      });
-      console.log(`[RespondStage] Saved streaming response to history (${assistantText.length} chars)`);
-    } catch (e) {
-      console.error("[RespondStage] Failed to save streaming history:", e);
-    }
   }
 }

@@ -62,7 +62,6 @@ import {
   SkillManager,
   buildSkillsPrompt,
   // Agent types
-  type MessageChain,
   type ProviderRequest,
 } from "../src/index.js";
 import { FunctionToolManager } from "@yachiyo/agent/func-tool-manager.js";
@@ -210,15 +209,6 @@ async function testMessageEvent(): Promise<void> {
     async send(components: any[]): Promise<void> {
       sentMessages.push(components);
     }
-    async sendStreaming(generator: AsyncGenerator<MessageChain, void>): Promise<void> {
-      const parts: string[] = [];
-      for await (const chunk of generator) {
-        if (chunk.message) parts.push(chunk.message);
-      }
-      if (parts.length > 0) {
-        await this.send([{ type: ComponentType.Plain, text: parts.join(""), toDict() { return {}; } } as any]);
-      }
-    }
   }
 
   const platformMsg = new PlatformMessage();
@@ -244,7 +234,7 @@ async function testMessageEvent(): Promise<void> {
   const event = new TestMessageEvent(
     "你好",
     platformMsg,
-    { name: "test", description: "Test", id: "test-platform", supportStreamingMessage: true, supportProactiveMessage: true },
+    { name: "test", description: "Test", id: "test-platform", supportProactiveMessage: true },
     "group-001",
   );
 
@@ -346,7 +336,6 @@ async function testPipelineScheduler(): Promise<void> {
   // Create test event
   class TestEvent extends MessageEvent {
     async send(): Promise<void> {}
-    async sendStreaming(): Promise<void> {}
   }
 
   const platformMsg = new PlatformMessage();
@@ -361,7 +350,7 @@ async function testPipelineScheduler(): Promise<void> {
   const event = new TestEvent(
     "test",
     platformMsg,
-    { name: "test", description: "", id: "test", supportStreamingMessage: true, supportProactiveMessage: true },
+    { name: "test", description: "", id: "test", supportProactiveMessage: true },
     "s1",
   );
 
@@ -395,7 +384,7 @@ async function testPipelineScheduler(): Promise<void> {
   const event2 = new TestEvent(
     "test",
     platformMsg,
-    { name: "test", description: "", id: "test", supportStreamingMessage: true, supportProactiveMessage: true },
+    { name: "test", description: "", id: "test", supportProactiveMessage: true },
     "s1",
   );
 
@@ -457,7 +446,6 @@ async function testOnionModel(): Promise<void> {
 
   class TestEvent extends MessageEvent {
     async send(): Promise<void> {}
-    async sendStreaming(): Promise<void> {}
   }
 
   const platformMsg = new PlatformMessage();
@@ -472,7 +460,7 @@ async function testOnionModel(): Promise<void> {
   const event = new TestEvent(
     "test",
     platformMsg,
-    { name: "test", description: "", id: "test", supportStreamingMessage: true, supportProactiveMessage: true },
+    { name: "test", description: "", id: "test", supportProactiveMessage: true },
     "s1",
   );
 
@@ -539,7 +527,6 @@ function testConfigManager(): void {
 
   console.log("  默认配置 id:", defaultConfig.id);
   console.log("  wakePrefix:", defaultConfig.wakePrefix);
-  console.log("  streamingResponse:", defaultConfig.streamingResponse);
   console.log("  maxStep:", defaultConfig.maxStep);
 
   const confInfo = manager.getConfInfo("unknown:session:1");
@@ -637,7 +624,6 @@ function testPluginSystem(): void {
   // HandlerFilter
   class MockEvent extends MessageEvent {
     async send(): Promise<void> {}
-    async sendStreaming(): Promise<void> {}
   }
 
   const platformMsg = new PlatformMessage();
@@ -652,7 +638,7 @@ function testPluginSystem(): void {
   const mockEvent = new MockEvent(
     "/hello world",
     platformMsg,
-    { name: "test", description: "", id: "test", supportStreamingMessage: true, supportProactiveMessage: true },
+    { name: "test", description: "", id: "test", supportProactiveMessage: true },
     "s1",
   );
 
@@ -804,7 +790,6 @@ async function testEventBusE2E(): Promise<void> {
   // Create test event
   class TestEvent extends MessageEvent {
     async send(): Promise<void> {}
-    async sendStreaming(): Promise<void> {}
   }
 
   const platformMsg = new PlatformMessage();
@@ -819,7 +804,7 @@ async function testEventBusE2E(): Promise<void> {
   const event = new TestEvent(
     "E2E test message",
     platformMsg,
-    { name: "test", description: "", id: "test", supportStreamingMessage: true, supportProactiveMessage: true },
+    { name: "test", description: "", id: "test", supportProactiveMessage: true },
     "s1",
   );
 
@@ -847,7 +832,6 @@ function testActiveEventRegistry(): Promise<void> {
 
   class TestEvent extends MessageEvent {
     async send(): Promise<void> {}
-    async sendStreaming(): Promise<void> {}
   }
 
   const platformMsg = new PlatformMessage();
@@ -862,14 +846,14 @@ function testActiveEventRegistry(): Promise<void> {
   const event1 = new TestEvent(
     "test1",
     platformMsg,
-    { name: "test", description: "", id: "test", supportStreamingMessage: true, supportProactiveMessage: true },
+    { name: "test", description: "", id: "test", supportProactiveMessage: true },
     "s1",
   );
 
   const event2 = new TestEvent(
     "test2",
     platformMsg,
-    { name: "test", description: "", id: "test", supportStreamingMessage: true, supportProactiveMessage: true },
+    { name: "test", description: "", id: "test", supportProactiveMessage: true },
     "s1",
   );
 
@@ -946,7 +930,6 @@ async function testEventBusErrorProtection(): Promise<void> {
   // Create mock events
   class TestEvent extends MessageEvent {
     async send(): Promise<void> {}
-    async sendStreaming(): Promise<void> {}
   }
 
   const platformMsg = new PlatformMessage();

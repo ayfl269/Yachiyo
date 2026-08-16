@@ -15,7 +15,6 @@ export interface AgentConfig {
   emojiReact: boolean;
   pathMappings: [string, string][];
   sttEnabled: boolean;
-  streamingResponse: boolean;
   modelStreaming: boolean;
   maxStep: number;
   maxContextLength: number;
@@ -198,7 +197,6 @@ export class ConfigManager {
       emojiReact: false,
       pathMappings: [],
       sttEnabled: false,
-      streamingResponse: true,
       modelStreaming: true,
       maxStep: 30,
       maxContextLength: 8000,

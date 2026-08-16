@@ -17,7 +17,6 @@ interface AdapterMeta {
   name: string
   description: string
   id: string
-  supportStreamingMessage?: boolean
   supportProactiveMessage?: boolean
 }
 

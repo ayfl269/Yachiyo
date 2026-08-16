@@ -3665,7 +3665,6 @@ export class DashboardServer {
           name: "debug-webhook",
           description: "Debug Webhook",
           id: "debug-webhook",
-          supportStreamingMessage: false,
           supportProactiveMessage: false,
         };
 
@@ -3677,11 +3676,6 @@ export class DashboardServer {
           async send(components: import("@yachiyo/message/components.js").MessageComponent[]): Promise<void> {
             for (const c of components) {
               if (c.type === ComponentType.Plain) responseText += (c as import("@yachiyo/message/components.js").PlainComponent).text ?? "";
-            }
-          }
-          async sendStreaming(gen: AsyncIterable<{ message?: string }>): Promise<void> {
-            for await (const chunk of gen) {
-              if (chunk.message) responseText += chunk.message;
             }
           }
           async sendTyping(): Promise<void> {}
@@ -3704,7 +3698,7 @@ export class DashboardServer {
         const pollInterval = setInterval(() => {
           if (event.getResult()) {
             const r = event.getResult();
-            if (r?.resultContentType === RCT.LLM_RESULT || r?.resultContentType === RCT.STREAMING_RESULT) {
+            if (r?.resultContentType === RCT.LLM_RESULT) {
               const text = r.getPlainText();
               if (text) responseText = text;
             }

@@ -9,7 +9,6 @@ import {
   MessageSession,
   MessageEvent,
   EventResult,
-  ResultContentType,
   SessionLockManager,
   SessionServiceManager,
   ContentSafetyStrategySelector,
@@ -77,7 +76,6 @@ class MockMessageEvent extends MessageEvent {
         name: "test",
         description: "test",
         id: "test-platform",
-        supportStreamingMessage: false,
         supportProactiveMessage: false,
       },
       MessageSession.fromStr(umo),
@@ -477,18 +475,7 @@ async function testResultDecorateStage(): Promise<void> {
   await stage.process(event2);
   assert(event2.getResult() === null, "No result → stage should be no-op");
 
-  // 3. Streaming result → skipped
-  const event3 = new MockMessageEvent({ messageStr: "hi", selfId: "bot", senderId: "user", isPrivate: true });
-  event3.setResult(
-    new EventResult()
-      .setResultContentType(ResultContentType.STREAMING_RESULT)
-      .plain("streaming text")
-  );
-  await stage.process(event3);
-  const text3 = event3.getResult()?.getPlainText();
-  assert(text3 === "streaming text", "Streaming result should not get reply prefix");
-
-  // 4. Reasoning text injection
+  // 3. Reasoning text injection
   const reasoningStage = new ResultDecorateStage();
   await reasoningStage.initialize({
     ...mockCtx,

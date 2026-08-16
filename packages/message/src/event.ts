@@ -4,7 +4,7 @@ import { PlatformMessage } from "./platform-message.js";
 import { MessageSession } from "./message-session.js";
 import { EventResult } from "./event-result.js";
 import { unlinkSync } from "fs";
-import type { MessageChain, ProviderRequest, Conversation } from "@yachiyo/common/llm-types.js";
+import type { ProviderRequest, Conversation } from "@yachiyo/common/llm-types.js";
 import type { ToolSet } from "@yachiyo/agent/tool.js";
 import type { FunctionToolManager } from "@yachiyo/agent/func-tool-manager.js";
 import type { Message } from "@yachiyo/common/llm-message.js";
@@ -104,10 +104,6 @@ export abstract class MessageEvent {
   }
 
   abstract send(components: MessageComponent[]): Promise<void>;
-  abstract sendStreaming(
-    generator: AsyncGenerator<MessageChain, void>,
-    useFallback?: boolean,
-  ): Promise<void>;
 
   async sendTyping(): Promise<void> {}
   async stopTyping(): Promise<void> {}

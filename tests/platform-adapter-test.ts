@@ -77,7 +77,7 @@ console.log("\n=== 测试: AdapterRegistry ===");
     factoryCalled = true;
     return new (class extends PlatformAdapter {
       async run() { this._status = "running"; }
-      meta() { return { name: "test", description: "", id: config.id as string, supportStreamingMessage: false, supportProactiveMessage: false }; }
+      meta() { return { name: "test", description: "", id: config.id as string, supportProactiveMessage: false }; }
     })(config, eq);
   });
 
@@ -103,7 +103,7 @@ console.log("\n=== 测试: PlatformAdapter 生命周期 ===");
   const eventQueue = new AsyncQueue<MessageEvent>();
   const adapter = new (class extends PlatformAdapter {
     async run() { this._status = "running"; }
-    meta() { return { name: "lifecycle", description: "", id: "lifecycle-test", supportStreamingMessage: false, supportProactiveMessage: false }; }
+    meta() { return { name: "lifecycle", description: "", id: "lifecycle-test", supportProactiveMessage: false }; }
   })({}, eventQueue);
 
   assert(adapter.status === "idle", "initial status is idle");

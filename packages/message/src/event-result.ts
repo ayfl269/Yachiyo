@@ -1,5 +1,4 @@
 import { ComponentType, MessageComponent, PlainComponent } from "./components.js";
-import { MessageChain } from "@yachiyo/agent/types.js";
 
 export enum EventResultType {
   CONTINUE = "CONTINUE",
@@ -9,8 +8,6 @@ export enum EventResultType {
 export enum ResultContentType {
   LLM_RESULT = "LLM_RESULT",
   GENERAL_RESULT = "GENERAL_RESULT",
-  STREAMING_RESULT = "STREAMING_RESULT",
-  STREAMING_FINISH = "STREAMING_FINISH",
   AGENT_RUNNER_ERROR = "AGENT_RUNNER_ERROR",
 }
 
@@ -18,7 +15,6 @@ export class EventResult {
   resultType: EventResultType = EventResultType.CONTINUE;
   resultContentType: ResultContentType = ResultContentType.GENERAL_RESULT;
   components: MessageComponent[] = [];
-  asyncStream: AsyncGenerator<MessageChain, void> | null = null;
 
   plain(text: string): this {
     this.components.push({
@@ -50,12 +46,6 @@ export class EventResult {
 
   isStopped(): boolean {
     return this.resultType === EventResultType.STOP;
-  }
-
-  setAsyncStream(stream: AsyncGenerator<MessageChain, void>): this {
-    this.asyncStream = stream;
-    this.resultContentType = ResultContentType.STREAMING_RESULT;
-    return this;
   }
 
   setResultContentType(type: ResultContentType): this {

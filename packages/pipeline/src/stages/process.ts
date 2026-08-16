@@ -3,7 +3,6 @@ import type { PipelineContext } from "../context.js";
 import type { MessageEvent } from "@yachiyo/message/event.js";
 import { EventResult, ResultContentType } from "@yachiyo/message/event-result.js";
 import { ComponentType, type ImageComponent, type RecordComponent, type PlainComponent } from "@yachiyo/message/components.js";
-import type { MessageChain } from "@yachiyo/agent/types.js";
 import type { ProviderType } from "@yachiyo/provider/types.js";
 import type { ToolLoopAgentRunner } from "@yachiyo/agent/runners/tool-loop-agent-runner.js";
 import type { RunAgentResult } from "@yachiyo/agent/agent-runner.js";
@@ -22,12 +21,10 @@ function plainText(text: string): PlainComponent {
 @registerStage
 export class ProcessStage extends PipelineStage {
   private ctx!: PipelineContext;
-  private streamingResponse: boolean = true;
   private maxStep: number = 30;
 
   async initialize(ctx: PipelineContext): Promise<void> {
     this.ctx = ctx;
-    this.streamingResponse = ctx.config.streamingResponse ?? true;
     this.maxStep = ctx.config.maxStep ?? 30;
   }
 
@@ -64,16 +61,13 @@ export class ProcessStage extends PipelineStage {
           // 在 yield 前保存用户消息和助手消息（避免 respond 阶段 clearResult 后丢失）
           const { convId, umo } = await this.saveUserMessage(event);
           const result = event.getResult();
-          if (result && result.resultContentType !== ResultContentType.STREAMING_RESULT) {
+          if (result) {
             const responseText = result.getPlainText();
             if (responseText) {
               await this.saveAssistantMessage(umo, convId, responseText);
               // Cache assistant text before yield — respond stage will clearResult()
               event.setExtra("_cachedAssistantText", responseText);
             }
-          } else if (result?.resultContentType === ResultContentType.STREAMING_RESULT) {
-            event.setExtra("_saveHistory_convId", convId);
-            event.setExtra("_saveHistory_umo", umo);
           }
           yield;
           await this.ctx.callEventHook(event, EventType.OnAgentDoneEvent);
@@ -112,42 +106,28 @@ export class ProcessStage extends PipelineStage {
 
         registerActiveRunner(event.unifiedMsgOrigin, agentRunner);
         try {
-          const enableStreaming = event.getExtra<boolean>("enable_streaming") ?? this.streamingResponse;
-          const platformSupportsStreaming = event.platformMeta.supportStreamingMessage;
+          // 平台消息投递一律缓冲后一次性发送（消息适配器不再支持逐 chunk 流式投递）。
+          // LLM 调用本身是否流式由 buildAgent() 中的 modelStreaming 决定，
+          // runner 会正确收集 streaming_delta 并聚合为完整结果。
+          const { runAgent } = await import("@yachiyo/agent/agent-runner.js");
+          const runResult = await runAgent(agentRunner, {
+            maxStep: this.maxStep,
+            shouldStop: () => event.isStopped(),
+            onError: (err) => console.error(`[ProcessStage] Agent error: ${err}`),
+            // Renew the session lock TTL on each step so the watchdog
+            // does not force-release it during long multi-step tool
+            // execution.
+            onStepStart: () => this.ctx.sessionLockManager.renewLock(event.unifiedMsgOrigin),
+          });
 
-          if (enableStreaming && platformSupportsStreaming) {
-          const streamGenerator = this.runAgentStreaming(agentRunner, event, umo, convId);
-            event.setResult(
-              new EventResult()
-                .setResultContentType(ResultContentType.STREAMING_RESULT)
-                .setAsyncStream(streamGenerator)
-            );
-            // 设置 extras 供 respond 阶段保存流式助手消息（仅当 _runHistorySaved 未设置时使用）
-            event.setExtra("_saveHistory_convId", convId);
-            event.setExtra("_saveHistory_umo", umo);
-            yield;
-          } else {
-            const { runAgent } = await import("@yachiyo/agent/agent-runner.js");
-            const runResult = await runAgent(agentRunner, {
-              maxStep: this.maxStep,
-              shouldStop: () => event.isStopped(),
-              onError: (err) => console.error(`[ProcessStage] Agent error: ${err}`),
-              // Renew the session lock TTL on each step so the watchdog
-              // does not force-release it during long multi-step tool
-              // execution. The streaming path (runAgentStreaming) does the
-              // same thing inline.
-              onStepStart: () => this.ctx.sessionLockManager.renewLock(event.unifiedMsgOrigin),
-            });
+          // Record provider token stats after agent run completes
+          await this.recordTokenStats(agentRunner);
 
-            // Record provider token stats after agent run completes
-            await this.recordTokenStats(agentRunner);
+          await this.applyNonStreamingResult(event, runResult, umo, convId);
 
-            await this.applyNonStreamingResult(event, runResult, umo, convId);
-
-            // Save full run context with tool metadata (overwrites any text-only save above)
-            await this.saveRunHistory(agentRunner, umo, convId);
-            yield;
-          }
+          // Save full run context with tool metadata (overwrites any text-only save above)
+          await this.saveRunHistory(agentRunner, umo, convId);
+          yield;
         } finally {
           unregisterActiveRunner(event.unifiedMsgOrigin, agentRunner);
         }
@@ -389,17 +369,13 @@ export class ProcessStage extends PipelineStage {
       // 获取 fallback providers，实现多供应商自动切换
       const fallbackProviders = this.ctx.providerManager?.getFallbackProviders?.() ?? [];
 
-      const enableStreaming = event.getExtra<boolean>("enable_streaming") ?? this.streamingResponse;
-    const modelStreaming = this.ctx.config.modelStreaming ?? true;
-    // LLM 是否走流式仅取决于用户配置(enable_streaming / streamingResponse)与模型能力(modelStreaming)。
-    // 下游平台是否支持流式投递(platformMeta.supportStreamingMessage)只决定 process() 是否以
-    // STREAMING_RESULT 逐 chunk 投递给用户（见上方 enableStreaming && platformSupportsStreaming 分支），
-    // 不应影响 LLM 调用本身是否流式。否则在所有平台适配器 supportStreamingMessage 硬编码为 false 的情况下，
-    // 即使配置启用了流式，agent-builder 也会始终收到 streaming:false，runner 只能走 textChat() 非流式调用，
-    // 丧失流式带来的首 token 延迟、可取消性、工具调用早出等收益。
-    // 非流式投递路径(runAgent + applyNonStreamingResult)会正确收集 streaming_delta chunk 并聚合为完整结果，
-    // 因此 LLM 流式 + 平台非流式投递的组合是安全的。
-    const useStreaming = enableStreaming && modelStreaming;
+      // LLM 调用本身是否走流式：由事件级覆盖(enable_streaming，默认 true)与模型配置
+      // (modelStreaming)共同决定。平台消息投递已统一为缓冲后一次性发送（不再逐 chunk 流式），
+      // 因此这里不再受任何平台投递能力影响；runner 会正确收集 streaming_delta chunk
+      // 并聚合为完整结果，LLM 流式只是获得首 token 延迟、可取消性、工具调用早出等内部收益。
+      const enableStreaming = event.getExtra<boolean>("enable_streaming") ?? true;
+      const modelStreaming = this.ctx.config.modelStreaming ?? true;
+      const useStreaming = enableStreaming && modelStreaming;
     const result = await buildMainAgent({
       provider,
       request: providerRequest,
@@ -407,7 +383,7 @@ export class ProcessStage extends PipelineStage {
       toolManager: this.ctx.toolManager,
       fallbackProviders,
       config: {
-        streamingResponse: useStreaming,
+        streaming: useStreaming,
       },
     });
 
@@ -415,61 +391,6 @@ export class ProcessStage extends PipelineStage {
     } catch (e) {
       console.error("Failed to build agent:", e);
       return null;
-    }
-  }
-
-  private async *runAgentStreaming(
-    agentRunner: ToolLoopAgentRunner,
-    event: MessageEvent,
-    umo?: string,
-    convId?: string,
-  ): AsyncGenerator<MessageChain, void> {
-    let steps = 0;
-    try {
-      // Loop through agent steps (like runAgent does) to handle tool calls
-      while (steps < this.maxStep + 1) {
-        steps++;
-
-        // Renew the session lock on each step so the TTL watchdog does not
-        // force-release it during long multi-step tool execution. Without
-        // renewal, a 5-minute TTL could expire mid-run (e.g. during a slow
-        // web_fetch or multi-tool chain), allowing a second consumer to
-        // acquire the lock and write to the same history concurrently.
-        this.ctx.sessionLockManager.renewLock(event.unifiedMsgOrigin);
-
-        if (event.isStopped()) {
-          agentRunner.requestStop?.();
-        }
-
-        for await (const resp of agentRunner.step()) {
-          if (resp.type === "streaming_delta") {
-            yield resp.data.chain;
-          } else if (resp.type === "llm_result") {
-            yield resp.data.chain;
-          } else if (resp.type === "err") {
-            yield resp.data.chain;
-          } else if (resp.type === "aborted") {
-            return;
-          }
-          // type === "tool_use" and "tool_result" are handled internally by the runner
-        }
-
-        // Check if agent is done
-        if (agentRunner.done() || agentRunner.wasAborted()) {
-          break;
-        }
-      }
-
-      // Record provider token stats after agent run completes
-      await this.recordTokenStats(agentRunner);
-
-      // Save full run context with tool metadata
-      if (umo && convId) {
-        await this.saveRunHistory(agentRunner, umo, convId);
-        event.setExtra("_runHistorySaved", true);
-      }
-    } catch (e) {
-      console.error("Agent streaming error:", e);
     }
   }
 

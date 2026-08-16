@@ -2,7 +2,6 @@ import { PipelineStage, registerStage } from "../stage.js";
 import type { PipelineContext } from "../context.js";
 import type { MessageEvent } from "@yachiyo/message/event.js";
 import { ComponentType, type MessageComponent, type PlainComponent, type ImageComponent } from "@yachiyo/message/components.js";
-import { ResultContentType } from "@yachiyo/message/event-result.js";
 import { EventType } from "@yachiyo/plugin/event-type.js";
 import { MarkdownToImageRenderer } from "@yachiyo/t2i/renderer.js";
 
@@ -40,8 +39,6 @@ export class ResultDecorateStage extends PipelineStage {
   async process(event: MessageEvent): Promise<void> {
     const result = event.getResult();
     if (!result) return;
-
-    if (result.resultContentType === ResultContentType.STREAMING_RESULT) return;
 
     if (this.replyPrefix) {
       const firstPlain = result.components.find(

@@ -570,7 +570,7 @@ async function main(): Promise<void> {
   // Mock adapter to capture proactive messages
   const deliveredMessages: Array<{ target: any; text: string }> = [];
   const mockAdapter = {
-    meta: () => ({ name: "mock", description: "Mock", id: "p", supportStreamingMessage: false, supportProactiveMessage: true }),
+    meta: () => ({ name: "mock", description: "Mock", id: "p", supportProactiveMessage: true }),
     sendProactiveMessage: async (target: any, components: any[]): Promise<boolean> => {
       const text = components.filter((c: any) => c.type === "text" || c.text).map((c: any) => c.text ?? "").join("");
       deliveredMessages.push({ target, text });

@@ -15,7 +15,8 @@ export interface MainAgentBuildConfig {
   toolCallTimeout?: number;
   toolSchemaMode?: "full" | "skills_like";
   providerWakePrefix?: string;
-  streamingResponse?: boolean;
+  /** LLM 调用本身是否流式（textChatStream vs textChat）。默认 true。 */
+  streaming?: boolean;
   sanitizeContextByModalities?: boolean;
   kbAgenticMode?: boolean;
   contextLimitReachedStrategy?: "truncate_by_turns" | "llm_compress";
@@ -176,7 +177,7 @@ export async function buildMainAgent<TContext = unknown>(
     runContext,
     toolExecutor: toolExecutor ?? new FunctionToolExecutor(),
     agentHooks: agentHooks ?? new EmptyAgentHooks(),
-    streaming: config.streamingResponse ?? true,
+    streaming: config.streaming ?? true,
     enforceMaxTurns: config.enforceMaxTurns ?? -1,
     llmCompressInstruction: config.llmCompressInstruction,
     llmCompressKeepRecent: config.llmCompressKeepRecent,

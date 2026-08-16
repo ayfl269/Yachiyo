@@ -88,7 +88,6 @@ export class PluginContext {
       isWakeUp() { return false; },
       setResult(_result: unknown) {},
       send: async () => {},
-      sendStreaming: async function* (_generator: AsyncGenerator<unknown>) {},
     } as unknown as MessageEvent;
     this.eventQueue.put(syntheticEvent);
   }
