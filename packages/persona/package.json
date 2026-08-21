@@ -18,9 +18,9 @@
     "build": "tsc"
   },
   "dependencies": {
-    "better-sqlite3": "^12.10.0",
+    "@yachiyo/agent": "workspace:*",
     "@yachiyo/common": "workspace:*",
-    "@yachiyo/agent": "workspace:*"
+    "better-sqlite3": "^13.0.3"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13"
