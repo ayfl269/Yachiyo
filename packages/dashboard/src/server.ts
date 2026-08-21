@@ -1917,19 +1917,35 @@ export class DashboardServer {
           return;
         }
 
-        // Accept both storage shapes of Message.content: plain string AND
-        // ContentPart[] arrays (e.g. [{"type":"text","text":"..."}] produced
-        // by multimodal/platform events like poke). The LLM converters
-        // (openai-converter etc.) and Message type
-        // (`string | ContentPart[] | CheckpointData`) both support arrays —
-        // rejecting them here made editing conversations that contain such
-        // messages impossible ("Each message must have role...").
-        const isValidContent = (c: unknown): boolean =>
-          typeof c === "string" || (Array.isArray(c) && c.every((p) => p !== null && typeof p === "object"));
+        // Validate against the same rules as validateMessage() in
+        // @yachiyo/common/llm-message.ts — history persisted by the agent can
+        // legitimately contain:
+        //   - content: string                      (plain messages)
+        //   - content: ContentPart[]               (multimodal / platform events)
+        //   - content: {id} object                 (role="_checkpoint" messages)
+        //   - content: null/missing + tool_calls   (assistant tool-call messages)
+        // plus tool_calls / tool_call_id fields. Rejecting any of these made
+        // conversations unsaveable while the agent was running.
+        const isValidMessage = (msg: unknown): boolean => {
+          if (msg === null || typeof msg !== "object") return false;
+          const m = msg as { role?: unknown; content?: unknown; tool_calls?: unknown };
+          if (typeof m.role !== "string") return false;
+          const c = m.content;
+          if (c === null || c === undefined) {
+            return m.role === "assistant" && m.tool_calls != null;
+          }
+          if (typeof c === "string") return true;
+          if (Array.isArray(c)) return c.every((p) => p !== null && typeof p === "object");
+          if (typeof c === "object") {
+            // CheckpointData is only valid for role="_checkpoint"
+            return m.role === "_checkpoint" && "id" in (c as Record<string, unknown>);
+          }
+          return false;
+        };
         for (const msg of history) {
-          if (typeof msg?.role !== "string" || !isValidContent(msg?.content)) {
+          if (!isValidMessage(msg)) {
             res.writeHead(400, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "Each message must have role (string) and content (string or content-part array)" }));
+            res.end(JSON.stringify({ error: "Each message must be a valid Message (string role; content as string, content-part array, checkpoint object, or null with tool_calls)" }));
             return;
           }
         }

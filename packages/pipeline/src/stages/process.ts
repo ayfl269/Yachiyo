@@ -125,8 +125,11 @@ export class ProcessStage extends PipelineStage {
 
           await this.applyNonStreamingResult(event, runResult, umo, convId);
 
-          // Save full run context with tool metadata (overwrites any text-only save above)
-          await this.saveRunHistory(agentRunner, umo, convId);
+          // Save clean run context (overwrites any text-only save above);
+          // tool-call intermediates are filtered out inside.
+          await this.saveRunHistory(agentRunner, umo, convId, {
+            systemTriggered: event.getExtra<string>("_historyUserMessage") !== undefined,
+          });
           yield;
         } finally {
           unregisterActiveRunner(event.unifiedMsgOrigin, agentRunner);
@@ -473,27 +476,51 @@ export class ProcessStage extends PipelineStage {
   }
 
   /**
-   * Save the full agent run context to conversation history, preserving
-   * tool_calls, tool_call_id, and tool result metadata that simple text-only
-   * saves would lose. Called after the agent run completes in both the
-   * streaming and non-streaming paths.
+   * Save the agent run context to conversation history as a clean
+   * user/assistant transcript. Tool-call intermediate messages (assistant
+   * messages that only carry tool_calls, and role="tool" result messages)
+   * are NOT persisted — they are per-run mechanics, not conversation
+   * content, and saving them made the stored record count diverge from what
+   * the user actually sent/received. Assistant messages that carry visible
+   * text are kept (without the tool_calls metadata).
+   * Called after the agent run completes in both the streaming and
+   * non-streaming paths.
    */
   private async saveRunHistory(
     agentRunner: ToolLoopAgentRunner,
     umo: string,
     convId: string,
+    options?: { systemTriggered?: boolean },
   ): Promise<void> {
     const messages = agentRunner.currentRunContext?.messages;
     if (!messages || messages.length === 0) return;
 
+    // System-triggered runs (proactive reminders etc.) inject an internal
+    // instruction as the last user message. saveUserMessage already skips
+    // persisting it — skip it here too so the internal prompt never leaks
+    // into the saved history.
+    let lastUserIndex = -1;
+    if (options?.systemTriggered) {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === "user") { lastUserIndex = i; break; }
+      }
+    }
+
     const history: Record<string, unknown>[] = [];
-    for (const msg of messages) {
+    for (const [i, msg] of messages.entries()) {
       if (msg.role === "system" || msg.role === "_checkpoint") continue;
+      if (msg.role === "tool") continue;
+      if (i === lastUserIndex) continue;
       if (msg._noSave) continue;
+      // Skip assistant messages that are pure tool-call requests (no visible
+      // text) — they belong to the tool loop, not the conversation record.
+      const hasText = typeof msg.content === "string"
+        ? msg.content.trim().length > 0
+        : Array.isArray(msg.content) && msg.content.length > 0;
+      if (msg.role === "assistant" && !hasText) continue;
+
       const entry: Record<string, unknown> = { role: msg.role };
       if (msg.content !== undefined) entry.content = msg.content;
-      if (msg.tool_calls) entry.tool_calls = msg.tool_calls;
-      if (msg.tool_call_id) entry.tool_call_id = msg.tool_call_id;
       history.push(entry);
     }
     if (history.length === 0) return;

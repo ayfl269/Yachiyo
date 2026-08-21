@@ -31,7 +31,9 @@ interface Conversation {
 interface ChatMessage {
   id: string
   role: string
-  content: string | Array<{ type?: string; text?: string }>
+  content: string | Array<{ type?: string; text?: string }> | { id?: string } | null
+  tool_calls?: unknown
+  tool_call_id?: string
 }
 
 function extractContentText(content: unknown): string {
@@ -228,11 +230,14 @@ export default function ChatDataManager() {
     if (!selectedConvId) return
     setIsSaving(true)
     try {
+      // Preserve the full message shape (tool_calls, tool_call_id, …) —
+      // sending only {role, content} would strip tool-call metadata and
+      // break the conversation's tool-call chain.
       const res = await apiFetch(`/api/conversations/${encodeURIComponent(selectedConvId)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          history: messages.map(m => ({ role: m.role, content: m.content })),
+          history: messages.map(({ id: _id, ...rest }) => rest),
         }),
       })
       if (!res.ok) {
