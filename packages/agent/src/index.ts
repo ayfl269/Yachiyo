@@ -265,7 +265,11 @@ export type {
   MemoryEntry,
   MemoryType,
   MemoryScope,
+  MemoryStatus,
   MemoryStats,
+  DirtyMemory,
+  SimilarMemoryHit,
+  MemoryEmbeddingRow,
   ConversationIndexEntry,
 } from "./sqlite-memory-store.js";
 
@@ -279,6 +283,17 @@ export type {
   ConsolidationResult,
   UserProfile,
 } from "./memory-consolidator.js";
+
+// Long-term memory consolidation job
+export {
+  LongTermMemoryConsolidationJob,
+  DEFAULT_LT_CONSOLIDATION_CONFIG,
+} from "./long-term-consolidation-job.js";
+export type {
+  EmbeddingCapability,
+  LongTermConsolidationConfig,
+  LongTermConsolidationStats,
+} from "./long-term-consolidation-job.js";
 
 // Code search tool
 export {

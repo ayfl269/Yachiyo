@@ -44,6 +44,7 @@ import {
 import { getInteractiveShellTools } from "@yachiyo/agent/interactive-shell-tool.js";
 import { createMemoryTool } from "@yachiyo/agent/memory-tool.js";
 import { MemoryConsolidator } from "@yachiyo/agent/memory-consolidator.js";
+import { LongTermMemoryConsolidationJob } from "@yachiyo/agent/long-term-consolidation-job.js";
 import { createCodeSearchTool } from "@yachiyo/agent/code-search-tool.js";
 import { createConversationSearchTool } from "@yachiyo/agent/conversation-search-tool.js";
 import { createAskUserTool } from "@yachiyo/agent/ask-user-tool.js";
@@ -289,7 +290,21 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
     autoConsolidateBufferCount: defaultConfig.memoryConsolidationBufferCount,
   });
   conversationManager.setMemoryConsolidator(memoryConsolidator);
-  const memoryTool = createMemoryTool({ workspaceRoot, sqliteStore: sqliteMemoryStore, consolidator: memoryConsolidator });
+
+  // 长期记忆周期整理 Job（语义合并，独立于上面的短期记忆整理器）
+  const ltmConsolidationJob = new LongTermMemoryConsolidationJob(sqliteMemoryStore, {
+    interval: activeConfig.memoryLongTermConsolidationInterval ?? "1w",
+    enabled: activeConfig.memoryLongTermConsolidationEnabled ?? true,
+    memoryEnabled: activeConfig.memoryEnabled,
+    embeddingEnabled: activeConfig.memoryLongTermEmbeddingEnabled ?? true,
+    similarityThreshold: activeConfig.memoryLongTermSimilarityThreshold ?? 0.75,
+    batchSize: activeConfig.memoryLongTermBatchSize ?? 100,
+    maxLLMCallsPerBatch: activeConfig.memoryLongTermMaxLLMCallsPerBatch ?? 20,
+    maxBatchesPerRun: activeConfig.memoryLongTermMaxBatchesPerRun ?? 10,
+    maxRetries: activeConfig.memoryLongTermMaxRetries ?? 3,
+  });
+
+  const memoryTool = createMemoryTool({ workspaceRoot, sqliteStore: sqliteMemoryStore, consolidator: memoryConsolidator, ltmConsolidator: ltmConsolidationJob });
   toolManager.funcList.push(memoryTool);
 
   // 配置变更时同步 ProviderManager 和 MemoryConsolidator
@@ -310,7 +325,12 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
           if (fallbackProviders.length > 0) {
             memoryConsolidator.setFallbackProviders(fallbackProviders);
           }
+          ltmConsolidationJob.setProvider(defaultProvider);
+          if (fallbackProviders.length > 0) {
+            ltmConsolidationJob.setFallbackProviders(fallbackProviders);
+          }
         }
+        ltmConsolidationJob.setEmbeddingProvider(providerManager.getUsingEmbeddingProvider());
 
         memoryConsolidator.updateConfig({
           interval: cfg.memoryConsolidationInterval,
@@ -327,6 +347,19 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
         });
         // 配置变更后重启周期定时器（应用新的间隔/启用状态）
         memoryConsolidator.startPeriodic();
+
+        ltmConsolidationJob.updateConfig({
+          interval: cfg.memoryLongTermConsolidationInterval ?? "1w",
+          enabled: cfg.memoryLongTermConsolidationEnabled ?? true,
+          memoryEnabled: cfg.memoryEnabled,
+          embeddingEnabled: cfg.memoryLongTermEmbeddingEnabled ?? true,
+          similarityThreshold: cfg.memoryLongTermSimilarityThreshold ?? 0.75,
+          batchSize: cfg.memoryLongTermBatchSize ?? 100,
+          maxLLMCallsPerBatch: cfg.memoryLongTermMaxLLMCallsPerBatch ?? 20,
+          maxBatchesPerRun: cfg.memoryLongTermMaxBatchesPerRun ?? 10,
+          maxRetries: cfg.memoryLongTermMaxRetries ?? 3,
+        });
+        ltmConsolidationJob.startPeriodic();
       }
     }
   });
@@ -446,6 +479,17 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
   // 启动周期记忆整理
   memoryConsolidator.startPeriodic();
 
+  // 配置长期记忆整理 Job 的 providers 并启动周期定时器
+  if (defaultProvider) {
+    ltmConsolidationJob.setProvider(defaultProvider);
+    const fallbackProviders = providerManager.getFallbackProviders();
+    if (fallbackProviders.length > 0) {
+      ltmConsolidationJob.setFallbackProviders(fallbackProviders);
+    }
+  }
+  ltmConsolidationJob.setEmbeddingProvider(providerManager.getUsingEmbeddingProvider());
+  ltmConsolidationJob.startPeriodic();
+
   // 注入 AdapterRegistry 到 TaskScheduler（用于主动推送定时任务消息）
   taskScheduler.setAdapterRegistry(adapterRegistry);
 
@@ -532,6 +576,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
         toolManager,
         memoryStore: sqliteMemoryStore,
         memoryConsolidator,
+        ltmConsolidator: ltmConsolidationJob,
         schedulerStore: sqliteSchedulerTaskStore,
         shutdown: async () => {},
       },
@@ -580,6 +625,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
       taskScheduler.stop();
       // 停止记忆整理周期定时器
       memoryConsolidator.stop();
+      ltmConsolidationJob.stop();
       await adapterRegistry.stopAll();
       eventBus.stop();
       await conversationManager.close();

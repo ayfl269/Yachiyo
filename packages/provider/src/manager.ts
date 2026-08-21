@@ -208,19 +208,19 @@ export class ProviderManager {
   }
 
   getUsingTtsProvider(_umo?: string): TTSProvider | null {
-    return this.ttsInsts[0] ?? null;
+    return this.ttsInsts.find((p) => !this.disabledIds.has(this.extractId(p.providerConfig) ?? "")) ?? null;
   }
 
   getUsingSttProvider(_umo?: string): STTProvider | null {
-    return this.sttInsts[0] ?? null;
+    return this.sttInsts.find((p) => !this.disabledIds.has(this.extractId(p.providerConfig) ?? "")) ?? null;
   }
 
   getUsingEmbeddingProvider(_umo?: string): EmbeddingProvider | null {
-    return this.embeddingInsts[0] ?? null;
+    return this.embeddingInsts.find((p) => !this.disabledIds.has(this.extractId(p.providerConfig) ?? "")) ?? null;
   }
 
   getUsingRerankProvider(_umo?: string): RerankProvider | null {
-    return this.rerankInsts[0] ?? null;
+    return this.rerankInsts.find((p) => !this.disabledIds.has(this.extractId(p.providerConfig) ?? "")) ?? null;
   }
 
   // ── Enable / Disable ──
@@ -275,7 +275,8 @@ export class ProviderManager {
   getFallbackProviders(): Provider[] {
     return this.fallbackProviderIds
       .map((id) => this.instMap.get(id))
-      .filter((p): p is Provider => p !== undefined && "textChat" in p);
+      .filter((p): p is Provider => p !== undefined && "textChat" in p)
+      .filter((p) => !this.disabledIds.has(this.extractId(p.providerConfig) ?? ""));
   }
 
   getDefaultProviderId(): string | null {
@@ -397,6 +398,13 @@ export class ProviderManager {
       const savedConfigs = this.sqliteStore.getAllProviderConfigs();
       for (const saved of savedConfigs) {
         this.providerConfigs.set(saved.id, saved.config);
+        // Persisted "enable: false" providers are still registered (instances
+        // exist for hot re-enable) but marked disabled, matching the runtime
+        // semantics of setDisabled(). Without this the disabled state would be
+        // lost on every restart.
+        if (saved.config?.enable === false) {
+          this.disabledIds.add(saved.id);
+        }
         try {
           await this.createAndRegisterProvider(saved.type, saved.id, saved.config);
         } catch (e) {

@@ -65,6 +65,15 @@ export interface AgentConfig {
   memoryInjectPersonaCount: number;
   memoryBufferMinMessages: number;
   memoryConsolidationBufferCount: number;
+  // Long-term memory consolidation (LTM semantic merge job)
+  memoryLongTermConsolidationEnabled: boolean;
+  memoryLongTermConsolidationInterval: string;
+  memoryLongTermEmbeddingEnabled: boolean;
+  memoryLongTermSimilarityThreshold: number;
+  memoryLongTermBatchSize: number;
+  memoryLongTermMaxLLMCallsPerBatch: number;
+  memoryLongTermMaxBatchesPerRun: number;
+  memoryLongTermMaxRetries: number;
   // History storage limit
   maxHistoryMessages: number;
   temperature?: number;
@@ -150,7 +159,13 @@ export class ConfigManager {
 
   notifyChange(configId: string, changeType: string): void {
     for (const cb of this.onChangeCallbacks) {
-      cb(configId, changeType);
+      // Isolate callback failures: one broken listener must not abort config
+      // updates (addConfig/updateConfig/deleteConfig) or skip other listeners.
+      try {
+        cb(configId, changeType);
+      } catch (e) {
+        console.error(`[ConfigManager] onChange callback error (${changeType} ${configId}):`, e);
+      }
     }
   }
 
@@ -247,6 +262,15 @@ export class ConfigManager {
       memoryInjectPersonaCount: 5,
       memoryBufferMinMessages: 6,
       memoryConsolidationBufferCount: 30,
+      // Long-term memory consolidation (LTM semantic merge job)
+      memoryLongTermConsolidationEnabled: true,
+      memoryLongTermConsolidationInterval: "1w",
+      memoryLongTermEmbeddingEnabled: true,
+      memoryLongTermSimilarityThreshold: 0.75,
+      memoryLongTermBatchSize: 100,
+      memoryLongTermMaxLLMCallsPerBatch: 20,
+      memoryLongTermMaxBatchesPerRun: 10,
+      memoryLongTermMaxRetries: 3,
       // History storage limit
       maxHistoryMessages: 200,
       temperature: 0.7,

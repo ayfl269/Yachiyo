@@ -47,6 +47,7 @@ import type { AdapterConfigBase } from "@yachiyo/platform/config.js";
 import type { DatabaseManager } from "@yachiyo/common/database.js";
 import type { FunctionToolManager } from "@yachiyo/agent/func-tool-manager.js";
 import type { MemoryConsolidator } from "@yachiyo/agent/memory-consolidator.js";
+import type { LongTermMemoryConsolidationJob } from "@yachiyo/agent/long-term-consolidation-job.js";
 import type { SqliteMemoryStore, MemoryEntry, ConversationIndexEntry, MemoryType, MemoryScope } from "@yachiyo/agent/sqlite-memory-store.js";
 import type { SqliteSchedulerTaskStore, SchedulerTask, TaskType, TaskStatus } from "@yachiyo/agent/scheduler-task-store.js";
 import type { SkillManager } from "@yachiyo/skill/index.js";
@@ -71,6 +72,8 @@ export interface BootstrapContext {
   dbManager: DatabaseManager;
   toolManager: FunctionToolManager;
   memoryConsolidator: MemoryConsolidator;
+  /** Long-term semantic merge job; optional for backwards compatibility. */
+  ltmConsolidator?: LongTermMemoryConsolidationJob;
   schedulerStore?: SqliteSchedulerTaskStore;
   memoryStore?: SqliteMemoryStore;
   dashboardServer?: DashboardServer;
@@ -1914,10 +1917,19 @@ export class DashboardServer {
           return;
         }
 
+        // Accept both storage shapes of Message.content: plain string AND
+        // ContentPart[] arrays (e.g. [{"type":"text","text":"..."}] produced
+        // by multimodal/platform events like poke). The LLM converters
+        // (openai-converter etc.) and Message type
+        // (`string | ContentPart[] | CheckpointData`) both support arrays —
+        // rejecting them here made editing conversations that contain such
+        // messages impossible ("Each message must have role...").
+        const isValidContent = (c: unknown): boolean =>
+          typeof c === "string" || (Array.isArray(c) && c.every((p) => p !== null && typeof p === "object"));
         for (const msg of history) {
-          if (typeof msg.role !== "string" || typeof msg.content !== "string") {
+          if (typeof msg?.role !== "string" || !isValidContent(msg?.content)) {
             res.writeHead(400, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "Each message must have role (string) and content (string)" }));
+            res.end(JSON.stringify({ error: "Each message must have role (string) and content (string or content-part array)" }));
             return;
           }
         }
@@ -3177,6 +3189,25 @@ export class DashboardServer {
         const result = await consolidator.consolidate({ force: true });
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, result }));
+      } catch (err: unknown) {
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: false, error: safeClientMessage(err) }));
+      }
+      return;
+    }
+
+    // M10. POST /api/memories/consolidate-long-term — 手动触发长期记忆整理与合并
+    if (pathname === "/api/memories/consolidate-long-term" && req.method === "POST") {
+      try {
+        const ltm = this.ctx.ltmConsolidator;
+        if (!ltm) {
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: "Long-term memory consolidation job not initialized" }));
+          return;
+        }
+        const stats = await ltm.run({ force: true });
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: true, result: stats }));
       } catch (err: unknown) {
         res.writeHead(200);
         res.end(JSON.stringify({ success: false, error: safeClientMessage(err) }));

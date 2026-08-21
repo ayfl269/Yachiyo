@@ -41,7 +41,10 @@ export class OpenAIEmbeddingProvider extends EmbeddingProvider {
       input: texts,
       encoding_format: "float",
     };
-    if (this.dimensions !== undefined) {
+    // Only OpenAI text-embedding-3 models accept the `dimensions` parameter.
+    // Other models (e.g. BAAI/bge-m3 served via an OpenAI-compatible gateway)
+    // reject it with HTTP 400 "The parameter is invalid".
+    if (this.dimensions !== undefined && this.model.startsWith("text-embedding-3-")) {
       body.dimensions = this.dimensions;
     }
 

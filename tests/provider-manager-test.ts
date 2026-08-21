@@ -445,6 +445,54 @@ async function testProviderManagerTerminateAndCleanup(): Promise<void> {
 }
 
 // ============================================================
+// 9. 测试: 禁用状态持久化恢复与选择过滤
+// ============================================================
+
+async function testDisabledProviderPersistence(): Promise<void> {
+  console.log("\n=== 测试: 禁用状态持久化恢复与选择过滤 ===");
+
+  const { ProviderManager } = await import("@yachiyo/provider/manager.js");
+
+  // Mock sqliteStore：模拟重启后从 SQLite 恢复的场景
+  const mockStore = {
+    getAllProviderConfigs: () => [
+      { id: "emb-active", type: "openai_embedding", config: { id: "emb-active", type: "openai_embedding", apiKey: "k1", enable: true } },
+      { id: "emb-disabled", type: "openai_embedding", config: { id: "emb-disabled", type: "openai_embedding", apiKey: "k2", enable: false } },
+      { id: "chat-default", type: "openai", config: { id: "chat-default", type: "openai", apiKey: "k3", model: "m1", enable: true } },
+      { id: "chat-fb-disabled", type: "openai", config: { id: "chat-fb-disabled", type: "openai", apiKey: "k4", model: "m2", enable: false } },
+    ],
+    getDefaultProviderId: () => "chat-default",
+    getFallbackProviderIds: () => ["chat-fb-disabled"],
+    getMcpServerConfigMap: () => ({}),
+  };
+
+  const manager = new ProviderManager();
+  manager.setSqliteStore(mockStore as any);
+  await manager.initialize();
+
+  // 重启恢复：enable:false 的 provider 应处于禁用状态
+  assert(manager.isDisabled("emb-disabled"), "initialize 恢复 enable:false 的 embedding provider 为禁用");
+  assert(manager.isDisabled("chat-fb-disabled"), "initialize 恢复 enable:false 的 chat provider 为禁用");
+  assert(!manager.isDisabled("emb-active"), "enable:true 的 provider 不被禁用");
+  assert(!manager.isDisabled("chat-default"), "默认 chat provider 不被禁用");
+
+  // 选择过滤：getUsingEmbeddingProvider 应跳过禁用的
+  const emb = manager.getUsingEmbeddingProvider();
+  assert(emb !== null && (emb.providerConfig as any).id === "emb-active", "getUsingEmbeddingProvider 跳过禁用 provider");
+
+  // fallback 过滤：禁用的 provider 不应出现在 fallback 列表
+  const fallbacks = manager.getFallbackProviders();
+  assert(fallbacks.length === 0, "getFallbackProviders 过滤禁用的 fallback provider");
+
+  // 运行时 setEnabled 后 fallback 恢复可见
+  manager.setEnabled("chat-fb-disabled");
+  const fallbacksAfter = manager.getFallbackProviders();
+  assert(fallbacksAfter.length === 1, "重新启用后 fallback 恢复可见");
+
+  await manager.terminate();
+}
+
+// ============================================================
 // 运行所有测试
 // ============================================================
 
@@ -462,6 +510,7 @@ async function main(): Promise<void> {
     await testDynamicCreateFactories();
     await testMcpSecurityValidation();
     await testProviderManagerTerminateAndCleanup();
+    await testDisabledProviderPersistence();
 
     console.log("\n╔══════════════════════════════════════════╗");
     console.log("║   🎉 所有 ProviderManager 测试通过!       ║");

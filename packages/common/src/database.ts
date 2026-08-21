@@ -18,7 +18,9 @@ export type DatabaseName = "chat" | "memory" | "config" | "knowledge" | "schedul
 export interface Migration {
   version: number;
   name: string;
-  up: string; // SQL statements to execute
+  /** SQL statements to execute, or a function for schema-introspecting
+   *  migrations (e.g. repair migrations that must inspect existing columns). */
+  up: string | ((db: Database.Database) => void);
 }
 
 /**
@@ -99,8 +101,12 @@ export class DatabaseManager {
 
       try {
         db.transaction(() => {
-          // Execute migration SQL (may contain multiple statements)
-          db.exec(migration.up);
+          // Execute migration (SQL string, or introspecting function)
+          if (typeof migration.up === "function") {
+            migration.up(db);
+          } else {
+            db.exec(migration.up);
+          }
 
           // Record migration
           db.prepare(

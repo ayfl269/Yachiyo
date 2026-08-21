@@ -56,6 +56,15 @@ interface AgentConfig {
   memoryInjectLongTermCount: number
   memoryInjectPersonaCount: number
   memoryBufferMinMessages: number
+  // Long-term memory consolidation (LTM semantic merge job)
+  memoryLongTermConsolidationEnabled: boolean
+  memoryLongTermConsolidationInterval: string
+  memoryLongTermEmbeddingEnabled: boolean
+  memoryLongTermSimilarityThreshold: number
+  memoryLongTermBatchSize: number
+  memoryLongTermMaxLLMCallsPerBatch: number
+  memoryLongTermMaxBatchesPerRun: number
+  memoryLongTermMaxRetries: number
   // Context settings (missing keys)
   injectDateTime: boolean
   timezone: string
@@ -128,6 +137,22 @@ export default function ConfigManager() {
         const data = await cfgRes.json()
         if (data && data.temperature === undefined) {
           data.temperature = 0.7
+        }
+        // 旧配置缺失长期记忆整理字段时补默认值（与后端 createDefaultConfig 一致）
+        if (data) {
+          const ltmDefaults: Record<string, unknown> = {
+            memoryLongTermConsolidationEnabled: true,
+            memoryLongTermConsolidationInterval: '1w',
+            memoryLongTermEmbeddingEnabled: true,
+            memoryLongTermSimilarityThreshold: 0.75,
+            memoryLongTermBatchSize: 100,
+            memoryLongTermMaxLLMCallsPerBatch: 20,
+            memoryLongTermMaxBatchesPerRun: 10,
+            memoryLongTermMaxRetries: 3,
+          }
+          for (const [key, value] of Object.entries(ltmDefaults)) {
+            if (data[key] === undefined) data[key] = value
+          }
         }
         setConfig(data)
         setSafetyKeywordsStr(data?.safetyKeywords?.join(', ') || '')
@@ -1099,6 +1124,107 @@ export default function ConfigManager() {
                     />
                     <span className="help-text">缓冲区消息少于此数不会触发整理</span>
                   </div>
+
+                  {/* 长期记忆整理 */}
+                  <div className="section-divider"></div>
+                  <div className="section-subtitle">长期记忆整理</div>
+
+                  <div className="form-group row-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={config.memoryLongTermConsolidationEnabled}
+                      onChange={(e) => updateField('memoryLongTermConsolidationEnabled', e.target.checked)}
+                      id="memoryLongTermConsolidationEnabled"
+                    />
+                    <label htmlFor="memoryLongTermConsolidationEnabled">启用长期记忆周期性整理（语义相似记忆合并）</label>
+                  </div>
+                  {config.memoryLongTermConsolidationEnabled && (
+                    <>
+                      <div className="form-group">
+                        <label>整理间隔</label>
+                        <input
+                          type="text"
+                          value={config.memoryLongTermConsolidationInterval}
+                          onChange={(e) => updateField('memoryLongTermConsolidationInterval', e.target.value)}
+                          placeholder="1w"
+                          className="form-control font-mono"
+                        />
+                        <span className="help-text">支持格式: "1w" (1周), "12h" (12小时), "1d6h30m", 默认 1w</span>
+                      </div>
+                      <div className="form-group row-checkbox">
+                        <input
+                          type="checkbox"
+                          checked={config.memoryLongTermEmbeddingEnabled}
+                          onChange={(e) => updateField('memoryLongTermEmbeddingEnabled', e.target.checked)}
+                          id="memoryLongTermEmbeddingEnabled"
+                        />
+                        <label htmlFor="memoryLongTermEmbeddingEnabled">启用 Embedding 语义相似发现（关闭时退化为键前缀 + 标签匹配）</label>
+                      </div>
+                      {config.memoryLongTermEmbeddingEnabled && (
+                        <div className="form-group">
+                          <label>语义相似度阈值</label>
+                          <input
+                            type="number"
+                            value={config.memoryLongTermSimilarityThreshold}
+                            onChange={(e) => updateField('memoryLongTermSimilarityThreshold', Number(e.target.value))}
+                            min={0.5}
+                            max={0.95}
+                            step={0.05}
+                            className="form-control"
+                          />
+                          <span className="help-text">余弦相似度高于此值的记忆才会进入 LLM 合并评估，默认 0.75</span>
+                        </div>
+                      )}
+                      <div className="form-group">
+                        <label>单批处理记忆条数</label>
+                        <input
+                          type="number"
+                          value={config.memoryLongTermBatchSize}
+                          onChange={(e) => updateField('memoryLongTermBatchSize', Number(e.target.value))}
+                          min={10}
+                          max={500}
+                          className="form-control"
+                        />
+                        <span className="help-text">每次从脏记忆队列取出的数量，默认 100</span>
+                      </div>
+                      <div className="form-group">
+                        <label>单批最大 LLM 调用次数</label>
+                        <input
+                          type="number"
+                          value={config.memoryLongTermMaxLLMCallsPerBatch}
+                          onChange={(e) => updateField('memoryLongTermMaxLLMCallsPerBatch', Number(e.target.value))}
+                          min={1}
+                          max={100}
+                          className="form-control"
+                        />
+                        <span className="help-text">控制单批成本，超出部分留到下一批，默认 20</span>
+                      </div>
+                      <div className="form-group">
+                        <label>单次运行最大批次数</label>
+                        <input
+                          type="number"
+                          value={config.memoryLongTermMaxBatchesPerRun}
+                          onChange={(e) => updateField('memoryLongTermMaxBatchesPerRun', Number(e.target.value))}
+                          min={1}
+                          max={50}
+                          className="form-control"
+                        />
+                        <span className="help-text">超出后剩余脏记忆等待下一周期，默认 10</span>
+                      </div>
+                      <div className="form-group">
+                        <label>失败最大重试次数</label>
+                        <input
+                          type="number"
+                          value={config.memoryLongTermMaxRetries}
+                          onChange={(e) => updateField('memoryLongTermMaxRetries', Number(e.target.value))}
+                          min={1}
+                          max={10}
+                          className="form-control"
+                        />
+                        <span className="help-text">Embedding/LLM 失败带退避重试，达到上限后记忆保持脏状态直到内容变更，默认 3</span>
+                      </div>
+                    </>
+                  )}
 
                   {/* 老化与归档 */}
                   <div className="section-divider"></div>

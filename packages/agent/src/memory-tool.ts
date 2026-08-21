@@ -18,6 +18,7 @@ import { existsSync } from "fs";
 import { join, dirname } from "path";
 import type { SqliteMemoryStore, MemoryType, MemoryScope } from "./sqlite-memory-store.js";
 import type { MemoryConsolidator } from "./memory-consolidator.js";
+import type { LongTermMemoryConsolidationJob } from "./long-term-consolidation-job.js";
 
 // ── Context type ──
 
@@ -78,6 +79,7 @@ export interface CreateMemoryToolOptions {
   workspaceRoot?: string;
   sqliteStore?: SqliteMemoryStore;
   consolidator?: MemoryConsolidator;
+  ltmConsolidator?: LongTermMemoryConsolidationJob;
 }
 
 export function createMemoryTool(optionsOrRoot?: string | CreateMemoryToolOptions): FunctionTool<MemoryToolContext> {
@@ -87,6 +89,7 @@ export function createMemoryTool(optionsOrRoot?: string | CreateMemoryToolOption
 
   const sqliteStore = options.sqliteStore;
   const consolidator = options.consolidator;
+  const ltmConsolidator = options.ltmConsolidator;
   const workspaceRoot = options.workspaceRoot;
 
   return createFunctionTool<MemoryToolContext>({
@@ -95,14 +98,14 @@ export function createMemoryTool(optionsOrRoot?: string | CreateMemoryToolOption
       "Persistent layered memory storage across sessions. " +
       "Memory types: short_term (session-scoped, auto-archived), long_term (persistent), " +
       "persona (bound to a Persona), user_profile (user preferences). " +
-      "Actions: save, recall, search, delete, list, clear, consolidate, stats.",
+      "Actions: save, recall, search, delete, list, clear, consolidate, consolidate_long_term, stats.",
     parameters: {
       type: "object",
       properties: {
         action: {
           type: "string",
           description: "The action to perform.",
-          enum: ["save", "recall", "search", "delete", "list", "clear", "consolidate", "stats"],
+          enum: ["save", "recall", "search", "delete", "list", "clear", "consolidate", "consolidate_long_term", "stats"],
         },
         key: { type: "string", description: "Memory key (for save/recall/delete)." },
         value: { type: "string", description: "Memory value (for save action)." },
@@ -149,7 +152,7 @@ export function createMemoryTool(optionsOrRoot?: string | CreateMemoryToolOption
       try {
         // Use SQLite store if available
         if (sqliteStore) {
-          return handleSqliteAction(sqliteStore, consolidator ?? null, action, key, value, tags, query, limit, memoryType, scope, scopeId, priority, context);
+          return handleSqliteAction(sqliteStore, consolidator ?? null, ltmConsolidator ?? null, action, key, value, tags, query, limit, memoryType, scope, scopeId, priority, context);
         }
 
         // Fallback to JSON file store
@@ -167,6 +170,7 @@ export function createMemoryTool(optionsOrRoot?: string | CreateMemoryToolOption
 function handleSqliteAction(
   store: SqliteMemoryStore,
   consolidator: MemoryConsolidator | null,
+  ltmConsolidator: LongTermMemoryConsolidationJob | null,
   action: string,
   key?: string,
   value?: string,
@@ -272,6 +276,19 @@ function handleSqliteAction(
       return { content: [{ type: "text", text: "Memory consolidation triggered. Results will be logged." }] };
     }
 
+    case "consolidate_long_term": {
+      if (!ltmConsolidator) {
+        return { content: [{ type: "text", text: "error: Long-term memory consolidation job is not available." }], isError: true };
+      }
+      // Run asynchronously and return immediately (force bypasses retry gates)
+      ltmConsolidator.run({ force: true }).then((result) => {
+        console.log(`[MemoryTool] Manual long-term consolidation complete:`, result);
+      }).catch((e) => {
+        console.error(`[MemoryTool] Manual long-term consolidation failed:`, e);
+      });
+      return { content: [{ type: "text", text: "Long-term memory consolidation triggered (force). Results will be logged; check stats action afterwards." }] };
+    }
+
     case "stats": {
       const stats = store.stats();
       const lines = [
@@ -287,11 +304,29 @@ function handleSqliteAction(
         const config = consolidator.getConfig();
         lines.push("", `Consolidation: ${config.enabled ? "enabled" : "disabled"}`, `  Interval: ${config.interval}`);
       }
+      if (ltmConsolidator) {
+        const ltm = ltmConsolidator.getStats();
+        lines.push(
+          "",
+          `Long-Term Consolidation: ${ltm.enabled ? "enabled" : "disabled"} (mode: ${ltm.embeddingMode ? "embedding" : "legacy"})`,
+          `  Interval: ${ltm.interval}`,
+          `  Dirty memories: ${ltm.dirtyCount}`,
+          `  Last run: ${ltm.lastRunAt ?? "(never)"}`,
+          `  Last success: ${ltm.lastSuccessAt ?? "(never)"}`,
+          ...(ltm.lastRunAt
+            ? [
+                `  Last run stats: batches=${ltm.batchCount}, processed=${ltm.processedMemoryCount}, ` +
+                `merged=${ltm.mergedCount}, keptSeparate=${ltm.keptSeparateCount}, skipped=${ltm.skippedCount}, ` +
+                `retries=${ltm.retryCount}, embeddingFail=${ltm.embeddingFailureCount}, llmFail=${ltm.llmFailureCount}`,
+              ]
+            : []),
+        );
+      }
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
 
     default:
-      return { content: [{ type: "text", text: `error: Unknown action: "${action}". Valid actions: save, recall, search, delete, list, clear, consolidate, stats.` }], isError: true };
+      return { content: [{ type: "text", text: `error: Unknown action: "${action}". Valid actions: save, recall, search, delete, list, clear, consolidate, consolidate_long_term, stats.` }], isError: true };
   }
 }
 
@@ -397,6 +432,7 @@ async function handleJsonAction(
     }
 
     case "consolidate":
+    case "consolidate_long_term":
     case "stats":
       return { content: [{ type: "text", text: `error: "${action}" action requires SQLite store. Upgrade to SQLite for layered memory features.` }], isError: true };
 

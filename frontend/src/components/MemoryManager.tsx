@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import {
   Plus, X, Trash2, Search, Brain, Clock, Tag, Save,
   CheckCircle, AlertCircle, ChevronDown, ChevronUp, Key,
-  Hash, RefreshCw, Layers, Zap, Settings, BarChart3
+  Hash, RefreshCw, Layers, Zap, Settings, BarChart3, Workflow
 } from 'lucide-react'
 import { useToast, ToastPortal, Modal } from './shared'
 import { apiFetch } from '../lib/api'
@@ -64,6 +64,23 @@ interface ConsolidationResult {
   aged?: { demoted?: number; archived?: number }
 }
 
+interface LongTermConsolidationStats {
+  lastRunAt: string | null
+  lastSuccessAt: string | null
+  dirtyMemoryCount: number
+  processedMemoryCount: number
+  batchCount: number
+  embeddingSuccessCount: number
+  embeddingFailureCount: number
+  llmSuccessCount: number
+  llmFailureCount: number
+  candidateCount: number
+  mergedCount: number
+  keptSeparateCount: number
+  skippedCount: number
+  retryCount: number
+}
+
 
 
 // ===== Labels =====
@@ -110,6 +127,10 @@ export default function MemoryManager() {
   const [stats, setStats] = useState<MemoryStats | null>(null)
   const [consolidating, setConsolidating] = useState(false)
   const [consolidationConfig, setConsolidationConfig] = useState<ConsolidationConfig | null>(null)
+
+  const [consolidatingLtm, setConsolidatingLtm] = useState(false)
+  const [showLtmResult, setShowLtmResult] = useState(false)
+  const [ltmResult, setLtmResult] = useState<LongTermConsolidationStats | null>(null)
 
   const [expandedKey, setExpandedKey] = useState<string | null>(null)
 
@@ -356,6 +377,30 @@ export default function MemoryManager() {
     }
   }
 
+  const handleConsolidateLongTerm = async () => {
+    setConsolidatingLtm(true)
+    try {
+      const res = await apiFetch('/api/memories/consolidate-long-term', { method: 'POST' })
+      if (res.ok) {
+        const data = await res.json()
+        if (data.success) {
+          setLtmResult(data.result)
+          setShowLtmResult(true)
+          showMessage('长期记忆整理完成')
+          await fetchMemories()
+          await fetchStats()
+        } else {
+          showMessage(data.error || '长期记忆整理失败', 'error')
+        }
+      }
+    } catch (error) {
+      console.error('长期记忆整理失败:', error)
+      showMessage('长期记忆整理失败', 'error')
+    } finally {
+      setConsolidatingLtm(false)
+    }
+  }
+
   const toggleExpand = (key: string) => {
     setExpandedKey(prev => (prev === key ? null : key))
   }
@@ -382,9 +427,13 @@ export default function MemoryManager() {
           <button className="btn" onClick={() => { fetchMemories(); fetchStats() }} disabled={loading} title="刷新">
             <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
           </button>
-          <button className="btn accent" onClick={handleConsolidate} disabled={consolidating} title="手动整理记忆">
+          <button className="btn accent" onClick={handleConsolidate} disabled={consolidating} title="手动整理记忆（短期提取/去重/老化）">
             <Zap size={16} />
             {consolidating ? <span>整理中...</span> : <span>整理记忆</span>}
+          </button>
+          <button className="btn accent" onClick={handleConsolidateLongTerm} disabled={consolidatingLtm} title="手动触发长期记忆的周期性整理与合并（语义相似记忆合并）">
+            <Workflow size={16} />
+            {consolidatingLtm ? <span>整理中...</span> : <span>整理长期记忆</span>}
           </button>
           <button className="btn danger" onClick={confirmClear} disabled={memories.length === 0}>
             <Trash2 size={16} /> 清空全部
@@ -821,6 +870,56 @@ export default function MemoryManager() {
               <CheckCircle size={16} className="result-icon success" />
               <span>老化归档: <strong>{consolidationResult.aged?.archived ?? 0}</strong> 条</span>
             </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ===== Long-Term Consolidation Result Modal ===== */}
+      <Modal
+        open={showLtmResult}
+        onClose={() => setShowLtmResult(false)}
+        title="长期记忆整理结果"
+        size="sm"
+        footer={
+          <button className="btn primary" onClick={() => setShowLtmResult(false)}>确定</button>
+        }
+      >
+        {ltmResult && (
+          <div className="consolidation-result">
+            <div className="result-item">
+              <BarChart3 size={16} className="result-icon success" />
+              <span>待整理脏记忆: <strong>{ltmResult.dirtyMemoryCount}</strong> 条</span>
+            </div>
+            <div className="result-item">
+              <CheckCircle size={16} className="result-icon success" />
+              <span>处理批次: <strong>{ltmResult.batchCount}</strong> / 处理记忆: <strong>{ltmResult.processedMemoryCount}</strong> 条</span>
+            </div>
+            <div className="result-item">
+              <Workflow size={16} className="result-icon success" />
+              <span>语义合并: <strong>{ltmResult.mergedCount}</strong> 条</span>
+            </div>
+            <div className="result-item">
+              <CheckCircle size={16} className="result-icon success" />
+              <span>保持独立: <strong>{ltmResult.keptSeparateCount}</strong> 条</span>
+            </div>
+            <div className="result-item">
+              <CheckCircle size={16} className="result-icon success" />
+              <span>孤立记忆直接完成: <strong>{ltmResult.skippedCount}</strong> 条</span>
+            </div>
+            <div className="result-item">
+              <CheckCircle size={16} className="result-icon success" />
+              <span>Embedding 成功/失败: <strong>{ltmResult.embeddingSuccessCount}</strong> / <strong>{ltmResult.embeddingFailureCount}</strong></span>
+            </div>
+            <div className="result-item">
+              <CheckCircle size={16} className="result-icon success" />
+              <span>LLM 决策成功/失败: <strong>{ltmResult.llmSuccessCount}</strong> / <strong>{ltmResult.llmFailureCount}</strong></span>
+            </div>
+            {(ltmResult.retryCount > 0 || ltmResult.candidateCount > 0) && (
+              <div className="result-item">
+                <CheckCircle size={16} className="result-icon success" />
+                <span>候选簇: <strong>{ltmResult.candidateCount}</strong> / 失败重试: <strong>{ltmResult.retryCount}</strong> 次</span>
+              </div>
+            )}
           </div>
         )}
       </Modal>

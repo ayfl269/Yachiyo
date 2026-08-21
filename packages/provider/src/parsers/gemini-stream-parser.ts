@@ -57,25 +57,25 @@ export async function* parseGeminiStream(
     const parts = chunk.candidates?.[0]?.content?.parts;
     if (parts) {
       for (const part of parts) {
-        // C-15 fix: Gemini's `part.thought` field has two distinct semantic
-        // shapes and the original truthy check conflated them:
-        //   1. string  → thought *itself* contains the reasoning content
-        //   2. boolean → mere flag indicating "this part is a thinking block";
-        //                it does NOT mean part.text should be treated as
-        //                reasoning. When thought===true, part.text is still
-        //                user-visible completion text.
-        // Previously `if (part.thought)` matched both shapes, so a boolean
-        // `true` flag caused part.text to be misclassified as reasoning and
-        // silently dropped from the user-visible completion. We now use
-        // strict type checks and only treat the string form as reasoning.
-        if (typeof part.thought === "string" && part.thought.length > 0) {
-          result.reasoningContent = part.thought;
-          hasContent = true;
-        }
-        if (part.text) {
-          // part.text is always user-visible completion, regardless of the
-          // thought flag.
-          result.completionText = part.text;
+        // `part.thought` marks a thinking part. The official Gemini API uses
+        // the boolean form: `thought: true` means part.text IS the model's
+        // reasoning (thought summary), NOT user-visible completion text.
+        // Some proxies use a string form where the thought text itself is in
+        // the `thought` field. Either way the content must be routed to
+        // reasoningContent — matching the non-streaming path in
+        // gemini-provider.ts. Routing boolean-flagged text into
+        // completionText leaks thinking content into user-visible replies.
+        if (part.thought) {
+          if (typeof part.thought === "string" && part.thought.length > 0) {
+            result.reasoningContent = (result.reasoningContent ?? "") + part.thought;
+            hasContent = true;
+          } else if (typeof part.text === "string" && part.text.length > 0) {
+            result.reasoningContent = (result.reasoningContent ?? "") + part.text;
+            hasContent = true;
+          }
+        } else if (typeof part.text === "string" && part.text.length > 0) {
+          // Only parts WITHOUT the thought flag are user-visible completion.
+          result.completionText = (result.completionText ?? "") + part.text;
           hasContent = true;
         }
         if (part.functionCall) {

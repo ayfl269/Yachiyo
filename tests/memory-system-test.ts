@@ -52,7 +52,11 @@ function runMigrations(db: Database.Database): void {
   for (const migration of MEMORY_MIGRATIONS) {
     const row = db.prepare("SELECT version FROM _migrations WHERE version = ?").get(migration.version) as any;
     if (!row) {
-      db.exec(migration.up);
+      if (typeof migration.up === "function") {
+        migration.up(db);
+      } else {
+        db.exec(migration.up);
+      }
       db.prepare("INSERT INTO _migrations (version, name) VALUES (?, ?)").run(migration.version, migration.name);
     }
   }
