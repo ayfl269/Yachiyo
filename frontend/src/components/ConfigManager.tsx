@@ -76,6 +76,8 @@ interface AgentConfig {
   fallbackMaxContextTokens: number
   temperature: number
   sessionWhitelistEnabled: boolean
+  // Platform tools: sensitive group admin write operations (ban/kick/notice...)
+  platformAdminToolsEnabled: boolean
 }
 
 interface Provider {
@@ -153,6 +155,8 @@ export default function ConfigManager() {
           for (const [key, value] of Object.entries(ltmDefaults)) {
             if (data[key] === undefined) data[key] = value
           }
+          // 旧配置缺失平台管理工具开关时补默认值
+          if (data.platformAdminToolsEnabled === undefined) data.platformAdminToolsEnabled = true
         }
         setConfig(data)
         setSafetyKeywordsStr(data?.safetyKeywords?.join(', ') || '')
@@ -773,6 +777,15 @@ export default function ConfigManager() {
                   id="sessionWhitelistEnabled"
                 />
                 <label htmlFor="sessionWhitelistEnabled">开启会话白名单 (仅白名单内会话获得响应)</label>
+              </div>
+              <div className="form-group row-checkbox">
+                <input
+                  type="checkbox"
+                  checked={config.platformAdminToolsEnabled ?? true}
+                  onChange={(e) => updateField('platformAdminToolsEnabled', e.target.checked)}
+                  id="platformAdminToolsEnabled"
+                />
+                <label htmlFor="platformAdminToolsEnabled">允许 Agent 执行群管理写操作 (禁言/踢人/群公告/精华等敏感操作)</label>
               </div>
               {config.sessionWhitelistEnabled && (
                 <>

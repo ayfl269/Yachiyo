@@ -256,6 +256,22 @@ export type {
   CreateSavePlatformFileToolOptions,
 } from "./save-platform-file-tool.js";
 
+// QQ (OneBot11) platform interaction tools
+export {
+  createQQPlatformTools,
+  createQQInteractTool,
+  createQQMessageTool,
+  createQQGroupQueryTool,
+  createQQGroupAdminTool,
+  QQ_GROUP_ADMIN_TOOL_NAME,
+} from "./qq-platform-tools.js";
+export type {
+  QQAdapterApi,
+  QQAdapterLookup,
+  QQToolContext,
+  CreateQQPlatformToolsOptions,
+} from "./qq-platform-tools.js";
+
 // Memory store
 export {
   SqliteMemoryStore,

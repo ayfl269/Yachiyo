@@ -79,6 +79,8 @@ export interface AgentConfig {
   temperature?: number;
   // Session whitelist: when enabled, only whitelisted UMOs get responses
   sessionWhitelistEnabled: boolean;
+  // Platform tools: expose sensitive group admin write operations (ban/kick/notice...) to the agent
+  platformAdminToolsEnabled: boolean;
 }
 
 export interface ConfigInfo {
@@ -276,6 +278,8 @@ export class ConfigManager {
       temperature: 0.7,
       // Session whitelist
       sessionWhitelistEnabled: false,
+      // Platform tools
+      platformAdminToolsEnabled: true,
     };
   }
 }

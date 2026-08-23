@@ -56,6 +56,14 @@ import { createSchedulerTool } from "@yachiyo/agent/scheduler-tool.js";
 import { backgroundTaskBus, type BackgroundTaskResult } from "@yachiyo/agent/tool-executor.js";
 import { createCrossPlatformSendTool } from "@yachiyo/agent/cross-platform-send-tool.js";
 import { createSavePlatformFileTool } from "@yachiyo/agent/save-platform-file-tool.js";
+import {
+  createQQPlatformTools,
+  createQQGroupAdminTool,
+  QQ_GROUP_ADMIN_TOOL_NAME,
+  type QQAdapterLookup,
+  type QQAdapterApi,
+} from "@yachiyo/agent/qq-platform-tools.js";
+import { OneBot11Adapter } from "@yachiyo/platform/implementations/onebot11-adapter.js";
 import { TaskScheduler } from "@yachiyo/pipeline/task-scheduler.js";
 import { ProviderType } from "@yachiyo/provider/types.js";
 import type { DashboardServer } from "@yachiyo/dashboard/server.js";
@@ -394,6 +402,40 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
   // 注册跨平台消息发送工具
   const crossPlatformSendTool = createCrossPlatformSendTool({ adapterLookup: adapterRegistry });
   toolManager.funcList.push(crossPlatformSendTool);
+
+  // 注册 QQ (OneBot11) 平台互动工具（戳一戳/表情回应/点赞/撤回/转发/群信息/群管理）
+  const qqAdapterLookup: QQAdapterLookup = {
+    getAdapter(id: string): QQAdapterApi | undefined {
+      const adapter = adapterRegistry.getAdapter(id);
+      // instanceof guard: only OneBot11 adapters expose the QQ API surface
+      return adapter instanceof OneBot11Adapter ? (adapter as unknown as QQAdapterApi) : undefined;
+    },
+  };
+  let qqAdminToolEnabled = activeConfig.platformAdminToolsEnabled ?? true;
+  for (const tool of createQQPlatformTools({
+    adapterLookup: qqAdapterLookup,
+    adminEnabled: qqAdminToolEnabled,
+  })) {
+    toolManager.funcList.push(tool);
+  }
+
+  // 配置变更时热增删敏感的群管理工具（关闭时从工具列表移除，模型不可见）
+  configManager.onChange((_configId: string, changeType: string) => {
+    if (changeType !== "update") return;
+    const cfg = configManager.getActiveConfig();
+    const enabled = cfg?.platformAdminToolsEnabled ?? true;
+    if (enabled === qqAdminToolEnabled) return;
+    qqAdminToolEnabled = enabled;
+    if (enabled) {
+      toolManager.funcList.push(
+        createQQGroupAdminTool({ adapterLookup: qqAdapterLookup, adminEnabled: true }),
+      );
+      console.log("[Bootstrap] qq_group_admin tool registered (platformAdminToolsEnabled=true).");
+    } else {
+      toolManager.removeFunc(QQ_GROUP_ADMIN_TOOL_NAME);
+      console.log("[Bootstrap] qq_group_admin tool removed (platformAdminToolsEnabled=false).");
+    }
+  });
 
   // 注册平台文件保存工具 (从消息平台下载文件到本地)
   const savePlatformFileTool = createSavePlatformFileTool({
