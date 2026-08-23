@@ -524,10 +524,11 @@ class OneBot11Event extends MessageEvent {
   async pokeSender(): Promise<void> {
     const userId = this.getExtra<number>("user_id") ?? Number(this.messageObj.sender.userId);
     const groupId = this.getExtra<number>("group_id");
+    // 走适配器方法以获得动作记录与 poke 回声登记
     if (groupId) {
-      await this.adapter!.callApiWithResponse("group_poke", { group_id: groupId, user_id: userId });
+      await this.adapter!.groupPoke(groupId, userId);
     } else {
-      await this.adapter!.callApiWithResponse("friend_poke", { user_id: userId });
+      await this.adapter!.friendPoke(userId);
     }
   }
 
@@ -574,6 +575,17 @@ export class OneBot11Adapter extends PlatformAdapter {
    * 事件不应作为用户消息进入 pipeline。
    */
   private selfQQ: number | null = null;
+
+  /**
+   * 最近 bot 主动发起的戳一戳登记（groupPoke/friendPoke 成功后写入）。
+   * NapCat 等实现的私聊 poke notice 会把 user_id/target_id 都填成会话
+   * 对端（无论谁发起），导致 user_id === selfQQ 无法识别 bot 回声。
+   * 用本登记表在回声到达时做二次匹配，避免产生"用户X 戳了 用户X"
+   * 的错误用户消息。
+   */
+  private recentBotPokes: Array<{ isGroup: boolean; groupId?: number; target: number; time: number }> = [];
+  /** 回声匹配窗口：poke notice 一般在 API 调用后数秒内到达 */
+  private static readonly BOT_POKE_ECHO_TTL_MS = 15_000;
 
   // ── API Response Correlation (echo-based) ──
   /** Pending API requests waiting for echo responses */
@@ -1183,20 +1195,19 @@ export class OneBot11Adapter extends PlatformAdapter {
         if (event.user_id == null) break; // malformed notice, ignore
         const selfQQ = this.resolveSelfQQ(event.self_id);
         const pokerId = Number(event.user_id);
+        // Bot 自己发起的戳一戳回声（标准实现：user_id = bot）。
+        // 动作记录已由 groupPoke/friendPoke 在 API 成功后写入会话
+        // 历史，此处仅丢弃回声：不合成"用户戳了戳"的错误用户消息
+        // （否则会让 bot 回应自己），也不重复记录。
         if (selfQQ != null && pokerId === selfQQ) {
-          // Bot 自己发起的戳一戳（如 agent 通过 qq_interact 工具触发）。
-          // 不转为消息触发新的 agent 运行（否则会产生"用户戳了戳用户"的
-          // 错误记录并让 bot 回应自己）；仅向会话历史追加一条 assistant
-          // 动作记录，让"我戳了谁"在对话数据中可追溯。
-          if (event.target_id != null) {
-            this.createBotActionNoteEvent(
-              `[戳一戳] 我戳了 用户${event.target_id}`,
-              event.group_id != null,
-              event.group_id != null ? Number(event.group_id) : Number(event.target_id),
-              Number(event.target_id),
-              ws,
-            );
-          }
+          return;
+        }
+        // NapCat 等实现的私聊 poke 事件把 user_id/target_id 都填成
+        // 会话对端（无论谁发起），bot 发起的回声呈 user_id === target_id
+        // 且都是被戳用户。与 recentBotPokes 匹配则丢弃。
+        if (event.target_id != null &&
+            pokerId === Number(event.target_id) &&
+            this.matchRecentBotPoke(event)) {
           return;
         }
         const pokeToMessage = this.config.pokeToMessage ?? true;
@@ -1204,7 +1215,14 @@ export class OneBot11Adapter extends PlatformAdapter {
           const isGroup = !!event.group_id;
           const sessionId = isGroup ? `group_${event.group_id}` : `private_${event.user_id}`;
           const pokerName = `用户${event.user_id}`;
-          const targetName = selfQQ != null && Number(event.target_id) === selfQQ ? "我" : `用户${event.target_id}`;
+          const targetIsSelf = selfQQ != null && Number(event.target_id) === selfQQ;
+          // 私聊里 user_id === target_id 且不匹配 recentBotPokes：实现把
+          // target 填成对端导致无法区分，按"用户戳我"处理（私聊会话里
+          // 戳一戳的对象只可能是 bot）。正常事件 target = bot。
+          const targetName = targetIsSelf ||
+              (!isGroup && event.target_id != null && pokerId === Number(event.target_id))
+            ? "我"
+            : `用户${event.target_id}`;
           const text = `[戳一戳] ${pokerName} 戳了 ${targetName}`;
           this.createSyntheticMessageEvent(text, sessionId, isGroup, event.user_id!, pokerName, ws);
         }
@@ -1370,8 +1388,8 @@ export class OneBot11Adapter extends PlatformAdapter {
    * 生成 `_botActionNote` 事件进入 pipeline：事件会等待会话锁，直到
    * 触发该动作的 agent 运行（saveRunHistory 重写历史）结束后才由
    * ProcessStage 追加为 assistant 动作记录，避免相互覆盖。
-   * 戳一戳除外——它由 poke notice 回声驱动记录（见 processNoticeEvent），
-   * 工具侧不再调用本方法，避免双重记录。
+   * 戳一戳由 groupPoke/friendPoke 内部记录（同时登记 recentBotPokes
+   * 用于丢弃 notice 回声），不经过本方法。
    */
   recordBotActionNote(umo: string, text: string): void {
     const match = umo.match(/^onebot11:(group|private):(.+)$/);
@@ -1682,14 +1700,49 @@ export class OneBot11Adapter extends PlatformAdapter {
     return this.callApiWithResponse("_get_group_notice", { group_id: groupId }) as Promise<Ob11GroupNoticeListResult>;
   }
 
-  /** 群内戳一戳 (napcat: group_poke) */
+  /** 群内戳一戳 (napcat: group_poke)。成功后向群会话记录动作并登记回声识别。 */
   async groupPoke(groupId: number, userId: number): Promise<void> {
     await this.callApiWithResponse("group_poke", { group_id: groupId, user_id: userId });
+    this.noteBotPoke(true, userId, groupId);
+    this.createBotActionNoteEvent(`[戳一戳] 我戳了 用户${userId}`, true, groupId, userId, this.getActiveWs());
   }
 
-  /** 好友戳一戳 (napcat: friend_poke) */
+  /** 好友戳一戳 (napcat: friend_poke)。成功后向该用户会话记录动作并登记回声识别。 */
   async friendPoke(userId: number): Promise<void> {
-    await this.callApiWithResponse("friend_poke", { user_id: userId });
+    // target_id 一并传给新版 NapCat（user_id/target_id 分离语义下更明确）
+    await this.callApiWithResponse("friend_poke", { user_id: userId, target_id: userId });
+    this.noteBotPoke(false, userId);
+    this.createBotActionNoteEvent(`[戳一戳] 我戳了 用户${userId}`, false, userId, userId, this.getActiveWs());
+  }
+
+  /** 登记 bot 主动发起的戳一戳（TTL 窗口内的回声匹配用） */
+  private noteBotPoke(isGroup: boolean, target: number, groupId?: number): void {
+    const now = Date.now();
+    this.recentBotPokes.push({ isGroup, groupId, target, time: now });
+    // 顺带清理过期项，防止数组无限增长
+    this.recentBotPokes = this.recentBotPokes.filter(
+      p => now - p.time <= OneBot11Adapter.BOT_POKE_ECHO_TTL_MS,
+    );
+  }
+
+  /**
+   * 判断 poke notice 是否与最近 bot 主动发起的戳一戳匹配（回声识别）。
+   * 仅在 user_id === target_id 时调用：NapCat 私聊 poke 会把两个字段
+   * 都填成会话对端，正常事件 poker ≠ target（QQ 也不允许戳自己）。
+   */
+  private matchRecentBotPoke(event: Ob11NoticeEvent): boolean {
+    const now = Date.now();
+    this.recentBotPokes = this.recentBotPokes.filter(
+      p => now - p.time <= OneBot11Adapter.BOT_POKE_ECHO_TTL_MS,
+    );
+    const targetId = Number(event.target_id);
+    const isGroup = event.group_id != null;
+    const groupId = isGroup ? Number(event.group_id) : undefined;
+    return this.recentBotPokes.some(p =>
+      p.isGroup === isGroup &&
+      p.target === targetId &&
+      (!isGroup || p.groupId === groupId),
+    );
   }
 
   /** 设置群头像 (set_group_portrait) */

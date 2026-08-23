@@ -404,6 +404,120 @@ async function main(): Promise<void> {
     await new Promise(r => setTimeout(r, 200));
   }
 
+  // ── Test: bot friendPoke → action note + NapCat private echo (user===target) dropped ──
+  console.log("\n=== Phase 4: bot friendPoke → note + private echo dropped ===");
+  {
+    const { adapter, server, eventQueue } = await createAdapterAndServer(port);
+
+    await drainEvents(eventQueue, 200);
+
+    // Bot 戳用户 888（私聊）
+    await adapter.friendPoke(888);
+
+    assert(server.lastReceivedAction === "friend_poke", "friendPoke should call friend_poke API");
+    assert(
+      server.lastReceivedParams?.user_id === 888 && server.lastReceivedParams?.target_id === 888,
+      "friend_poke params should include user_id and target_id",
+    );
+
+    const events = await drainEvents(eventQueue, 500);
+    assert(events.length === 1, "friendPoke should produce exactly one action note event");
+    const note = events[0];
+    assert(note.messageStr?.includes("我戳了 用户888"), "Note should record bot poking the user");
+    assert(note.getExtra<boolean>("_botActionNote") === true, "Note should carry _botActionNote flag");
+    assert(note.messageObj.sessionId === "private_888", "Note should go to the private session with the target");
+
+    // NapCat 私聊回声：user_id === target_id === 被戳用户 → 丢弃，不合成用户消息
+    server.broadcast({
+      post_type: "notice",
+      notice_type: "poke",
+      user_id: 888,
+      target_id: 888,
+      time: Math.floor(Date.now() / 1000),
+      self_id: 999,
+    });
+
+    const echo = await drainEvents(eventQueue, 500);
+    assert(echo.length === 0, "Bot-initiated private poke echo (user===target) should be dropped");
+
+    await adapter.stop();
+    await server.close();
+    await new Promise(r => setTimeout(r, 200));
+  }
+
+  // ── Test: private poke with user===target but no bot poke record → treated as user poking bot ──
+  console.log("\n=== Phase 4: ambiguous private poke without bot record ===");
+  {
+    const { adapter, server, eventQueue } = await createAdapterAndServer(port);
+
+    await drainEvents(eventQueue, 200);
+
+    server.broadcast({
+      post_type: "notice",
+      notice_type: "poke",
+      user_id: 777,
+      target_id: 777,
+      time: Math.floor(Date.now() / 1000),
+      self_id: 999,
+    });
+
+    const events = await drainEvents(eventQueue, 500);
+    assert(events.length === 1, "Should produce one synthetic message");
+    assert(
+      events[0].messageStr?.includes("用户777 戳了 我"),
+      "Ambiguous private poke (user===target, no bot record) should be treated as user poking bot",
+    );
+
+    await adapter.stop();
+    await server.close();
+    await new Promise(r => setTimeout(r, 200));
+  }
+
+  // ── Test: bot groupPoke → action note + both echo variants dropped ──
+  console.log("\n=== Phase 4: bot groupPoke → note + echoes dropped ===");
+  {
+    const { adapter, server, eventQueue } = await createAdapterAndServer(port);
+
+    await drainEvents(eventQueue, 200);
+
+    await adapter.groupPoke(555555, 666);
+
+    const events = await drainEvents(eventQueue, 500);
+    assert(events.length === 1, "groupPoke should produce exactly one action note event");
+    assert(events[0].messageStr?.includes("我戳了 用户666"), "Group poke note should record the target");
+    assert(events[0].messageObj.sessionId === "group_555555", "Group poke note should go to the group session");
+
+    // 异常回声（user === target）→ 丢弃
+    server.broadcast({
+      post_type: "notice",
+      notice_type: "poke",
+      group_id: 555555,
+      user_id: 666,
+      target_id: 666,
+      time: Math.floor(Date.now() / 1000),
+      self_id: 999,
+    });
+    const echo1 = await drainEvents(eventQueue, 500);
+    assert(echo1.length === 0, "Bot group poke echo (user===target) should be dropped");
+
+    // 标准回声（user_id = bot）→ 丢弃
+    server.broadcast({
+      post_type: "notice",
+      notice_type: "poke",
+      group_id: 555555,
+      user_id: 999,
+      target_id: 666,
+      time: Math.floor(Date.now() / 1000),
+      self_id: 999,
+    });
+    const echo2 = await drainEvents(eventQueue, 500);
+    assert(echo2.length === 0, "Bot group poke echo (user=bot) should be dropped");
+
+    await adapter.stop();
+    await server.close();
+    await new Promise(r => setTimeout(r, 200));
+  }
+
   // ── Test: group_upload → synthetic message with file ──
   console.log("\n=== Phase 4: group_upload → synthetic message ===");
   {

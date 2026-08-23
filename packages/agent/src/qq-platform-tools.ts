@@ -279,8 +279,8 @@ export function createQQInteractTool(
       try {
         switch (action) {
           case "poke": {
-            // 动作记录由 poke notice 回声驱动（onebot11-adapter 的
-            // processNoticeEvent），此处不再记录，避免双重记录。
+            // 动作记录与回声去重由适配器的 groupPoke/friendPoke 在 API
+            // 成功后统一处理（写入会话历史 + 登记 recentBotPokes 丢弃回声）。
             const target = userId ?? ctx.userId;
             if (target == null) {
               return formatError("poke: no target user_id (no current sender context and none provided).");
