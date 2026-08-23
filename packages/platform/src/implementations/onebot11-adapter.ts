@@ -568,6 +568,12 @@ export class OneBot11Adapter extends PlatformAdapter {
   private reverseWs: WebSocket | null = null;
   private reverseReconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private startTime: number = 0;
+  /**
+   * Bot 自身 QQ 号（从 get_login_info / 消息事件的 self_id 被动跟踪）。
+   * 用于识别 bot 自己发起的交互（如通过工具触发的戳一戳），其 notice
+   * 事件不应作为用户消息进入 pipeline。
+   */
+  private selfQQ: number | null = null;
 
   // ── API Response Correlation (echo-based) ──
   /** Pending API requests waiting for echo responses */
@@ -586,6 +592,41 @@ export class OneBot11Adapter extends PlatformAdapter {
 
   async initialize(): Promise<void> {
     await super.initialize();
+  }
+
+  /** 记录观察到的 bot 自身 QQ 号（来自事件 self_id 字段） */
+  private trackSelfQQ(rawSelfId: unknown): void {
+    const n = Number(rawSelfId);
+    if (Number.isFinite(n) && n > 0) {
+      this.selfQQ = n;
+    }
+  }
+
+  /**
+   * 解析 bot 自身 QQ 号：优先用事件内 self_id（同时更新跟踪值），
+   * 缺失/非法时回退到已跟踪值（get_login_info 或历史事件提供）。
+   * 注意用 Number() 强转——部分 OneBot 实现将 self_id 序列化为字符串。
+   */
+  private resolveSelfQQ(eventSelfId?: unknown): number | null {
+    const n = Number(eventSelfId);
+    if (Number.isFinite(n) && n > 0) {
+      this.selfQQ = n;
+      return n;
+    }
+    return this.selfQQ;
+  }
+
+  /** WS 连接建立后主动查询登录号，确保 selfQQ 在收到任何事件前就可用 */
+  private async refreshSelfQQ(): Promise<void> {
+    try {
+      const info = await this.callApiWithResponse("get_login_info", {}) as Ob11LoginInfo;
+      if (info && Number.isFinite(Number(info.user_id))) {
+        this.selfQQ = Number(info.user_id);
+        console.info(`[OneBot11] Login identity resolved: bot QQ=${this.selfQQ}`);
+      }
+    } catch {
+      // get_login_info 失败不致命：后续会从消息事件的 self_id 被动跟踪
+    }
   }
 
   async run(): Promise<void> {
@@ -946,6 +987,9 @@ export class OneBot11Adapter extends PlatformAdapter {
   // ── WS Message Handler (shared by forward & reverse) ──
 
   private setupWsHandler(ws: WebSocket): void {
+    // 连接建立后主动解析 bot 登录号（用于识别 bot 自己发起的交互）
+    void this.refreshSelfQQ();
+
     ws.on("message", (raw: Buffer) => {
       try {
         const data = JSON.parse(raw.toString());
@@ -1041,6 +1085,7 @@ export class OneBot11Adapter extends PlatformAdapter {
     const platformMsg = new PlatformMessage();
     platformMsg.type = messageType;
     platformMsg.selfId = String(msg.self_id);
+    this.trackSelfQQ(msg.self_id);
     platformMsg.sessionId = sessionId;
     platformMsg.messageId = String(msg.message_id);
     platformMsg.sender = {
@@ -1135,13 +1180,31 @@ export class OneBot11Adapter extends PlatformAdapter {
       }
       case "poke": {
         // Both group and private pokes
-        if (event.user_id === event.self_id) return; // self poke, ignore
+        if (event.user_id == null) break; // malformed notice, ignore
+        const selfQQ = this.resolveSelfQQ(event.self_id);
+        const pokerId = Number(event.user_id);
+        if (selfQQ != null && pokerId === selfQQ) {
+          // Bot 自己发起的戳一戳（如 agent 通过 qq_interact 工具触发）。
+          // 不转为消息触发新的 agent 运行（否则会产生"用户戳了戳用户"的
+          // 错误记录并让 bot 回应自己）；仅向会话历史追加一条 assistant
+          // 动作记录，让"我戳了谁"在对话数据中可追溯。
+          if (event.target_id != null) {
+            this.createBotActionNoteEvent(
+              `[戳一戳] 我戳了 用户${event.target_id}`,
+              event.group_id != null,
+              event.group_id != null ? Number(event.group_id) : Number(event.target_id),
+              Number(event.target_id),
+              ws,
+            );
+          }
+          return;
+        }
         const pokeToMessage = this.config.pokeToMessage ?? true;
         if (pokeToMessage) {
           const isGroup = !!event.group_id;
           const sessionId = isGroup ? `group_${event.group_id}` : `private_${event.user_id}`;
           const pokerName = `用户${event.user_id}`;
-          const targetName = event.target_id === event.self_id ? "我" : `用户${event.target_id}`;
+          const targetName = selfQQ != null && Number(event.target_id) === selfQQ ? "我" : `用户${event.target_id}`;
           const text = `[戳一戳] ${pokerName} 戳了 ${targetName}`;
           this.createSyntheticMessageEvent(text, sessionId, isGroup, event.user_id!, pokerName, ws);
         }
@@ -1220,7 +1283,9 @@ export class OneBot11Adapter extends PlatformAdapter {
   ): void {
     const platformMsg = new PlatformMessage();
     platformMsg.type = isGroup ? MessageType.GROUP_MESSAGE : MessageType.FRIEND_MESSAGE;
-    platformMsg.selfId = this.meta().id;
+    // selfId 必须是 bot QQ 号（而非适配器实例 id），唤醒检查依赖
+    // sender === self 识别并丢弃 bot 自身发出的消息
+    platformMsg.selfId = this.selfQQ != null ? String(this.selfQQ) : this.meta().id;
     platformMsg.sessionId = sessionId;
     platformMsg.messageId = `synthetic_${Date.now()}`;
     platformMsg.sender = { userId: String(userId), nickname };
@@ -1246,6 +1311,54 @@ export class OneBot11Adapter extends PlatformAdapter {
       event.setExtra("group_id", groupId);
     }
     event.setExtra("user_id", userId);
+
+    this.commitEvent(event);
+  }
+
+  /**
+   * 创建 bot 动作记录事件（如 bot 自己发起的戳一戳）。
+   *
+   * 该事件不会触发 agent 运行：Pipeline 的 ProcessStage 检测到
+   * `_botActionNote` 标记后，仅把 messageStr 作为 assistant 动作记录
+   * 追加到对应会话的历史中（群聊 = 该群会话；私聊 = 与被戳用户的会话），
+   * 随后直接结束。这样"我戳了谁"在对话数据中可追溯，同时不会产生
+   * "用户戳了戳用户"的错误用户消息、也不会让 bot 回应自己。
+   */
+  private createBotActionNoteEvent(
+    text: string,
+    isGroup: boolean,
+    /** 群聊: 群号; 私聊: 对方 QQ 号 */
+    peerId: number,
+    /** 动作对象（被戳的用户） */
+    targetUserId: number,
+    ws: WebSocket,
+  ): void {
+    const platformMsg = new PlatformMessage();
+    platformMsg.type = isGroup ? MessageType.GROUP_MESSAGE : MessageType.FRIEND_MESSAGE;
+    platformMsg.selfId = this.selfQQ != null ? String(this.selfQQ) : this.meta().id;
+    platformMsg.sessionId = isGroup ? `group_${peerId}` : `private_${peerId}`;
+    platformMsg.messageId = `bot_action_${Date.now()}`;
+    // sender 设为动作对象：私聊 umo 按 sender 计算（onebot11:private:{sender}），
+    // 这样动作记录会落在与被戳用户的会话上，而不是 bot 自己的会话
+    platformMsg.sender = { userId: String(targetUserId), nickname: `用户${targetUserId}` };
+    platformMsg.messageStr = text;
+    platformMsg.components = [{
+      type: ComponentType.Plain,
+      text,
+      toDict() { return { type: "text", data: { text } }; },
+    } as PlainComponent];
+    platformMsg.timestamp = Date.now();
+
+    const event = new OneBot11Event(text, platformMsg, platformMsg.sessionId, this.meta());
+    event.setWebSocket(ws);
+    event.setAdapter(this);
+    // isSystem: 绕过唤醒检查（动作记录事件不需要唤醒判定，直接进入 ProcessStage）
+    event.isSystem = true;
+    event.setExtra("_botActionNote", true);
+    if (isGroup) {
+      event.setExtra("group_id", peerId);
+    }
+    event.setExtra("user_id", targetUserId);
 
     this.commitEvent(event);
   }

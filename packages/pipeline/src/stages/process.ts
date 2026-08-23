@@ -36,6 +36,25 @@ export class ProcessStage extends PipelineStage {
     if (!hasValidMessage && !hasMediaContent) return;
 
     try {
+      // Bot 平台动作记录（如 agent 通过工具发起的戳一戳）：
+      // 仅把动作描述作为 assistant 记录追加到会话历史，不触发 agent 运行、
+      // 不触发 agent 生命周期钩子（OnAgentBegin/Done）、不发送任何回复。
+      // 获取会话锁确保与触发该动作的 agent 运行（saveRunHistory 整体
+      // 重写历史）串行，避免相互覆盖。
+      if (event.getExtra<boolean>("_botActionNote")) {
+        const releaseNoteLock = await this.ctx.sessionLockManager.acquireLock(event.unifiedMsgOrigin);
+        try {
+          const note = (event.messageStr ?? "").trim();
+          if (note) {
+            const { convId, umo } = await this.resolveConversation(event);
+            await this.saveAssistantMessage(umo, convId, note);
+          }
+          return;
+        } finally {
+          releaseNoteLock();
+        }
+      }
+
       try { await event.sendTyping(); } catch { /* ignore */ }
 
       await this.ctx.callEventHook(event, EventType.OnAgentBeginEvent);
@@ -397,7 +416,8 @@ export class ProcessStage extends PipelineStage {
     }
   }
 
-  private async saveUserMessage(event: MessageEvent): Promise<{ convId: string; umo: string }> {
+  /** 解析（必要时创建）当前会话，返回 { convId, umo } */
+  private async resolveConversation(event: MessageEvent): Promise<{ convId: string; umo: string }> {
     const umo = event.unifiedMsgOrigin;
     let convId = await this.ctx.conversationManager.getCurrConversationId(umo);
     let conv = convId ? await this.ctx.conversationManager.getConversation(umo, convId) : null;
@@ -409,8 +429,14 @@ export class ProcessStage extends PipelineStage {
 
     if (!convId || !conv) {
       convId = await this.ctx.conversationManager.newConversation(umo);
-      conv = await this.ctx.conversationManager.getConversation(umo, convId);
     }
+
+    return { convId, umo };
+  }
+
+  private async saveUserMessage(event: MessageEvent): Promise<{ convId: string; umo: string }> {
+    const { convId, umo } = await this.resolveConversation(event);
+    const conv = await this.ctx.conversationManager.getConversation(umo, convId);
 
     // System-generated events (e.g. proactive reminders) carry internal
     // instructions in messageStr that should NOT be persisted to the user's
