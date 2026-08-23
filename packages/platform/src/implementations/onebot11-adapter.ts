@@ -1316,22 +1316,22 @@ export class OneBot11Adapter extends PlatformAdapter {
   }
 
   /**
-   * 创建 bot 动作记录事件（如 bot 自己发起的戳一戳）。
+   * 创建 bot 动作记录事件（如 bot 自己发起的戳一戳、工具触发的表情回应）。
    *
    * 该事件不会触发 agent 运行：Pipeline 的 ProcessStage 检测到
    * `_botActionNote` 标记后，仅把 messageStr 作为 assistant 动作记录
-   * 追加到对应会话的历史中（群聊 = 该群会话；私聊 = 与被戳用户的会话），
-   * 随后直接结束。这样"我戳了谁"在对话数据中可追溯，同时不会产生
-   * "用户戳了戳用户"的错误用户消息、也不会让 bot 回应自己。
+   * 追加到对应会话的历史中（群聊 = 该群会话；私聊 = 与对方的会话），
+   * 随后直接结束。这样"我做了什么"在对话数据中可追溯，同时不会产生
+   * "用户戳了戳用户"之类的错误用户消息、也不会让 bot 回应自己。
    */
   private createBotActionNoteEvent(
     text: string,
     isGroup: boolean,
     /** 群聊: 群号; 私聊: 对方 QQ 号 */
     peerId: number,
-    /** 动作对象（被戳的用户） */
+    /** 动作对象用户（仅影响私聊 umo 计算与 user_id extra） */
     targetUserId: number,
-    ws: WebSocket,
+    ws: WebSocket | null,
   ): void {
     const platformMsg = new PlatformMessage();
     platformMsg.type = isGroup ? MessageType.GROUP_MESSAGE : MessageType.FRIEND_MESSAGE;
@@ -1350,7 +1350,7 @@ export class OneBot11Adapter extends PlatformAdapter {
     platformMsg.timestamp = Date.now();
 
     const event = new OneBot11Event(text, platformMsg, platformMsg.sessionId, this.meta());
-    event.setWebSocket(ws);
+    if (ws) event.setWebSocket(ws);
     event.setAdapter(this);
     // isSystem: 绕过唤醒检查（动作记录事件不需要唤醒判定，直接进入 ProcessStage）
     event.isSystem = true;
@@ -1361,6 +1361,33 @@ export class OneBot11Adapter extends PlatformAdapter {
     event.setExtra("user_id", targetUserId);
 
     this.commitEvent(event);
+  }
+
+  /**
+   * 记录一次 bot 主动发起的平台动作到指定会话的历史（供 agent 的 QQ
+   * 工具在变更类 API 调用成功后调用，如表情回应/点赞/撤回/群管理操作）。
+   *
+   * 生成 `_botActionNote` 事件进入 pipeline：事件会等待会话锁，直到
+   * 触发该动作的 agent 运行（saveRunHistory 重写历史）结束后才由
+   * ProcessStage 追加为 assistant 动作记录，避免相互覆盖。
+   * 戳一戳除外——它由 poke notice 回声驱动记录（见 processNoticeEvent），
+   * 工具侧不再调用本方法，避免双重记录。
+   */
+  recordBotActionNote(umo: string, text: string): void {
+    const match = umo.match(/^onebot11:(group|private):(.+)$/);
+    if (!match) {
+      console.warn(`[OneBot11] recordBotActionNote: unrecognized umo "${umo}"`);
+      return;
+    }
+    const isGroup = match[1] === "group";
+    const peerId = Number(match[2]);
+    if (!Number.isFinite(peerId) || peerId <= 0) {
+      console.warn(`[OneBot11] recordBotActionNote: invalid peer id in umo "${umo}"`);
+      return;
+    }
+    // 群聊时 sender 不影响 umo（按群计算）；私聊时 sender 必须是对方，
+    // 记录才能落到与该用户的会话上——两种情况下传 peerId 均正确。
+    this.createBotActionNoteEvent(text, isGroup, peerId, peerId, this.getActiveWs());
   }
 
   private formatFileSize(bytes: number): string {

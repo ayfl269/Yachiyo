@@ -70,6 +70,14 @@ class MockNapcatServer {
         if (echoHandler) {
           echoHandler(msg);
           this.pendingEchoMap.delete(msg.echo);
+          return;
+        }
+
+        // Default: always answer get_login_info (the adapter queries it on
+        // connect to resolve its own QQ). Without this the request pends for
+        // the full 30s API timeout and pollutes pendingRequests assertions.
+        if (!this.messageHandler && msg.action === "get_login_info") {
+          this.broadcast({ echo: msg.echo, retcode: 0, data: { user_id: 10000, nickname: "MockBot" }, status: "ok", msg: "ok" });
         }
       });
     });

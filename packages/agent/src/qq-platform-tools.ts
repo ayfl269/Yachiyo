@@ -77,6 +77,13 @@ export interface QQAdapterApi {
   sendGroupNotice(groupId: number, content: string, image?: string): Promise<void>;
   setEssenceMsg(messageId: number | string): Promise<void>;
   deleteEssenceMsg(messageId: number | string): Promise<void>;
+
+  /**
+   * Record a completed bot-initiated action as an assistant note in the
+   * target conversation's history (used by mutating tool actions so the
+   * bot's own actions remain traceable in conversation data).
+   */
+  recordBotActionNote(umo: string, text: string): void;
 }
 
 export interface QQAdapterLookup {
@@ -183,6 +190,16 @@ function apiError(action: string, e: unknown): CallToolResult {
   return formatError(`QQ API call failed (action: ${action}): ${detail}`);
 }
 
+/**
+ * Record a completed bot action into the current session's conversation
+ * history (no-op when there is no session context, e.g. subagent calls).
+ * The note waits on the session lock and is appended after the triggering
+ * agent run finishes — see OneBot11Adapter.recordBotActionNote.
+ */
+function recordAction(adapter: QQAdapterApi, ctx: QQToolContext, text: string): void {
+  if (ctx.umo) adapter.recordBotActionNote(ctx.umo, text);
+}
+
 /** Format a forward-message / arbitrary segment list into readable lines. */
 function formatSegments(messages: unknown): string {
   if (!Array.isArray(messages)) return JSON.stringify(messages);
@@ -262,6 +279,8 @@ export function createQQInteractTool(
       try {
         switch (action) {
           case "poke": {
+            // 动作记录由 poke notice 回声驱动（onebot11-adapter 的
+            // processNoticeEvent），此处不再记录，避免双重记录。
             const target = userId ?? ctx.userId;
             if (target == null) {
               return formatError("poke: no target user_id (no current sender context and none provided).");
@@ -283,6 +302,7 @@ export function createQQInteractTool(
               return formatError("emoji_like: emoji_id is required (e.g. \"76\" for thumbs up).");
             }
             await adapter.setMsgEmojiLike(msgId, emojiId);
+            recordAction(adapter, ctx, `[表情回应] 我给消息 ${msgId} 贴了表情 ${emojiId}`);
             return formatText(`Reacted to message ${msgId} with emoji ${emojiId}.`);
           }
 
@@ -293,6 +313,7 @@ export function createQQInteractTool(
             }
             const n = Math.min(20, Math.max(1, times ?? 1));
             await adapter.sendLike(target, n);
+            recordAction(adapter, ctx, `[点赞] 我赞了 用户${target} 的资料 ${n} 次`);
             return formatText(`Liked user ${target}'s QQ profile ${n} time(s).`);
           }
 
@@ -405,6 +426,7 @@ export function createQQMessageTool(
               );
             }
             await adapter.deleteMsg(msgId);
+            recordAction(adapter, ctx, `[撤回] 我撤回了消息 ${msgId}`);
             return formatText(`Recalled message ${msgId}.`);
           }
 
@@ -462,12 +484,16 @@ export function createQQMessageTool(
               ...(n.nickname != null ? { nickname: String(n.nickname) } : {}),
               content: [{ type: "text", data: { text: String(n.content ?? "") } }],
             }));
+            const preview = rawNodes.map((n) => String(n.content ?? "")).filter(Boolean).join(" / ").slice(0, 120);
+            const note = `[合并转发] 我发送了 ${nodes.length} 条合并转发消息${preview ? `: ${preview}` : ""}`;
             if (ctx.groupId != null) {
               const result = await adapter.sendGroupForwardMsg(ctx.groupId, nodes);
+              recordAction(adapter, ctx, note);
               return formatText(`Sent merged-forward message (${nodes.length} nodes) to group ${ctx.groupId}. ${JSON.stringify(result ?? {})}`);
             }
             if (ctx.userId != null) {
               const result = await adapter.sendPrivateForwardMsg(ctx.userId, nodes);
+              recordAction(adapter, ctx, note);
               return formatText(`Sent merged-forward message (${nodes.length} nodes) to user ${ctx.userId}. ${JSON.stringify(result ?? {})}`);
             }
             return formatError("send_forward: no current group/user session context.");
@@ -696,18 +722,23 @@ export function createQQGroupAdminTool(
             if (userId == null) return formatError("ban: user_id is required.");
             const d = duration ?? 1800;
             await adapter.setGroupBan(gid!, userId, d);
+            recordAction(adapter, ctx, d === 0
+              ? `[禁言] 我解除了 用户${userId} 在群 ${gid} 的禁言`
+              : `[禁言] 我禁言了 用户${userId} ${d} 秒（群 ${gid}）`);
             return formatText(d === 0 ? `Unmuted user ${userId} in group ${gid}.` : `Muted user ${userId} in group ${gid} for ${d} seconds.`);
           }
 
           case "whole_ban": {
             const en = enable ?? true;
             await adapter.setGroupWholeBan(gid!, en);
+            recordAction(adapter, ctx, `[禁言] 我${en ? "开启" : "关闭"}了群 ${gid} 的全群禁言`);
             return formatText(`${en ? "Enabled" : "Disabled"} whole-group mute in group ${gid}.`);
           }
 
           case "kick": {
             if (userId == null) return formatError("kick: user_id is required.");
             await adapter.setGroupKick(gid!, userId, rejectAdd ?? false);
+            recordAction(adapter, ctx, `[踢出] 我将 用户${userId} 移出了群 ${gid}`);
             return formatText(`Kicked user ${userId} from group ${gid}.`);
           }
 
@@ -715,12 +746,14 @@ export function createQQGroupAdminTool(
             if (userId == null) return formatError("set_card: user_id is required.");
             if (card == null) return formatError("set_card: card is required (empty string clears it).");
             await adapter.setGroupCard(gid!, userId, card);
+            recordAction(adapter, ctx, `[群名片] 我将 用户${userId} 在群 ${gid} 的群名片设为 "${card}"`);
             return formatText(`Set group card of user ${userId} in group ${gid} to "${card}".`);
           }
 
           case "set_name": {
             if (!groupName) return formatError("set_name: group_name is required.");
             await adapter.setGroupName(gid!, groupName);
+            recordAction(adapter, ctx, `[群改名] 我将群 ${gid} 改名为 "${groupName}"`);
             return formatText(`Renamed group ${gid} to "${groupName}".`);
           }
 
@@ -728,6 +761,7 @@ export function createQQGroupAdminTool(
             if (userId == null) return formatError("set_admin: user_id is required.");
             const en = enable ?? true;
             await adapter.setGroupAdmin(gid!, userId, en);
+            recordAction(adapter, ctx, `[管理员] 我${en ? "设置" : "取消了"} 用户${userId} 在群 ${gid} 的管理员权限`);
             return formatText(`${en ? "Promoted" : "Revoked admin of"} user ${userId} in group ${gid}.`);
           }
 
@@ -735,29 +769,34 @@ export function createQQGroupAdminTool(
             if (userId == null) return formatError("set_special_title: user_id is required.");
             if (specialTitle == null) return formatError("set_special_title: special_title is required.");
             await adapter.setGroupSpecialTitle(gid!, userId, specialTitle);
+            recordAction(adapter, ctx, `[头衔] 我将 用户${userId} 在群 ${gid} 的头衔设为 "${specialTitle}"`);
             return formatText(`Set special title of user ${userId} in group ${gid} to "${specialTitle}".`);
           }
 
           case "notice": {
             if (content == null || content.trim() === "") return formatError("notice: content is required.");
             await adapter.sendGroupNotice(gid!, content, image);
+            recordAction(adapter, ctx, `[群公告] 我在群 ${gid} 发布了公告: ${truncate(content, 100)}`);
             return formatText(`Published group announcement to group ${gid}.`);
           }
 
           case "essence": {
             if (messageId == null) return formatError("essence: message_id is required.");
             await adapter.setEssenceMsg(messageId);
+            recordAction(adapter, ctx, `[精华] 我将消息 ${messageId} 设为精华`);
             return formatText(`Marked message ${messageId} as essence.`);
           }
 
           case "cancel_essence": {
             if (messageId == null) return formatError("cancel_essence: message_id is required.");
             await adapter.deleteEssenceMsg(messageId);
+            recordAction(adapter, ctx, `[精华] 我将消息 ${messageId} 移出了精华`);
             return formatText(`Removed message ${messageId} from essence.`);
           }
 
           case "leave": {
             await adapter.setGroupLeave(gid!, isDismiss ?? false);
+            recordAction(adapter, ctx, `[退群] 我退出了群 ${gid}${isDismiss ? "（并解散）" : ""}`);
             return formatText(`Left group ${gid}${isDismiss ? " (dismissed)" : ""}.`);
           }
 

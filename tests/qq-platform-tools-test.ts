@@ -90,6 +90,7 @@ function createMockAdapter(overrides: Partial<Record<string, () => unknown>> = {
     sendGroupNotice: async (groupId: number, content: string, image?: string) => { calls.push({ method: "sendGroupNotice", args: [groupId, content, image] }); },
     setEssenceMsg: async (messageId: number | string) => { calls.push({ method: "setEssenceMsg", args: [messageId] }); },
     deleteEssenceMsg: async (messageId: number | string) => { calls.push({ method: "deleteEssenceMsg", args: [messageId] }); },
+    recordBotActionNote: (umo: string, text: string) => { calls.push({ method: "recordBotActionNote", args: [umo, text] }); },
     ...overrides,
   };
   return { adapter: adapter as unknown as QQAdapterApi, calls };
@@ -229,11 +230,19 @@ async function main() {
     calls.length = 0;
     await callTool(interact, createPrivateContext(), "poke");
     assert(calls[0].method === "friendPoke" && calls[0].args[0] === 888, "私聊 poke → friendPoke");
+    // poke 不走工具侧记录（由 poke notice 回声驱动，避免双重记录）
+    assert(!calls.some(c => c.method === "recordBotActionNote"), "poke 不在工具侧记录动作");
 
     // emoji_like 默认当前消息
     calls.length = 0;
     await callTool(interact, createEventContext(), "emoji_like", undefined, undefined, "76");
     assert(calls[0].method === "setMsgEmojiLike" && calls[0].args[0] === 777 && calls[0].args[1] === "76", "emoji_like 默认当前消息 + emoji_id");
+    assert(calls[1].method === "recordBotActionNote" && calls[1].args[0] === "onebot11:group:12345" && String(calls[1].args[1]).includes("表情回应"), "emoji_like 记录动作到群会话历史");
+
+    // emoji_like 私聊 → 记录落到对应私聊会话
+    calls.length = 0;
+    await callTool(interact, createPrivateContext(), "emoji_like", undefined, undefined, "76");
+    assert(calls[1].method === "recordBotActionNote" && calls[1].args[0] === "onebot11:private:888", "emoji_like 私聊记录落到私聊会话");
 
     // emoji_like 缺 emoji_id
     r = await callTool(interact, createEventContext(), "emoji_like");
@@ -243,11 +252,13 @@ async function main() {
     calls.length = 0;
     await callTool(interact, createEventContext(), "like", undefined, undefined, undefined, 99);
     assert(calls[0].method === "sendLike" && calls[0].args[0] === 888 && calls[0].args[1] === 20, "like 默认当前发送者，times 钳制到 20");
+    assert(calls[1].method === "recordBotActionNote" && String(calls[1].args[1]).includes("点赞"), "like 记录动作到会话历史");
 
     // mark_read 群/私聊
     calls.length = 0;
     await callTool(interact, createEventContext(), "mark_read");
     assert(calls[0].method === "markGroupMsgAsRead" && calls[0].args[0] === 12345, "mark_read 群会话");
+    assert(!calls.some(c => c.method === "recordBotActionNote"), "mark_read 不记录动作");
     calls.length = 0;
     await callTool(interact, createPrivateContext(), "mark_read");
     assert(calls[0].method === "markPrivateMsgAsRead" && calls[0].args[0] === 888, "mark_read 私聊会话");
@@ -267,6 +278,7 @@ async function main() {
     // recall 默认撤回自己上一条
     let r = await callTool(message, groupCtx, "recall");
     assert(calls[0].method === "deleteMsg" && calls[0].args[0] === 555, "recall 默认撤回 bot 上一条回复");
+    assert(calls[1].method === "recordBotActionNote" && String(calls[1].args[1]).includes("撤回"), "recall 记录动作到会话历史");
 
     // recall 指定 message_id
     calls.length = 0;
@@ -308,6 +320,7 @@ async function main() {
     const nodes = calls[0].args[1] as Array<{ nickname?: string; content: Array<{ type: string; data: { text: string } }> }>;
     assert(nodes.length === 2 && nodes[0].nickname === "小明" && nodes[0].content[0].data.text === "第一条", "节点转换为 nickname + text segment");
     assert(nodes[1].nickname === undefined, "未提供 nickname 的节点不带 nickname 字段");
+    assert(calls[1].method === "recordBotActionNote" && String(calls[1].args[1]).includes("合并转发") && String(calls[1].args[1]).includes("第一条"), "send_forward 记录动作与内容概要到会话历史");
 
     // send_forward 私聊
     calls.length = 0;
@@ -374,6 +387,7 @@ async function main() {
     // ban 默认 duration
     let r = await callTool(admin, groupCtx, ...adminArgs({ action: "ban", user_id: 666, duration: 600 }));
     assert(calls[0].method === "setGroupBan" && calls[0].args[0] === 12345 && calls[0].args[1] === 666 && calls[0].args[2] === 600, "ban 默认当前群 + duration 透传");
+    assert(calls[1].method === "recordBotActionNote" && String(calls[1].args[1]).includes("禁言") && String(calls[1].args[1]).includes("600"), "ban 记录动作到会话历史");
 
     // ban duration=0 解禁
     calls.length = 0;
