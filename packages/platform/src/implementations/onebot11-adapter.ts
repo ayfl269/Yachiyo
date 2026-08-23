@@ -419,9 +419,14 @@ class OneBot11Event extends MessageEvent {
 
     params.message = this.componentsToOB11(components);
 
+    if (!this.adapter) {
+      console.warn("[OneBot11] Cannot send reply: adapter reference not set");
+      return;
+    }
+
     // Use response-awaited call to get message_id; fall back to fire-and-forget
     try {
-      const result = await this.adapter?.callApiWithResponse(action, params);
+      const result = await this.adapter.callApiWithResponse(action, params);
       if (result && typeof result === "object" && "message_id" in result) {
         this.setExtra("sent_message_id", (result as Ob11SendMsgResult).message_id);
       }
@@ -839,6 +844,9 @@ export class OneBot11Adapter extends PlatformAdapter {
           segments.push({ type: "at", data: { qq: atComp.qq ?? "all" } });
           break;
         }
+        case ComponentType.Reply:
+          segments.push({ type: "reply", data: { id: (comp as { messageId?: string }).messageId ?? "" } });
+          break;
         default:
           segments.push({ type: "text", data: { text: (comp as PlainComponent).text ?? JSON.stringify(comp.toDict()) } });
       }
@@ -949,6 +957,10 @@ export class OneBot11Adapter extends PlatformAdapter {
 
     ws.on("close", () => {
       console.info("[OneBot11] WS client disconnected");
+      // Fail in-flight API calls immediately instead of letting each one
+      // hang until its 30s timeout — the echo responses can never arrive
+      // on a closed socket.
+      this.rejectAllPending("WS connection closed");
     });
 
     ws.on("error", (err: Error) => {
