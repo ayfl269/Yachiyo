@@ -27,9 +27,16 @@ overrides:
   # 影响范围：3.x >= 3.0.0 < 3.15.1；4.x >= 4.0.0 < 4.3.1；来自 @eslint/eslintrc → js-yaml
   # 修复版本：4.x = 4.3.1（本仓库仅 4.x 链路）
   js-yaml: 4.3.1
-  # GHSA-7p8r-x3mc-p8w7：fast-uri host confusion via backslash authority introducer
-  # 影响范围：>=3.0.0 <3.1.5；来自 @modelcontextprotocol/sdk → ajv / ajv-formats → fast-uri
-  fast-uri: 3.1.5
+  # fast-uri 安全修复链（来自 @modelcontextprotocol/sdk → ajv / ajv-formats → fast-uri）：
+  # - GHSA-7p8r-x3mc-p8w7：host confusion via backslash authority introducer（3.1.5 修复）
+  # - CVE-2026-75931 / GHSA-5jgf-p345-68v8：scheme-relative 引用跳过 IDN 规范化导致宿主混淆（3.1.6 修复）
+  # - CVE-2026-75899 / GHSA-fph4-wmhf-6fwf：重复主机名百分比解码导致 SSRF（3.1.6 修复）
+  # - CVE-2026-75975 / GHSA-f65p-4m7j-42xc：IPv6 规范化异常导致 SSRF（3.1.6 修复）
+  # - CVE-2026-76172 / GHSA-jqff-g426-hqxp：百分比编码 scheme 规范化导致宿主混淆（3.1.6 修复）
+  # - GHSA-qw65-cvwx-89v3：serialize() 端口未校验导致 authority 注入（3.1.7 修复）
+  # - GHSA-58mr-gqgx-xq4g：IP 字面量括号不匹配导致宿主混淆（3.1.7 修复）
+  # 直接锁 3.x 线头部 3.1.7，避免逐版本追赶后续安全通告
+  fast-uri: 3.1.7
   # GHSA-mwp4-54f8-5fhr：ip-address leading-zero octet SSRF / trust-boundary bypass
   # 影响范围：<=10.3.0；来自 @modelcontextprotocol/sdk → express-rate-limit → ip-address
   ip-address: 10.3.1
