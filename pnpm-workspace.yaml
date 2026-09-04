@@ -40,6 +40,12 @@ overrides:
   # GHSA-mwp4-54f8-5fhr：ip-address leading-zero octet SSRF / trust-boundary bypass
   # 影响范围：<=10.3.0；来自 @modelcontextprotocol/sdk → express-rate-limit → ip-address
   ip-address: 10.3.1
+  # qs 安全修复（来自 @modelcontextprotocol/sdk → express / body-parser → qs）：
+  # - CVE-2026-2391 / GHSA-w7fw-mjwx-w883：`[]=` 逗号分组的 arrayLimit 绕过（6.16.0 修复）
+  # - CVE-2026-82417 / GHSA-4mjr-xmp4-gh2g：isBuffer() 未校验 constructor.isBuffer 可调用性，
+  #   构造 x[constructor][isBuffer]=y 配合 plainObjects/allowPrototypes 可致未捕获 TypeError DoS（6.16.0 修复）
+  # 兼容范围：express ^6.14.0 / body-parser ^6.15.2
+  qs: 6.16.0
   # SB2026080392 / GHSA-8j4g-w8fx-2239：CORS 中间件 ReDoS via Access-Control-Request-Headers
   # 影响范围：<=4.12.33；仅在使用 cors() 默认/空 allowHeaders 时触发
   hono: 4.13.0
