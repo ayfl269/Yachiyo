@@ -40,8 +40,12 @@ import {
 } from "@yachiyo/agent/web-tools.js";
 import {
   getRuntimeComputerTools,
+  killAllBackgroundShells,
 } from "@yachiyo/agent/computer-tools.js";
-import { getInteractiveShellTools } from "@yachiyo/agent/interactive-shell-tool.js";
+import {
+  getInteractiveShellTools,
+  closeAllInteractiveSessions,
+} from "@yachiyo/agent/interactive-shell-tool.js";
 import { createMemoryTool } from "@yachiyo/agent/memory-tool.js";
 import { MemoryConsolidator } from "@yachiyo/agent/memory-consolidator.js";
 import { LongTermMemoryConsolidationJob } from "@yachiyo/agent/long-term-consolidation-job.js";
@@ -681,6 +685,10 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
       try { await closeAllBrowserPages(); } catch { /* ignore */ }
       try { await closeWebSearchProviders(); } catch { /* ignore */ }
       try { await closeSharedBrowser(); } catch { /* ignore */ }
+      // 终止后台 shell 进程与交互式终端会话，防止孤儿进程
+      // （Windows 上 cmd.exe 会残留）
+      try { killAllBackgroundShells(); } catch { /* ignore */ }
+      try { closeAllInteractiveSessions(); } catch { /* ignore */ }
       dbManager.close();
     },
   };

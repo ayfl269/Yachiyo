@@ -37,6 +37,16 @@ function getToolContext(_ctx: unknown): ComputerToolContext {
 }
 
 /**
+ * 将模型传入的秒数收敛到 [1, max]：负数/0 在 Node 的 execFile 语义下等于
+ * 禁用超时（模型可借此绕过超时），NaN 同理无意义。超上限时取 max——
+ * 工具调用层另有 runner 的 toolCallTimeout abort 兜底。
+ */
+function clampTimeoutSeconds(value: number | undefined, fallback: number, max = 3600): number {
+  if (value == null || !Number.isFinite(value)) return fallback;
+  return Math.min(Math.max(Math.floor(value), 1), max);
+}
+
+/**
  * Extract the tool-level AbortSignal from the run context, if available.
  *
  * The tool-loop runner sets `_toolAbortController` before each tool call
@@ -316,8 +326,11 @@ export function createGrepTool(workspaceRoot?: string): FunctionTool<ComputerToo
  * accidental foot-guns like `rm -rf /` from a model typo — the previous
  * regex blacklist was trivially bypassed by extra whitespace or alternative
  * targets such as `rm -rf ~` / `rm -rf /home`.
+ *
+ * Exported so that `interactive_shell_start` (whose /K command is equivalent
+ * to an execute_shell one-shot) applies the same guard.
  */
-function isDestructiveCommand(command: string): boolean {
+export function isDestructiveCommand(command: string): boolean {
   // Collapse all whitespace (spaces, tabs, newlines) so tricks like
   // `rm  -rf /` or `rm\t-rf /` cannot slip past a pattern expecting one space.
   const c = command.replace(/\s+/g, " ").trim();
@@ -354,6 +367,10 @@ const backgroundProcesses = new Map<string, ChildProcess>();
 
 /** Maximum number of concurrent background processes to prevent unbounded growth. */
 const MAX_BACKGROUND_PROCESSES = 50;
+
+/** 单个后台命令日志文件的大小上限（bytes）：超出后停止写入并记录截断标记，
+ * 防止高输出进程（npm install 等）无限写满磁盘。 */
+const BACKGROUND_LOG_MAX_BYTES = 10 * 1024 * 1024;
 
 /**
  * Remove entries for child processes that have already exited. Returns the
@@ -401,6 +418,19 @@ export function killBackgroundShell(id: string): boolean {
   return true;
 }
 
+/**
+ * 终止全部后台 shell 进程并清空注册表。进程关闭时调用，防止子进程成为
+ * 孤儿（Windows 上 cmd.exe 会残留）。
+ */
+export function killAllBackgroundShells(): number {
+  let count = 0;
+  for (const [id] of backgroundProcesses) {
+    if (killBackgroundShell(id)) count++;
+  }
+  backgroundProcesses.clear();
+  return count;
+}
+
 export function createShellTool(workspaceRoot?: string): FunctionTool<ComputerToolContext> {
   return createFunctionTool<ComputerToolContext>({
     name: "execute_shell",
@@ -430,7 +460,7 @@ export function createShellTool(workspaceRoot?: string): FunctionTool<ComputerTo
       }
 
       const cwd = workspaceRoot ?? process.cwd();
-      const timeoutMs = (timeout ?? 300) * 1000;
+      const timeoutMs = clampTimeoutSeconds(timeout, 300) * 1000;
 
       try {
         if (background) {
@@ -440,7 +470,7 @@ export function createShellTool(workspaceRoot?: string): FunctionTool<ComputerTo
             cleanupDeadBackgroundProcesses();
             if (backgroundProcesses.size >= MAX_BACKGROUND_PROCESSES) {
               return {
-                content: [{ type: "text", text: `error: Maximum number of background processes (${MAX_BACKGROUND_PROCESSES}) reached. Use killBackgroundShell to terminate unused processes, or listBackgroundProcesses to inspect.` }],
+                content: [{ type: "text", text: `error: Maximum number of background processes (${MAX_BACKGROUND_PROCESSES}) reached. Use background_shell_list to inspect, or background_shell_kill to terminate unused processes.` }],
                 isError: true,
               };
             }
@@ -463,18 +493,36 @@ export function createShellTool(workspaceRoot?: string): FunctionTool<ComputerTo
             process.platform === "win32" ? ["/c", command] : ["-c", command],
             { cwd, env: { ...process.env, ...env }, timeout: timeoutMs }
           );
-          child.stdout?.pipe(logStream);
-          child.stderr?.pipe(logStream);
+          // Cap total bytes written to the log file: a high-output process
+          // would otherwise grow the file without bound. Once the cap is hit
+          // we stop writing and record a truncation notice.
+          let logWritten = 0;
+          let logCapped = false;
+          const writeLogChunk = (data: Buffer): void => {
+            if (logCapped) return;
+            if (logWritten + data.length > BACKGROUND_LOG_MAX_BYTES) {
+              logCapped = true;
+              logStream.end(`\n[log truncated at ${BACKGROUND_LOG_MAX_BYTES} bytes]\n`);
+              return;
+            }
+            logWritten += data.length;
+            logStream.write(data);
+          };
+          const endLogStream = (): void => {
+            if (!logStream.writableEnded) logStream.end();
+          };
+          child.stdout?.on("data", writeLogChunk);
+          child.stderr?.on("data", writeLogChunk);
           backgroundProcesses.set(id, child);
           child.on("close", () => {
             backgroundProcesses.delete(id);
-            logStream.end();
+            endLogStream();
           });
           child.on("error", () => {
             backgroundProcesses.delete(id);
-            logStream.end();
+            endLogStream();
           });
-          return { content: [{ type: "text", text: `Background command started (id=${id}). Output is being written to ${logPath}. Use killBackgroundShell("${id}") to terminate it.` }] };
+          return { content: [{ type: "text", text: `Background command started (id=${id}). Output is being written to ${logPath}. Use background_shell_kill with id="${id}" to terminate it.` }] };
         }
 
         const result = await new Promise<{ stdout: string; stderr: string; code: number; aborted: boolean }>((resolvePromise) => {
@@ -526,6 +574,57 @@ export function createShellTool(workspaceRoot?: string): FunctionTool<ComputerTo
   });
 }
 
+// ── Background Shell Process Tools ──
+
+export function createBackgroundShellListTool(): FunctionTool<ComputerToolContext> {
+  return createFunctionTool<ComputerToolContext>({
+    name: "background_shell_list",
+    description:
+      "List background shell processes started by execute_shell with background=true. " +
+      "Returns each process's id, pid, and status. Run this before starting new background " +
+      "processes or when the maximum process limit is reached.",
+    parameters: { type: "object", properties: {}, required: [] },
+    active: true,
+    handler: async (_ctx: unknown, ..._args: unknown[]): Promise<CallToolResult> => {
+      cleanupDeadBackgroundProcesses();
+      const list = listBackgroundProcesses();
+      if (list.length === 0) {
+        return { content: [{ type: "text", text: "No background shell processes." }] };
+      }
+      const lines = list.map((p) => `  ${p.id}  pid=${p.pid ?? "-"}  ${p.killed ? "killed(signalled)" : "running"}`);
+      return { content: [{ type: "text", text: `Background shell processes (${list.length}):\n${lines.join("\n")}` }] };
+    },
+  });
+}
+
+export function createBackgroundShellKillTool(): FunctionTool<ComputerToolContext> {
+  return createFunctionTool<ComputerToolContext>({
+    name: "background_shell_kill",
+    description:
+      "Kill a background shell process by the id returned by execute_shell (background=true). " +
+      "Sends SIGTERM. If the process does not exit, it can be killed via execute_shell (taskkill/kill -9).",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "The background process id returned by execute_shell." },
+      },
+      required: ["id"],
+    },
+    active: true,
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      const id = String(args[0] ?? "");
+      const ok = killBackgroundShell(id);
+      if (!ok) {
+        return {
+          content: [{ type: "text", text: `error: Background process '${id}' not found. Use background_shell_list to inspect active processes.` }],
+          isError: true,
+        };
+      }
+      return { content: [{ type: "text", text: `Termination signal sent to background process ${id}.` }] };
+    },
+  });
+}
+
 // ── Python Execute Tool (local) ──
 
 export function createLocalPythonTool(workspaceRoot?: string): FunctionTool<ComputerToolContext> {
@@ -544,19 +643,19 @@ export function createLocalPythonTool(workspaceRoot?: string): FunctionTool<Comp
     active: true,
     handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
       const code = String(args[0] ?? "");
-      const silent = args[1] === true;
-      const timeout = args[2] != null ? Number(args[2]) : undefined;
-      const timeoutMs = (timeout ?? 30) * 1000;
-      const cwd = workspaceRoot ?? process.cwd();
+        const silent = args[1] === true;
+        const timeout = args[2] != null ? Number(args[2]) : undefined;
+        const timeoutMs = clampTimeoutSeconds(timeout, 30) * 1000;
+        const cwd = workspaceRoot ?? process.cwd();
 
-      try {
-        const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolvePromise) => {
-          // Guard against double-resolution: when `python3` fails to spawn on
-          // Windows, Node may still emit a `close` event on the failed child
-          // even after we've already started the `python` fallback. Without
-          // this flag, the first `close` would resolve with empty output and
-          // silently drop the real output from `child2`.
-          let resolved = false;
+        try {
+          const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolvePromise) => {
+            // Guard against double-resolution: when `python3` fails to spawn on
+            // Windows, Node may still emit a `close` event on the failed child
+            // even after we've already started the `python` fallback. Without
+            // this flag, the first `close` would resolve with empty output and
+            // silently drop the real output from `child2`.
+            let resolved = false;
           const resolveOnce = (value: { stdout: string; stderr: string; code: number }): void => {
             if (resolved) return;
             resolved = true;
@@ -808,7 +907,7 @@ export function createLocalNodeTool(workspaceRoot?: string): FunctionTool<Comput
       const code = String(args[0] ?? "");
       const silent = args[1] === true;
       const timeout = args[2] != null ? Number(args[2]) : undefined;
-      const timeoutMs = (timeout ?? 30) * 1000;
+      const timeoutMs = clampTimeoutSeconds(timeout, 30) * 1000;
       const cwd = workspaceRoot ?? process.cwd();
 
       try {
@@ -869,6 +968,8 @@ export function getRuntimeComputerTools(
     createFileMoveTool(workspaceRoot),
     createGrepTool(workspaceRoot),
     createShellTool(workspaceRoot),
+    createBackgroundShellListTool(),
+    createBackgroundShellKillTool(),
   ];
 
   if (runtime === "local") {
@@ -950,8 +1051,11 @@ async function grepWithRipgrep(
  * Denial of Service). Catches the most common catastrophic backtracking
  * patterns: nested quantifiers like `(a+)+`, `(a*)*`, overlapping quantifiers
  * like `a+a*`. This is a best-effort heuristic — not a complete solution.
+ *
+ * Exported so that `interactive_shell_wait_for_pattern` (which runs model
+ * supplied regexes against output buffers) applies the same guard as grep.
  */
-function isPotentialReDoS(pattern: string): boolean {
+export function isPotentialReDoS(pattern: string): boolean {
   // Nested quantifiers: (…[+*?]…)[+*?{]
   if (/\([^)]*[+*?][^)]*\)[+*?{]/.test(pattern)) return true;
   // Overlapping quantifiers: a++ a** a+* etc.

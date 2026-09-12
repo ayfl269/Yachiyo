@@ -59,6 +59,14 @@ export const DEFAULT_DYNAMIC_SUBAGENT_POLICY: SandboxPolicy = {
     "interactive_shell_read",
     "interactive_shell_list",
     "interactive_shell_close",
+    // wait 系列：与 start/send/read/list/close 同属 shell 会话工具族，
+    // wait_for_pattern 还能对共享注册表（模块级 Map）中已有会话的输出做
+    // 正则扫描——缺了它们 allowShell=false 就形同虚设。
+    "interactive_shell_wait",
+    "interactive_shell_wait_for_pattern",
+    // execute_shell 后台进程管理工具（可终止/枚举任意后台 shell）
+    "background_shell_kill",
+    "background_shell_list",
   ],
   allowShell: false,
   allowCodeExecution: false,
@@ -93,6 +101,11 @@ export function applySandboxPolicyToToolSet(
     denied.add("interactive_shell_read");
     denied.add("interactive_shell_list");
     denied.add("interactive_shell_close");
+    // wait/wait_for_pattern 与后台进程管理工具同属 shell 会话工具族
+    denied.add("interactive_shell_wait");
+    denied.add("interactive_shell_wait_for_pattern");
+    denied.add("background_shell_kill");
+    denied.add("background_shell_list");
   }
   if (!policy.allowCodeExecution) {
     denied.add("execute_python");

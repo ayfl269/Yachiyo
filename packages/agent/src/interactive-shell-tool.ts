@@ -21,6 +21,7 @@ import { randomUUID } from "crypto";
 import { createFunctionTool, type FunctionTool } from "./tool.js";
 import type { CallToolResult, ContextWrapper } from "./types.js";
 import type { ComputerToolContext } from "./computer-tools.js";
+import { isPotentialReDoS, normalizeRwPath, isDestructiveCommand } from "./computer-tools.js";
 
 // ── Session registry ──
 
@@ -50,6 +51,9 @@ const MAX_SESSIONS = 20;
 
 /** Per-buffer size cap to prevent unbounded memory growth (5 MB). */
 const MAX_BUFFER_SIZE = 5 * 1024 * 1024;
+
+/** Maximum wait_for_pattern regex length (same guard as grep_tool). */
+const MAX_PATTERN_LENGTH = 500;
 
 /**
  * Truncate a buffer string to the last `maxSize` characters, keeping recent
@@ -181,14 +185,16 @@ export function interactiveShellStart(
   child.stdout?.on("data", (data: Buffer) => {
     const text = data.toString();
     session.stdoutAll = clampBuffer(session.stdoutAll + text, MAX_BUFFER_SIZE);
-    session.stdoutSinceRead += text;
+    // since-read 缓冲同样必须有上限：*All 被 clamp 后丢弃的内容仍会无限
+    // 累积在 since-read 里（模型长时间不 read 的高输出进程 → 内存耗尽）。
+    session.stdoutSinceRead = clampBuffer(session.stdoutSinceRead + text, MAX_BUFFER_SIZE);
     session.lastActivityAt = Date.now();
   });
 
   child.stderr?.on("data", (data: Buffer) => {
     const text = data.toString();
     session.stderrAll = clampBuffer(session.stderrAll + text, MAX_BUFFER_SIZE);
-    session.stderrSinceRead += text;
+    session.stderrSinceRead = clampBuffer(session.stderrSinceRead + text, MAX_BUFFER_SIZE);
     session.lastActivityAt = Date.now();
   });
 
@@ -423,6 +429,18 @@ export async function interactiveShellWaitForPattern(
     throw new Error(`Invalid regex pattern '${pattern}': ${(e as Error).message}`);
   }
 
+  // Model-supplied regex runs against up to 2 × MAX_BUFFER_SIZE of output on
+  // every 50ms poll — apply the same ReDoS/length guards as grep_tool, or a
+  // catastrophic-backtracking pattern would block the event loop and burn CPU.
+  if (pattern.length > MAX_PATTERN_LENGTH) {
+    throw new Error(`Pattern too long (max ${MAX_PATTERN_LENGTH} characters).`);
+  }
+  if (isPotentialReDoS(pattern)) {
+    throw new Error(
+      "Pattern contains potentially dangerous nested quantifiers (e.g. `(a+)+`) which can cause ReDoS. Please simplify the pattern."
+    );
+  }
+
   const timeoutMs = options.timeoutMs ?? 30_000;
   const abortSignal = options.abortSignal;
   const deadline = Date.now() + timeoutMs;
@@ -445,6 +463,15 @@ export async function interactiveShellWaitForPattern(
     }
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
+}
+
+/**
+ * 收敛模型传入的毫秒数：负数取 0，NaN/非有限值回退 fallback，超上限取 max。
+ * schema 声明了 minimum/maximum，但运行时参数未经校验，这里兜底。
+ */
+function clampMsArg(value: number | undefined, fallback: number, max: number): number {
+  if (value == null || !Number.isFinite(value)) return fallback;
+  return Math.min(Math.max(value, 0), max);
 }
 
 // ── Tool factories ──
@@ -500,11 +527,39 @@ export function createInteractiveShellStartTool(
       const env = (args[2] as Record<string, string>) ?? undefined;
       const context = getToolContext(_ctx);
       const abortSignal = getAbortSignal(_ctx);
-      const root = workspaceRoot ?? context.providerSettings?.computer_use_runtime === "sandbox" ? workspaceRoot : (cwd ?? workspaceRoot);
+
+      // 与 execute_shell 一致的破坏性命令守卫（/K command 与一次性命令等价，
+      // 不加守卫会让 shutdown / rm -rf / 之类从 start 放行）。
+      if (command && isDestructiveCommand(command)) {
+        return {
+          content: [{ type: "text", text: `error: Command blocked for safety: contains a potentially destructive pattern. If this is a legitimate command, run it outside the agent tool layer.` }],
+          isError: true,
+        };
+      }
+
+      const root = workspaceRoot ?? process.cwd();
+      const isSandbox = context.providerSettings?.computer_use_runtime === "sandbox";
+      // cwd 只允许 workspace 边界内（与文件工具一致）：超出边界 / 被
+      // sandboxPolicy 拒绝时直接报错。sandbox 运行时强制 workspaceRoot。
+      let finalCwd = root;
+      if (!isSandbox && cwd) {
+        try {
+          finalCwd = normalizeRwPath(cwd, {
+            localEnv: !isSandbox,
+            workspaceRoot: root,
+            sandboxPolicy: context.sandboxPolicy,
+          });
+        } catch (e) {
+          return {
+            content: [{ type: "text", text: `error: ${(e as Error).message}` }],
+            isError: true,
+          };
+        }
+      }
 
       try {
         const id = interactiveShellStart(command, {
-          cwd: cwd ?? root,
+          cwd: finalCwd,
           env,
           workspaceRoot,
         });
@@ -615,7 +670,7 @@ export function createInteractiveShellReadTool(): FunctionTool<ComputerToolConte
     active: true,
     handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
       const sessionId = String(args[0] ?? "");
-      const waitMs = args[1] != null ? Number(args[1]) : undefined;
+      const waitMs = clampMsArg(args[1] != null ? Number(args[1]) : undefined, 500, 30000);
       const clear = args[2] !== false;
 
       const result = await interactiveShellRead(sessionId, { waitMs, clear });
@@ -729,7 +784,7 @@ export function createInteractiveShellWaitTool(): FunctionTool<ComputerToolConte
     active: true,
     handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
       const sessionId = String(args[0] ?? "");
-      const timeoutMs = args[1] != null ? Number(args[1]) : undefined;
+      const timeoutMs = clampMsArg(args[1] != null ? Number(args[1]) : undefined, 60000, 600000);
       const abortSignal = getAbortSignal(_ctx);
 
       const result = await interactiveShellWait(sessionId, { timeoutMs, abortSignal });
@@ -823,7 +878,7 @@ export function createInteractiveShellWaitForPatternTool(): FunctionTool<Compute
       const sessionId = String(args[0] ?? "");
       const pattern = String(args[1] ?? "");
       const flags = args[2] != null ? String(args[2]) : undefined;
-      const timeoutMs = args[3] != null ? Number(args[3]) : undefined;
+      const timeoutMs = clampMsArg(args[3] != null ? Number(args[3]) : undefined, 30000, 600000);
       const abortSignal = getAbortSignal(_ctx);
 
       let result: Awaited<ReturnType<typeof interactiveShellWaitForPattern>>;
