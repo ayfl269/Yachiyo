@@ -39,6 +39,12 @@ jobs:
       - name: Run linter
         run: pnpm run lint
 
+      # typecheck 的第三段 `cd frontend && tsc -b` 需要 frontend 自己的依赖
+      # （vite / @vitejs/plugin-react / vite/client 类型）。frontend 独立于根
+      # workspace（自带 lockfile 与 pnpm-workspace.yaml），根 install 不会装它。
+      - name: Install frontend dependencies
+        run: pnpm run frontend:install
+
       - name: Run typecheck
         run: pnpm run typecheck
 
