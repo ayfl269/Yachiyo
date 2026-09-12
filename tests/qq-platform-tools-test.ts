@@ -15,6 +15,7 @@ import {
   type QQToolContext,
 } from "@yachiyo/agent/qq-platform-tools.js";
 import type { CallToolResult } from "@yachiyo/agent/types.js";
+import type { FunctionTool } from "@yachiyo/agent/tool.js";
 
 // ── Helpers ──
 
@@ -134,8 +135,10 @@ function createLookup(adapter: QQAdapterApi | undefined, ids: string[] = ["onebo
   };
 }
 
-async function callTool(tool: { handler?: (ctx: unknown, ...args: unknown[]) => Promise<unknown> }, ctx: unknown, ...args: unknown[]): Promise<CallToolResult> {
-  const result = await tool.handler!(ctx, ...args);
+async function callTool(tool: FunctionTool, ctx: unknown, ...args: unknown[]): Promise<CallToolResult> {
+  if (!tool.handler) throw new Error("Tool has no handler");
+  const result = await tool.handler(ctx, ...args);
+  if (result === null) return { content: [{ type: "text", text: "(no output)" }] };
   if (typeof result === "string") return { content: [{ type: "text", text: result }] };
   return result as CallToolResult;
 }

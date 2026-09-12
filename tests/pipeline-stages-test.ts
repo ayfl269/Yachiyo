@@ -15,6 +15,7 @@ import {
   KeywordsStrategy,
   PipelineStage,
 } from "../src/index.js";
+import type { MessageComponent } from "@yachiyo/message/components.js";
 import { WakingCheckStage } from "@yachiyo/pipeline/stages/waking-check.js";
 import { RateLimitStage } from "@yachiyo/pipeline/stages/rate-limit.js";
 import { ContentSafetyCheckStage } from "@yachiyo/pipeline/stages/content-safety-check.js";
@@ -26,7 +27,7 @@ import type { PipelineContext } from "@yachiyo/pipeline/context.js";
 let passCount = 0;
 let failCount = 0;
 
-function assert(condition: boolean, message: string): void {
+function assert(condition: boolean | undefined, message: string): void {
   if (condition) {
     passCount++;
     console.log(`  ✅ ${message}`);
@@ -64,11 +65,15 @@ class MockMessageEvent extends MessageEvent {
     const messageObj: PlatformMessage = {
       type: opts.isPrivate ? MessageType.FRIEND_MESSAGE : MessageType.GROUP_MESSAGE,
       messageId: "test-msg-1",
+      sessionId: "test-session-1",
       selfId: opts.selfId ?? "bot123",
       sender: { userId: opts.senderId ?? "user456", nickname: "TestUser" },
+      group: { groupId: "", groupName: null, groupAvatar: null, groupOwner: null, groupAdmins: null, members: null },
       components,
+      messageStr: opts.messageStr ?? "",
       rawMessage: opts.messageStr ?? "",
-    };
+      timestamp: Date.now(),
+    } as PlatformMessage;
     super(
       opts.messageStr ?? "",
       messageObj,
@@ -78,13 +83,17 @@ class MockMessageEvent extends MessageEvent {
         id: "test-platform",
         supportProactiveMessage: false,
       },
-      MessageSession.fromStr(umo),
+      umo,
     );
     this._umo = umo;
   }
 
   get unifiedMsgOrigin(): string {
     return this._umo;
+  }
+
+  async send(_components: MessageComponent[]): Promise<void> {
+    // 测试桩：消息不真正发送
   }
 }
 
@@ -171,7 +180,7 @@ async function testSessionServiceManager(): Promise<void> {
 
   // 2. Blacklist
   const disabledStore = new MockDisabledStore();
-  const blacklistMgr = new SessionServiceManager(disabledStore as unknown as Parameters<typeof SessionServiceManager>[0]);
+  const blacklistMgr = new SessionServiceManager(disabledStore as unknown as ConstructorParameters<typeof SessionServiceManager>[0]);
   assert(await blacklistMgr.isSessionEnabled("umo1", false) === true, "Non-blacklisted UMO allowed");
   disabledStore.disable("umo1");
   assert(await blacklistMgr.isSessionEnabled("umo1", false) === false, "Blacklisted UMO blocked");
@@ -186,8 +195,8 @@ async function testSessionServiceManager(): Promise<void> {
   await blacklistMgr.enableSession(); // un-global-disable
   const wlStore = new MockWhitelistStore();
   const whitelistMgr = new SessionServiceManager(
-    disabledStore as unknown as Parameters<typeof SessionServiceManager>[0],
-    wlStore as unknown as Parameters<typeof SessionServiceManager>[1],
+    disabledStore as unknown as ConstructorParameters<typeof SessionServiceManager>[0],
+    wlStore as unknown as ConstructorParameters<typeof SessionServiceManager>[1],
   );
 
   assert(await whitelistMgr.isSessionEnabled("umo1", false) === true, "Whitelist off: all allowed");
@@ -405,8 +414,8 @@ async function testSessionStatusCheckStage(): Promise<void> {
   const disabledStore = new MockDisabledStore();
   const wlStore = new MockWhitelistStore();
   const sessionMgr = new SessionServiceManager(
-    disabledStore as unknown as Parameters<typeof SessionServiceManager>[0],
-    wlStore as unknown as Parameters<typeof SessionServiceManager>[1],
+    disabledStore as unknown as ConstructorParameters<typeof SessionServiceManager>[0],
+    wlStore as unknown as ConstructorParameters<typeof SessionServiceManager>[1],
   );
 
   const stage = new SessionStatusCheckStage();

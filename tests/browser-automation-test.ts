@@ -34,6 +34,7 @@ import {
   closeSharedBrowser,
 } from "@yachiyo/agent/web-tools.js";
 import type { CallToolResult } from "@yachiyo/agent/types.js";
+import type { FunctionTool } from "@yachiyo/agent/tool.js";
 
 // 测试结果统计
 let passed = 0;
@@ -48,10 +49,16 @@ function logResult(name: string, success: boolean, detail = ""): void {
 
 /** 调用工具并返回结果文本 */
 async function callTool(
-  tool: { handler?: (ctx: unknown, ...args: unknown[]) => Promise<unknown> },
+  tool: FunctionTool,
   ...args: unknown[]
 ): Promise<CallToolResult> {
-  const result = await tool.handler!(undefined, ...args);
+  if (!tool.handler) {
+    throw new Error("Tool has no handler");
+  }
+  const result = await tool.handler(undefined, ...args);
+  if (result === null) {
+    return { content: [{ type: "text", text: "(no output)" }] };
+  }
   if (typeof result === "string") {
     return { content: [{ type: "text", text: result }] };
   }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Plus, Trash2, RefreshCw, Upload, Download,
   FileArchive, ArrowUpFromLine, XCircle, CheckCircle,
@@ -137,7 +137,10 @@ export default function SkillManager() {
   }, [uploadResults])
 
   // ===== API =====
-  async function fetchSkills() {
+  // useCallback([showMessage])：showMessage 是 useToast 里的稳定回调，fetchSkills 身份稳定，
+  // 挂载 effect 只执行一次（与原先函数声明 + `useEffect(..., [])` 行为一致），
+  // 同时满足 react-hooks/exhaustive-deps。
+  const fetchSkills = useCallback(async () => {
     setLoading(true)
     try {
       const res = await apiFetch('/api/skills')
@@ -148,7 +151,7 @@ export default function SkillManager() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [showMessage])
 
   async function handleToggleActive(skill: Skill) {
     const newStatus = !skill.active
@@ -450,7 +453,7 @@ export default function SkillManager() {
   // ===== Lifecycle =====
   useEffect(() => {
     fetchSkills()
-  }, [])
+  }, [fetchSkills])
 
   // ===== Render =====
   return (

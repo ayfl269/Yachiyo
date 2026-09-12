@@ -26,11 +26,18 @@ function assert(condition: boolean, message: string): void {
   }
 }
 
+/** 收到的 API 调用报文（OneBot11/napcat 的 action 请求）。 */
+interface MockReceivedApiCall {
+  action: string;
+  params: Record<string, unknown>;
+  echo?: string;
+}
+
 class MockNapcatServer {
   private wss: WebSocketServer;
   public lastReceivedAction: string | null = null;
   public lastReceivedParams: Record<string, unknown> | null = null;
-  public messageHandler: ((msg: Record<string, unknown>) => void) | null = null;
+  public messageHandler: ((msg: MockReceivedApiCall) => void) | null = null;
 
   constructor(port: number) {
     this.wss = new WebSocketServer({ port, host: "127.0.0.1" });
@@ -112,18 +119,17 @@ async function main(): Promise<void> {
   {
     const { adapter, server, eventQueue } = await createAdapterAndServer(port);
 
-    let receivedAction: string | null = null;
-    let receivedParams: Record<string, unknown> | null = null;
+    const received = { action: null as string | null, params: null as Record<string, unknown> | null };
     server.messageHandler = (msg) => {
-      receivedAction = msg.action;
-      receivedParams = msg.params;
+      received.action = msg.action;
+      received.params = msg.params;
       server.broadcast({ echo: msg.echo, retcode: 0, status: "ok", data: {} });
     };
 
     await adapter.sendLike(12345, 5);
-    assert(receivedAction === "send_like", "Should call send_like");
-    assert(receivedParams?.user_id === 12345, "Should pass user_id");
-    assert(receivedParams?.times === 5, "Should pass times");
+    assert(received.action === "send_like", "Should call send_like");
+    assert(received.params?.user_id === 12345, "Should pass user_id");
+    assert(received.params?.times === 5, "Should pass times");
 
     await adapter.stop();
     await server.close();
@@ -134,18 +140,17 @@ async function main(): Promise<void> {
   {
     const { adapter, server, eventQueue } = await createAdapterAndServer(port);
 
-    let receivedAction: string | null = null;
-    let receivedParams: Record<string, unknown> | null = null;
+    const received = { action: null as string | null, params: null as Record<string, unknown> | null };
     server.messageHandler = (msg) => {
-      receivedAction = msg.action;
-      receivedParams = msg.params;
+      received.action = msg.action;
+      received.params = msg.params;
       server.broadcast({ echo: msg.echo, retcode: 0, status: "ok", data: {} });
     };
 
     await adapter.setMsgEmojiLike(9988, "107");
-    assert(receivedAction === "set_msg_emoji_like", "Should call set_msg_emoji_like");
-    assert(receivedParams?.message_id === 9988, "Should pass message_id as number");
-    assert(receivedParams?.emoji_id === "107", "Should pass emoji_id as string");
+    assert(received.action === "set_msg_emoji_like", "Should call set_msg_emoji_like");
+    assert(received.params?.message_id === 9988, "Should pass message_id as number");
+    assert(received.params?.emoji_id === "107", "Should pass emoji_id as string");
 
     await adapter.stop();
     await server.close();
@@ -156,11 +161,10 @@ async function main(): Promise<void> {
   {
     const { adapter, server, eventQueue } = await createAdapterAndServer(port);
 
-    let receivedAction: string | null = null;
-    let receivedParams: Record<string, unknown> | null = null;
+    const received = { action: null as string | null, params: null as Record<string, unknown> | null };
     server.messageHandler = (msg) => {
-      receivedAction = msg.action;
-      receivedParams = msg.params;
+      received.action = msg.action;
+      received.params = msg.params;
       server.broadcast({ echo: msg.echo, retcode: 0, status: "ok", data: { message_id: 55555 } });
     };
 
@@ -169,11 +173,11 @@ async function main(): Promise<void> {
       { user_id: 200, nickname: "UserB", content: [{ type: "text", data: { text: "World" } }] },
     ];
     const result = await adapter.sendForwardMsg("group", 99999, nodes);
-    assert(receivedAction === "send_forward_msg", "Should call send_forward_msg");
-    assert(receivedParams?.target_type === "group", "Should pass target_type");
-    assert(receivedParams?.target_id === 99999, "Should pass target_id");
-    assert(Array.isArray(receivedParams?.messages), "Should pass messages array");
-    assert((receivedParams?.messages as unknown[]).length === 2, "Should pass 2 nodes");
+    assert(received.action === "send_forward_msg", "Should call send_forward_msg");
+    assert(received.params?.target_type === "group", "Should pass target_type");
+    assert(received.params?.target_id === 99999, "Should pass target_id");
+    assert(Array.isArray(received.params?.messages), "Should pass messages array");
+    assert((received.params?.messages as unknown[]).length === 2, "Should pass 2 nodes");
     assert(result.message_id === 55555, "Should return message_id");
 
     await adapter.stop();
@@ -266,20 +270,19 @@ async function main(): Promise<void> {
   {
     const { adapter, server, eventQueue } = await createAdapterAndServer(port);
 
-    let receivedAction: string | null = null;
-    let receivedParams: Record<string, unknown> | null = null;
+    const received = { action: null as string | null, params: null as Record<string, unknown> | null };
     server.messageHandler = (msg) => {
-      receivedAction = msg.action;
-      receivedParams = msg.params;
+      received.action = msg.action;
+      received.params = msg.params;
       server.broadcast({ echo: msg.echo, retcode: 0, status: "ok", data: {} });
     };
 
     await adapter.uploadGroupFile(12345, "/path/to/file.pdf", "report.pdf", "folder1");
-    assert(receivedAction === "upload_group_file", "Should call upload_group_file");
-    assert(receivedParams?.group_id === 12345, "Should pass group_id");
-    assert(receivedParams?.file === "/path/to/file.pdf", "Should pass file path");
-    assert(receivedParams?.name === "report.pdf", "Should pass name");
-    assert(receivedParams?.folder === "folder1", "Should pass folder");
+    assert(received.action === "upload_group_file", "Should call upload_group_file");
+    assert(received.params?.group_id === 12345, "Should pass group_id");
+    assert(received.params?.file === "/path/to/file.pdf", "Should pass file path");
+    assert(received.params?.name === "report.pdf", "Should pass name");
+    assert(received.params?.folder === "folder1", "Should pass folder");
 
     await adapter.stop();
     await server.close();
@@ -290,18 +293,17 @@ async function main(): Promise<void> {
   {
     const { adapter, server, eventQueue } = await createAdapterAndServer(port);
 
-    let receivedAction: string | null = null;
-    let receivedParams: Record<string, unknown> | null = null;
+    const received = { action: null as string | null, params: null as Record<string, unknown> | null };
     server.messageHandler = (msg) => {
-      receivedAction = msg.action;
-      receivedParams = msg.params;
+      received.action = msg.action;
+      received.params = msg.params;
       server.broadcast({ echo: msg.echo, retcode: 0, status: "ok", data: {} });
     };
 
     await adapter.uploadPrivateFile(67890, "/path/to/file.docx", "doc.docx");
-    assert(receivedAction === "upload_private_file", "Should call upload_private_file");
-    assert(receivedParams?.user_id === 67890, "Should pass user_id");
-    assert(receivedParams?.name === "doc.docx", "Should pass name");
+    assert(received.action === "upload_private_file", "Should call upload_private_file");
+    assert(received.params?.user_id === 67890, "Should pass user_id");
+    assert(received.params?.name === "doc.docx", "Should pass name");
 
     await adapter.stop();
     await server.close();
@@ -337,11 +339,10 @@ async function main(): Promise<void> {
   {
     const { adapter, server, eventQueue } = await createAdapterAndServer(port);
 
-    let receivedAction: string | null = null;
-    let receivedParams: Record<string, unknown> | null = null;
+    const received = { action: null as string | null, params: null as Record<string, unknown> | null };
     server.messageHandler = (msg) => {
-      receivedAction = msg.action;
-      receivedParams = msg.params;
+      received.action = msg.action;
+      received.params = msg.params;
       server.broadcast({
         echo: msg.echo,
         retcode: 0,
@@ -351,9 +352,9 @@ async function main(): Promise<void> {
     };
 
     const result = await adapter.downloadFile("https://example.com/big.zip", { threadCnt: 8 });
-    assert(receivedAction === "download_file", "Should call download_file");
-    assert(receivedParams?.url === "https://example.com/big.zip", "Should pass url");
-    assert(receivedParams?.thread_cnt === 8, "Should pass thread_cnt");
+    assert(received.action === "download_file", "Should call download_file");
+    assert(received.params?.url === "https://example.com/big.zip", "Should pass url");
+    assert(received.params?.thread_cnt === 8, "Should pass thread_cnt");
     assert(result.file === "/tmp/cached.dl", "Should return cached file path");
     assert(result.file_size === 1024, "Should return file_size");
 
@@ -825,11 +826,10 @@ async function main(): Promise<void> {
   {
     const { adapter, server, eventQueue } = await createAdapterAndServer(port);
 
-    let receivedAction: string | null = null;
-    let receivedParams: Record<string, unknown> | null = null;
+    const received = { action: null as string | null, params: null as Record<string, unknown> | null };
     server.messageHandler = (msg) => {
-      receivedAction = msg.action;
-      receivedParams = msg.params;
+      received.action = msg.action;
+      received.params = msg.params;
       server.broadcast({ echo: msg.echo, retcode: 0, status: "ok", data: {} });
     };
 
@@ -869,9 +869,9 @@ async function main(): Promise<void> {
       };
       if (typeof eventWithApi.setMsgEmojiLike === "function") {
         await eventWithApi.setMsgEmojiLike("76");
-        assert(receivedAction === "set_msg_emoji_like", "Event setMsgEmojiLike should call API");
-        assert(receivedParams?.message_id === 4242, "Should use message_id from event");
-        assert(receivedParams?.emoji_id === "76", "Should pass emoji_id");
+        assert(received.action === "set_msg_emoji_like", "Event setMsgEmojiLike should call API");
+        assert(received.params?.message_id === 4242, "Should use message_id from event");
+        assert(received.params?.emoji_id === "76", "Should pass emoji_id");
       } else {
         assert(false, "Event should have setMsgEmojiLike method");
       }

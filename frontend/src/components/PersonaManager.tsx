@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Plus, X, Search, Pencil, Trash2, Eye, Sparkles,
   MessageSquare, Smile, Wrench, BookOpen, AlertCircle,
@@ -163,7 +163,10 @@ export default function PersonaManager() {
   )
 
   // ===== API =====
-  const fetchPersonas = async () => {
+  // useCallback([showMessage])：showMessage 是 useToast 里的稳定回调（useCallback([])），
+  // 因此 fetchPersonas 身份稳定，挂载 effect 只执行一次——与原先 `useEffect(..., [])` 的
+  // 行为一致，同时满足 react-hooks/exhaustive-deps。
+  const fetchPersonas = useCallback(async () => {
     setLoading(true)
     try {
       const res = await apiFetch('/api/personas')
@@ -176,7 +179,7 @@ export default function PersonaManager() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [showMessage])
 
   const fetchTools = async () => {
     try {
@@ -208,7 +211,7 @@ export default function PersonaManager() {
 
   useEffect(() => {
     fetchPersonas()
-  }, [])
+  }, [fetchPersonas])
 
   // ===== Actions =====
   const handleCreate = () => {

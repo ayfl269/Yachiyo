@@ -44,13 +44,20 @@ function assertApprox(actual: number, expected: number, tolerance: number, messa
   }
 }
 
+/** 收到的 API 调用报文（OneBot11/napcat 的 action 请求）。 */
+interface MockReceivedApiCall {
+  action: string;
+  params: Record<string, unknown>;
+  echo?: string;
+}
+
 /** Mock napcat WS server that responds to API calls */
 class MockNapcatServer {
   private wss: WebSocketServer;
   private pendingEchoMap = new Map<string, (data: unknown) => void>();
   public lastReceivedAction: string | null = null;
   public lastReceivedParams: Record<string, unknown> | null = null;
-  public messageHandler: ((data: Record<string, unknown>) => void) | null = null;
+  public messageHandler: ((data: MockReceivedApiCall) => void) | null = null;
 
   constructor(port: number) {
     this.wss = new WebSocketServer({ port, host: "127.0.0.1" });
@@ -446,11 +453,12 @@ async function main(): Promise<void> {
     {
       mockServer.messageHandler = (msg) => {
         // Respond with the user_id from the params
+        const userId = Number(msg.params.user_id);
         mockServer.broadcast({
           echo: msg.echo,
           retcode: 0,
           status: "ok",
-          data: { user_id: msg.params.user_id, nickname: `User${msg.params.user_id}` },
+          data: { user_id: userId, nickname: `User${userId}` },
         });
       };
 

@@ -103,7 +103,7 @@ async function runTests() {
       "600s"
     );
 
-    assert(lastRequestUrl?.includes("/cachedContents"), "Gemini createContextCache URL");
+    assert(lastRequestUrl?.includes("/cachedContents") === true, "Gemini createContextCache URL");
     const cacheBody = JSON.parse(lastRequestInit?.body as string);
     assert(cacheBody.model === "models/gemini-1.5-flash", "Gemini createContextCache body model");
     assert(Array.isArray(cacheBody.contents), "Gemini createContextCache body contents");

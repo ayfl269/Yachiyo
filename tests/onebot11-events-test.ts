@@ -26,11 +26,18 @@ function assert(condition: boolean, message: string): void {
   }
 }
 
+/** 收到的 API 调用报文（OneBot11/napcat 的 action 请求）。 */
+interface MockReceivedApiCall {
+  action: string;
+  params: Record<string, unknown>;
+  echo?: string;
+}
+
 class MockNapcatServer {
   private wss: WebSocketServer;
   public lastReceivedAction: string | null = null;
   public lastReceivedParams: Record<string, unknown> | null = null;
-  public messageHandler: ((msg: Record<string, unknown>) => void) | null = null;
+  public messageHandler: ((msg: MockReceivedApiCall) => void) | null = null;
 
   constructor(port: number) {
     this.wss = new WebSocketServer({ port, host: "127.0.0.1" });
@@ -136,11 +143,10 @@ async function main(): Promise<void> {
   {
     const { adapter, server, eventQueue } = await createAdapterAndServer(port);
 
-    let receivedAction: string | null = null;
-    let receivedParams: Record<string, unknown> | null = null;
+    const received = { action: null as string | null, params: null as Record<string, unknown> | null };
     server.messageHandler = (msg) => {
-      receivedAction = msg.action;
-      receivedParams = msg.params;
+      received.action = msg.action;
+      received.params = msg.params;
       server.broadcast({ echo: msg.echo, retcode: 0, status: "ok", data: {} });
     };
 
@@ -157,9 +163,9 @@ async function main(): Promise<void> {
 
     await new Promise(r => setTimeout(r, 300));
 
-    assert(receivedAction === "set_friend_add_request", "Should call set_friend_add_request");
-    assert(receivedParams?.flag === "flag_friend_001", "Should pass correct flag");
-    assert(receivedParams?.approve === false, "Should auto-reject by default");
+    assert(received.action === "set_friend_add_request", "Should call set_friend_add_request");
+    assert(received.params?.flag === "flag_friend_001", "Should pass correct flag");
+    assert(received.params?.approve === false, "Should auto-reject by default");
 
     await adapter.stop();
     await server.close();
@@ -171,9 +177,9 @@ async function main(): Promise<void> {
   {
     const { adapter, server, eventQueue } = await createAdapterAndServer(port, { autoApproveFriend: true });
 
-    let receivedParams: Record<string, unknown> | null = null;
+    const received = { params: null as Record<string, unknown> | null };
     server.messageHandler = (msg) => {
-      receivedParams = msg.params;
+      received.params = msg.params;
       server.broadcast({ echo: msg.echo, retcode: 0, status: "ok", data: {} });
     };
 
@@ -188,8 +194,8 @@ async function main(): Promise<void> {
     });
 
     await new Promise(r => setTimeout(r, 300));
-    assert(receivedParams?.approve === true, "Should auto-approve when configured");
-    assert(receivedParams?.flag === "flag_friend_002", "Should pass correct flag");
+    assert(received.params?.approve === true, "Should auto-approve when configured");
+    assert(received.params?.flag === "flag_friend_002", "Should pass correct flag");
 
     await adapter.stop();
     await server.close();
@@ -201,11 +207,10 @@ async function main(): Promise<void> {
   {
     const { adapter, server, eventQueue } = await createAdapterAndServer(port, { autoRejectReason: "Not accepting" });
 
-    let receivedAction: string | null = null;
-    let receivedParams: Record<string, unknown> | null = null;
+    const received = { action: null as string | null, params: null as Record<string, unknown> | null };
     server.messageHandler = (msg) => {
-      receivedAction = msg.action;
-      receivedParams = msg.params;
+      received.action = msg.action;
+      received.params = msg.params;
       server.broadcast({ echo: msg.echo, retcode: 0, status: "ok", data: {} });
     };
 
@@ -222,10 +227,10 @@ async function main(): Promise<void> {
     });
 
     await new Promise(r => setTimeout(r, 300));
-    assert(receivedAction === "set_group_add_request", "Should call set_group_add_request");
-    assert(receivedParams?.approve === false, "Should auto-reject group request by default");
-    assert(receivedParams?.reason === "Not accepting", "Should pass reject reason");
-    assert(receivedParams?.sub_type === "add", "Should pass sub_type");
+    assert(received.action === "set_group_add_request", "Should call set_group_add_request");
+    assert(received.params?.approve === false, "Should auto-reject group request by default");
+    assert(received.params?.reason === "Not accepting", "Should pass reject reason");
+    assert(received.params?.sub_type === "add", "Should pass sub_type");
 
     await adapter.stop();
     await server.close();
@@ -237,9 +242,9 @@ async function main(): Promise<void> {
   {
     const { adapter, server, eventQueue } = await createAdapterAndServer(port, { autoApproveGroup: true });
 
-    let receivedParams: Record<string, unknown> | null = null;
+    const received = { params: null as Record<string, unknown> | null };
     server.messageHandler = (msg) => {
-      receivedParams = msg.params;
+      received.params = msg.params;
       server.broadcast({ echo: msg.echo, retcode: 0, status: "ok", data: {} });
     };
 
@@ -256,8 +261,8 @@ async function main(): Promise<void> {
     });
 
     await new Promise(r => setTimeout(r, 300));
-    assert(receivedParams?.approve === true, "Should auto-approve group invite when configured");
-    assert(receivedParams?.sub_type === "invite", "Should pass sub_type=invite");
+    assert(received.params?.approve === true, "Should auto-approve group invite when configured");
+    assert(received.params?.sub_type === "invite", "Should pass sub_type=invite");
 
     await adapter.stop();
     await server.close();
@@ -269,19 +274,18 @@ async function main(): Promise<void> {
   {
     const { adapter, server, eventQueue } = await createAdapterAndServer(port);
 
-    let receivedAction: string | null = null;
-    let receivedParams: Record<string, unknown> | null = null;
+    const received = { action: null as string | null, params: null as Record<string, unknown> | null };
     server.messageHandler = (msg) => {
-      receivedAction = msg.action;
-      receivedParams = msg.params;
+      received.action = msg.action;
+      received.params = msg.params;
       server.broadcast({ echo: msg.echo, retcode: 0, status: "ok", data: {} });
     };
 
     await adapter.setFriendAddRequest("flag_123", true, "Friend");
-    assert(receivedAction === "set_friend_add_request", "Should call set_friend_add_request");
-    assert(receivedParams?.flag === "flag_123", "Should pass flag");
-    assert(receivedParams?.approve === true, "Should pass approve=true");
-    assert(receivedParams?.remark === "Friend", "Should pass remark");
+    assert(received.action === "set_friend_add_request", "Should call set_friend_add_request");
+    assert(received.params?.flag === "flag_123", "Should pass flag");
+    assert(received.params?.approve === true, "Should pass approve=true");
+    assert(received.params?.remark === "Friend", "Should pass remark");
 
     await adapter.stop();
     await server.close();
@@ -293,20 +297,19 @@ async function main(): Promise<void> {
   {
     const { adapter, server, eventQueue } = await createAdapterAndServer(port);
 
-    let receivedAction: string | null = null;
-    let receivedParams: Record<string, unknown> | null = null;
+    const received = { action: null as string | null, params: null as Record<string, unknown> | null };
     server.messageHandler = (msg) => {
-      receivedAction = msg.action;
-      receivedParams = msg.params;
+      received.action = msg.action;
+      received.params = msg.params;
       server.broadcast({ echo: msg.echo, retcode: 0, status: "ok", data: {} });
     };
 
     await adapter.setGroupAddRequest("flag_456", "add", false, "Full");
-    assert(receivedAction === "set_group_add_request", "Should call set_group_add_request");
-    assert(receivedParams?.flag === "flag_456", "Should pass flag");
-    assert(receivedParams?.sub_type === "add", "Should pass sub_type");
-    assert(receivedParams?.approve === false, "Should pass approve=false");
-    assert(receivedParams?.reason === "Full", "Should pass reason");
+    assert(received.action === "set_group_add_request", "Should call set_group_add_request");
+    assert(received.params?.flag === "flag_456", "Should pass flag");
+    assert(received.params?.sub_type === "add", "Should pass sub_type");
+    assert(received.params?.approve === false, "Should pass approve=false");
+    assert(received.params?.reason === "Full", "Should pass reason");
 
     await adapter.stop();
     await server.close();

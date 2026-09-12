@@ -314,7 +314,7 @@ export default function McpManager() {
       } else {
         showMessage('操作失败', 'error')
       }
-    } catch (error) {
+    } catch (_error) {
       showMessage('操作失败', 'error')
     }
   }
@@ -340,7 +340,7 @@ export default function McpManager() {
       } else {
         showMessage('连接测试请求失败', 'error')
       }
-    } catch (error) {
+    } catch (_error) {
       showMessage('连接测试请求失败', 'error')
     } finally {
       setTesting(false)
@@ -403,7 +403,7 @@ export default function McpManager() {
           showMessage('保存失败', 'error')
         }
       }
-    } catch (error) {
+    } catch (_error) {
       showMessage('保存失败', 'error')
     } finally {
       setSaving(false)
@@ -424,7 +424,7 @@ export default function McpManager() {
       } else {
         showMessage('删除失败', 'error')
       }
-    } catch (error) {
+    } catch (_error) {
       showMessage('删除失败', 'error')
     }
   }

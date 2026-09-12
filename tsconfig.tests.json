@@ -1,0 +1,69 @@
+{
+  // Type-check the test suite.
+  //
+  // tests/**/*.ts is not covered by any other tsconfig (the root project only
+  // includes src/, and frontend/ is a separate project), so before this file
+  // existed the tests were never type-checked — tsx only strips types.
+  //
+  // The `paths` mapping below resolves every workspace package back to its
+  // SOURCE, not its built dist — the same mapping tsx uses at runtime (the
+  // `test` scripts pass --tsconfig tsconfig.tests.json), so typecheck and
+  // runtime always exercise the same, current source.
+  //
+  // `paths` patterns allow at most one '*', hence one entry per package for
+  // both the bare specifier and the explicit `*.js` subpath form.
+  // (No baseUrl: it is deprecated and paths resolve relative to this file.)
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "types": ["node"],
+    // Map every workspace package back to its SOURCE, not its built dist.
+    // Tests import some modules via `../packages/x/src/y.js` and others via
+    // `@yachiyo/x/y.js`; without this the two resolve to different type
+    // identities (src vs dist) and classes with private members become
+    // nominally incompatible. Unifying on src also means the tests always
+    // exercise the current source rather than a possibly stale build.
+    //
+    // `paths` patterns allow at most one '*', hence one entry per package for
+    // both the bare specifier and the explicit `*.js` subpath form.
+    // (No baseUrl: it is deprecated and paths resolve relative to this file.)
+    "paths": {
+      "@yachiyo/agent": ["./packages/agent/src/index.ts"],
+      "@yachiyo/agent/*.js": ["./packages/agent/src/*.ts"],
+      "@yachiyo/common": ["./packages/common/src/index.ts"],
+      "@yachiyo/common/*.js": ["./packages/common/src/*.ts"],
+      "@yachiyo/config": ["./packages/config/src/index.ts"],
+      "@yachiyo/config/*.js": ["./packages/config/src/*.ts"],
+      "@yachiyo/conversation": ["./packages/conversation/src/index.ts"],
+      "@yachiyo/conversation/*.js": ["./packages/conversation/src/*.ts"],
+      "@yachiyo/dashboard": ["./packages/dashboard/src/index.ts"],
+      "@yachiyo/dashboard/*.js": ["./packages/dashboard/src/*.ts"],
+      "@yachiyo/knowledge-base": ["./packages/knowledge-base/src/index.ts"],
+      "@yachiyo/knowledge-base/*.js": ["./packages/knowledge-base/src/*.ts"],
+      "@yachiyo/message": ["./packages/message/src/index.ts"],
+      "@yachiyo/message/*.js": ["./packages/message/src/*.ts"],
+      "@yachiyo/persona": ["./packages/persona/src/index.ts"],
+      "@yachiyo/persona/*.js": ["./packages/persona/src/*.ts"],
+      "@yachiyo/pipeline": ["./packages/pipeline/src/index.ts"],
+      "@yachiyo/pipeline/*.js": ["./packages/pipeline/src/*.ts"],
+      "@yachiyo/platform": ["./packages/platform/src/index.ts"],
+      "@yachiyo/platform/*.js": ["./packages/platform/src/*.ts"],
+      "@yachiyo/plugin": ["./packages/plugin/src/index.ts"],
+      "@yachiyo/plugin/*.js": ["./packages/plugin/src/*.ts"],
+      "@yachiyo/provider": ["./packages/provider/src/index.ts"],
+      "@yachiyo/provider/*.js": ["./packages/provider/src/*.ts"],
+      "@yachiyo/skill": ["./packages/skill/src/index.ts"],
+      "@yachiyo/skill/*.js": ["./packages/skill/src/*.ts"],
+      "@yachiyo/t2i": ["./packages/t2i/src/index.ts"],
+      "@yachiyo/t2i/*.js": ["./packages/t2i/src/*.ts"]
+    }
+  },
+  "include": ["tests/**/*.ts"]
+}

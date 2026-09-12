@@ -264,9 +264,14 @@ export default function Dashboard({ isLightMode }: { isLightMode: boolean }) {
   })()
 
   const cacheLineColor = isDark ? '#22D3EE' : '#06B6D4'
-  const chartColors = isDark
-    ? ['#6F8FAF', '#7E9A73', '#A78468', '#8A78A8', '#6B9995', '#B07A87', '#8C8F62', '#7C8798', cacheLineColor]
-    : ['#5F7E9B', '#708865', '#9A7557', '#786696', '#5D8985', '#9C6674', '#80844F', '#69788D', cacheLineColor]
+  // chartColors 用 useMemo 固定身份：它每次渲染都会新建数组，若直接作为下方
+  // 大 useMemo 的依赖会让 ApexOptions 每次渲染都重算。依赖只有 isDark，主题不变则身份稳定。
+  const chartColors = useMemo(
+    () => (isDark
+      ? ['#6F8FAF', '#7E9A73', '#A78468', '#8A78A8', '#6B9995', '#B07A87', '#8C8F62', '#7C8798', cacheLineColor]
+      : ['#5F7E9B', '#708865', '#9A7557', '#786696', '#5D8985', '#9C6674', '#80844F', '#69788D', cacheLineColor]),
+    [isDark, cacheLineColor]
+  )
 
   const chartTextColor = isDark ? '#A1A1AA' : '#64748B'
   const chartBorderColor = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.08)'

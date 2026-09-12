@@ -94,6 +94,7 @@ function skip(message: string): void {
 function createMockProvider(responses: LLMResponse[]): Provider {
   let callIndex = 0;
   return {
+    type: "chat_completion",
     providerConfig: {
       id: "mock-provider",
       maxContextTokens: 4096,
@@ -385,6 +386,7 @@ async function testLLMSummaryCompressor(): Promise<void> {
   // Mock Provider that returns a fixed summary
   let callCount = 0;
   const mockProvider: Provider = {
+    type: "chat_completion",
     providerConfig: {
       id: "mock-compress-provider",
       maxContextTokens: 4096,

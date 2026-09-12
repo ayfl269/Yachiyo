@@ -104,7 +104,11 @@ async function main(): Promise<void> {
   const db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
   for (const m of SCHEDULER_MIGRATIONS) {
-    db.exec(m.up);
+    if (typeof m.up === "function") {
+      m.up(db);
+    } else {
+      db.exec(m.up);
+    }
   }
 
   const store = new SqliteSchedulerTaskStore(db);
@@ -585,7 +589,11 @@ async function main(): Promise<void> {
   const db2 = new Database(":memory:");
   db2.pragma("foreign_keys = ON");
   for (const m of SCHEDULER_MIGRATIONS) {
-    db2.exec(m.up);
+    if (typeof m.up === "function") {
+      m.up(db2);
+    } else {
+      db2.exec(m.up);
+    }
   }
   const store2 = new SqliteSchedulerTaskStore(db2);
   const taskScheduler = new TaskScheduler(store2, { interval: 60000 });

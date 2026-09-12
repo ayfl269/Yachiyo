@@ -38,7 +38,7 @@ import { MessageEvent } from "@yachiyo/message/event.js";
 let passed = 0;
 let failed = 0;
 
-function assert(condition: boolean, message: string): void {
+function assert(condition: boolean | undefined, message: string): void {
   if (condition) {
     passed++;
     console.log(`  \u2714 ${message}`);
@@ -51,7 +51,7 @@ function assert(condition: boolean, message: string): void {
 interface FetchCall {
   url: string;
   method: string;
-  body: unknown;
+  body: Record<string, unknown> | undefined;
   headers: Record<string, string>;
 }
 
@@ -65,9 +65,9 @@ class FetchMock {
     (globalThis.fetch as unknown) = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       const method = (init?.method ?? "GET").toUpperCase();
-      let body: unknown = undefined;
+      let body: Record<string, unknown> | undefined = undefined;
       if (init?.body) {
-        try { body = JSON.parse(init.body as string); } catch { body = init.body; }
+        try { body = JSON.parse(init.body as string) as Record<string, unknown>; } catch { body = init.body as unknown as Record<string, unknown>; }
       }
       const headers: Record<string, string> = {};
       if (init?.headers) {
@@ -268,7 +268,7 @@ async function testExtendedSend(): Promise<void> {
 
     const lastCall = fetchMock.getLastCall();
     assert(lastCall?.body?.msg_type === 2, "Should send msg_type=2");
-    assert(lastCall?.body?.markdown?.content === "# Hello\nThis is **markdown**", "Should pass markdown content");
+    assert((lastCall?.body?.markdown as Record<string, unknown> | undefined)?.content === "# Hello\nThis is **markdown**", "Should pass markdown content");
     assert(lastCall?.body?.msg_id === "event_abc", "Should pass msg_id for passive reply");
     assert(typeof lastCall?.body?.msg_seq === "number", "Should include msg_seq");
 
@@ -289,7 +289,7 @@ async function testExtendedSend(): Promise<void> {
 
     const lastCall = fetchMock.getLastCall();
     assert(lastCall?.body?.msg_type === 3, "Should send msg_type=3");
-    assert(lastCall?.body?.ark?.template_id === 1, "Should pass ark template_id");
+    assert((lastCall?.body?.ark as Record<string, unknown> | undefined)?.template_id === 1, "Should pass ark template_id");
     assert(lastCall?.url.includes("/v2/users/user_open_1/messages"), "Should target C2C messages endpoint");
 
     await cleanup(adapter, fetchMock);
@@ -306,7 +306,7 @@ async function testExtendedSend(): Promise<void> {
 
     const lastCall = fetchMock.getLastCall();
     assert(lastCall?.body?.msg_type === 4, "Should send msg_type=4");
-    assert(lastCall?.body?.embed?.title === "Test", "Should pass embed title");
+    assert((lastCall?.body?.embed as Record<string, unknown> | undefined)?.title === "Test", "Should pass embed title");
     assert(lastCall?.url.includes("/channels/channel_1/messages"), "Should target channel messages endpoint");
 
     await cleanup(adapter, fetchMock);
@@ -325,7 +325,7 @@ async function testExtendedSend(): Promise<void> {
 
     const lastCall = fetchMock.getLastCall();
     assert(lastCall?.body?.msg_type === 7, "Should send msg_type=7");
-    assert(lastCall?.body?.media?.file_info === "preuploaded_file_info", "Should pass media file_info");
+    assert((lastCall?.body?.media as Record<string, unknown> | undefined)?.file_info === "preuploaded_file_info", "Should pass media file_info");
 
     await cleanup(adapter, fetchMock);
   }
@@ -355,8 +355,10 @@ async function testExtendedSend(): Promise<void> {
     await adapter.sendC2CMessageEx("user_1", { msg_type: 2, markdown: { content: "Please choose" }, keyboard });
 
     const lastCall = fetchMock.getLastCall();
-    assert(lastCall?.body?.keyboard?.content?.rows?.length === 1, "Should pass keyboard with 1 row");
-    assert(lastCall?.body?.keyboard?.content?.rows[0].buttons[0].id === "btn1", "Should pass button id");
+    const lastKeyboard = lastCall?.body?.keyboard as Record<string, unknown> | undefined;
+    const keyboardContent = lastKeyboard?.content as { rows?: Array<{ buttons?: Array<{ id?: string }> }> } | undefined;
+    assert(Array.isArray(keyboardContent?.rows) && keyboardContent.rows.length === 1, "Should pass keyboard with 1 row");
+    assert(keyboardContent?.rows?.[0]?.buttons?.[0]?.id === "btn1", "Should pass button id");
 
     await cleanup(adapter, fetchMock);
   }
@@ -1144,7 +1146,7 @@ async function testApiPermissions(): Promise<void> {
     assert(demand.api_identify.path === "/guilds/{guild_id}", "Should return api_identify.path");
     assert(demand.desc === "显示频道信息", "Should return desc");
     assert(fetchMock.getLastCall()?.method === "POST", "Should use POST");
-    assert(fetchMock.getLastCall()?.body?.api_identify?.method === "GET", "Should send api_identify.method");
+    assert((fetchMock.getLastCall()?.body?.api_identify as Record<string, unknown> | undefined)?.method === "GET", "Should send api_identify.method");
 
     await cleanup(adapter, fetchMock);
   }

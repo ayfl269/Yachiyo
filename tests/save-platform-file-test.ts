@@ -12,7 +12,9 @@
  */
 
 import { createSavePlatformFileTool } from "@yachiyo/agent/save-platform-file-tool.js";
-import type { FunctionTool, CallToolResult, ContextWrapper } from "@yachiyo/agent/types.js";
+// FunctionTool lives in tool.js (it is not re-exported from types.js).
+import type { FunctionTool } from "@yachiyo/agent/tool.js";
+import type { CallToolResult, ContextWrapper } from "@yachiyo/agent/types.js";
 import { join } from "path";
 import { mkdtemp, rm, readFile } from "fs/promises";
 import { tmpdir } from "os";
@@ -337,7 +339,7 @@ async function main(): Promise<void> {
       const params = tool.parameters as Record<string, unknown>;
       const props = params.properties as Record<string, { enum?: string[] }>;
       assert(
-        props.action.enum?.includes("list") && props.action.enum?.includes("save"),
+        props.action.enum?.includes("list") === true && props.action.enum?.includes("save") === true,
         "Action enum should include 'list' and 'save'",
       );
       assert(

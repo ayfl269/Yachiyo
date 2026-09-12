@@ -337,7 +337,11 @@ async function testSqliteKBMetadataStore(): Promise<void> {
   db.pragma("foreign_keys = ON");
   // 手动执行迁移
   for (const m of KNOWLEDGE_MIGRATIONS) {
-    db.exec(m.up);
+    if (typeof m.up === "function") {
+      m.up(db);
+    } else {
+      db.exec(m.up);
+    }
   }
 
   const store = new SqliteKBMetadataStore(db);
@@ -413,7 +417,11 @@ async function testSqliteKBMetadataStore(): Promise<void> {
   let idempotentOk = true;
   try {
     for (const m of KNOWLEDGE_MIGRATIONS) {
+      if (typeof m.up === "function") {
+      m.up(db);
+    } else {
       db.exec(m.up);
+    }
     }
   } catch {
     idempotentOk = false;
@@ -437,7 +445,11 @@ async function testSqliteVectorStore(): Promise<void> {
   const db = new Database(":memory:");
   db.pragma("journal_mode = DELETE");
   for (const m of KNOWLEDGE_MIGRATIONS) {
-    db.exec(m.up);
+    if (typeof m.up === "function") {
+      m.up(db);
+    } else {
+      db.exec(m.up);
+    }
   }
 
   const store = new SqliteVectorStore(db);
@@ -559,7 +571,13 @@ async function testKnowledgeBaseManager(): Promise<void> {
   const db = new Database(":memory:");
   db.pragma("journal_mode = DELETE");
   db.pragma("foreign_keys = ON");
-  for (const m of KNOWLEDGE_MIGRATIONS) db.exec(m.up);
+  for (const m of KNOWLEDGE_MIGRATIONS) {
+    if (typeof m.up === "function") {
+      m.up(db);
+    } else {
+      db.exec(m.up);
+    }
+  }
   const metadataStore = new SqliteKBMetadataStore(db);
   const vectorStore = new SqliteVectorStore(db);
   const manager = new KnowledgeBaseManager(mockProviderManager, vectorStore);
