@@ -158,7 +158,7 @@ pnpm frontend:dev
 pnpm test
 ```
 
-包含的测试文件（全部 13 个由 `pnpm test` 运行）：
+包含的测试文件（全部 21 个由 `pnpm test` 运行）：
 
 | 测试文件 | 测试内容 |
 |----------|---------|
@@ -167,13 +167,21 @@ pnpm test
 | `tests/platform-adapter-test.ts` | 平台与 Webhook 适配器 |
 | `tests/context-system-test.ts` | 上下文管理系统 |
 | `tests/memory-system-test.ts` | 记忆提取与整理 |
+| `tests/long-term-consolidation-test.ts` | 长期记忆语义合并、数据库迁移与存量数据保留 |
 | `tests/provider-caching-test.ts` | 模型 Prompt 缓存 |
 | `tests/provider-manager-test.ts` | 模型加载与 MCP 安全校验 |
+| `tests/provider-stream-parsers-test.ts` | 各 Provider 流式响应解析 |
+| `tests/model-context-limit-test.ts` | 上下文窗口解析（官方元数据优先、`max_tokens` 32k 下界、降级阶梯） |
+| `tests/context-downgrade-test.ts` | context-overflow 识别、真实窗口解析与压缩阈值按窗口重算 |
 | `tests/pipeline-stages-test.ts` | Pipeline 8 阶段核心逻辑单元测试 |
+| `tests/save-run-history-test.ts` | saveRunHistory 历史写入、中间态过滤与 append-only 语义 |
+| `tests/full-memory-indexing-test.ts` | 全量会话持久化与后台记忆索引生成/检索 |
+| `tests/conversation-test.ts` | 对话管理（会话映射、历史、API Key） |
 | `tests/save-platform-file-test.ts` | save_platform_file 工具（URL 校验、路径穿越防护、文件下载） |
 | `tests/onebot11-api-test.ts` | OneBot11 适配器 API 响应机制（Echo 关联、超时、核心 API） |
 | `tests/onebot11-events-test.ts` | OneBot11 适配器事件处理与群管理 API |
 | `tests/onebot11-extended-test.ts` | OneBot11 适配器扩展 API（消息/文件/工具/群管扩展） |
+| `tests/qq-platform-tools-test.ts` | QQ 平台工具 |
 | `tests/qqofficial-test.ts` | QQ Official Bot 适配器（富媒体、扩展发送、撤回、表态、频道/公告/权限） |
 
 另可通过独立脚本运行：
@@ -185,7 +193,7 @@ pnpm test
 | `pnpm test:interactive-shell` | `tests/interactive-shell-test.ts` | 交互式 Shell 工具测试 |
 | `pnpm test:conversation` | `tests/conversation-test.ts` | 对话管理测试 |
 
-以下测试文件未绑定 npm 脚本，可通过 `tsx tests/<file>` 直接运行：
+以下测试文件未绑定 npm 脚本，可通过 `tsx --tsconfig tsconfig.tests.json tests/<file>` 直接运行：
 
 | 测试文件 | 测试内容 |
 |----------|---------|
@@ -193,6 +201,8 @@ pnpm test
 | `tests/knowledge-base-test.ts` | 知识库分块、向量检索与 RAG |
 | `tests/proxy-tool-test.ts` | proxy_manage 工具（运行时代理切换） |
 | `tests/scheduler-system-test.ts` | 定时任务两阶段触发与状态机 |
+
+全部测试文件（含上表 21 个与独立脚本）均纳入 `pnpm typecheck` 的 `tsconfig.tests.json` 类型检查，无白名单排除。
 
 ---
 
@@ -294,10 +304,10 @@ Dashboard 的 `/api/debug/chat` 端点用于集成测试。调试对话会被标
 |------|------|
 | `pnpm install` | 安装后端依赖 |
 | `pnpm build` | 编译所有子包（`tsc -b`） |
-| `pnpm typecheck` | 类型检查（不产出文件） |
-| `pnpm lint` | ESLint 代码规范检查 |
+| `pnpm typecheck` | 类型检查（`tsc -b` 覆盖根工程 + 14 个子包、`tsconfig.tests.json` 覆盖 tests、frontend 独立工程） |
+| `pnpm lint` | ESLint 代码规范检查（含 `frontend/src`） |
 | `pnpm dev` | 启动开发服务器（`tsx watch`） |
-| `pnpm test` | 运行核心测试套件（13 个测试） |
+| `pnpm test` | 运行核心测试套件（21 个测试） |
 | `pnpm frontend:install` | 安装前端依赖（独立 lockfile） |
 | `pnpm frontend:dev` | 启动前端 Vite 开发服务器 |
 | `pnpm frontend:build` | 构建前端生产版本 |
