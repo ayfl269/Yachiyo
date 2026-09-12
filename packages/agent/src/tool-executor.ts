@@ -959,7 +959,6 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
     }
 
     const timeout = runContext.toolCallTimeout;
-    console.log(`[ToolExecutor] ${tool.name} executing via ${methodName}, timeout=${timeout}s`);
 
     // Record tool execution start onto the trace span attached to the run
     // context (if any). No-op when no span is attached.
@@ -1011,11 +1010,8 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
         if (ret != null) {
           if (isCallToolResult(ret)) {
             yield ret;
-            const textContent = ret.content?.filter(c => c.type === 'text').map(c => c.text).join('') ?? '';
-            console.log(`[ToolExecutor] ${tool.name} promise result: CallToolResult, text length=${textContent.length}`);
           } else {
             yield { content: [{ type: "text" as const, text: String(ret) }] };
-            console.log(`[ToolExecutor] ${tool.name} promise result: raw text length=${String(ret).length}`);
           }
         } else {
           console.log(`[ToolExecutor] ${tool.name} promise resolved to null`);

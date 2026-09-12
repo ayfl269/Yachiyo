@@ -41,11 +41,9 @@ export async function* parseOpenAIStream(
   abortSignal?: AbortSignal,
 ): AsyncGenerator<LLMResponse, void, unknown> {
   const toolCallsAccum = new Map<number, ToolCallAccum>();
-  let chunkIndex = 0;
 
   for await (const event of parseSSEStream(response, abortSignal)) {
     if (event.data === "[DONE]") {
-      console.log(`[OpenAIStreamParser] Received [DONE] event, total chunks processed: ${chunkIndex}`);
       break;
     }
 
@@ -61,7 +59,6 @@ export async function* parseOpenAIStream(
       continue;
     }
 
-    chunkIndex++;
     const choice = chunk.choices?.[0];
     if (!choice) continue;
 

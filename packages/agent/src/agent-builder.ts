@@ -79,14 +79,9 @@ export async function buildMainAgent<TContext = unknown>(
   if (toolManager && request.funcTool) {
     const fullToolSet = toolManager.getFullToolSet();
     const funcTool = request.funcTool as ToolSet;
-    console.log(`[AgentBuilder] Merging toolManager tools (${fullToolSet.length}) into existing funcTool (${funcTool.length})`);
     funcTool.merge(fullToolSet);
-    console.log(`[AgentBuilder] After merge: funcTool has ${funcTool.length} tools`);
   } else if (toolManager && !request.funcTool) {
     request.funcTool = toolManager.getFullToolSet();
-    console.log(`[AgentBuilder] Set funcTool from toolManager: ${(request.funcTool as ToolSet).length} tools`);
-  } else {
-    console.log(`[AgentBuilder] No toolManager or no merge needed. toolManager=${!!toolManager}, hasFuncTool=${!!request.funcTool}`);
   }
 
   // Apply sub-agent handoff tools
