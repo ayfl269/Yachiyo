@@ -122,6 +122,9 @@ async function testSoftVsHardLimit(): Promise<void> {
 
   const config = createContextConfig({
     maxContextTokens: 1000,
+    // 本测试只验证软/硬限双检逻辑，不涉及输出预留，显式置 0 以保持
+    // 触发阈值 = 1000 × COMPRESS_TRIGGER_RATIO = 850 的原始语义。
+    reservedOutputTokens: 0,
     customTokenCounter: counter,
     customCompressor: compressor,
   });

@@ -153,8 +153,8 @@ function generateUniqueSourceId(baseId: string, existing: ProviderSource[]): str
 }
 
 // 模态能力已不再根据模型名推断：所有 chat 模型默认全部勾选（text + image + audio + tool_use）。
-// 如果 API 元数据可用，max_context_tokens 和 reasoning 仍从 meta 读取（这两个是数值参数，
-// meta 提供的是 API 声明的真实值，不属于"能力识别"范畴）；modalities 一律固定全部勾选。
+// max_context_tokens 与 reasoning 从 API 元数据自动探测读取（数值参数，非能力识别），
+// max_context_tokens 为自动探测值，不支持手动调整；modalities 一律固定全部勾选。
 
 // Non-chat provider field schema
 const nonChatFieldSchema: Record<string, FieldDef[][]> = {
@@ -666,8 +666,8 @@ export default function ProviderManager() {
     // modalities 固定全部勾选：不再根据模型名或 API 元数据推断能力。
     // 后端 sanitizer 会在 provider 真不支持某能力时通过 warn 日志暴露问题。
     const modalities = ['text', 'image', 'audio', 'tool_use']
-    // max_context_tokens 和 reasoning 仍从 API 元数据读取（数值参数，非能力识别）；
-    // 无 meta 时使用默认值（0 / false），用户可在表单中手动调整。
+    // max_context_tokens 自动取自模型 API 元数据探测结果（无 meta 时为 0，运行时回退
+    // DEFAULT_MODEL_CONTEXT_WINDOW）；reasoning 从元数据读取。二者均不支持手动调整。
     const maxContext = meta?.limit?.context || 0
     const isReasoning = supportsReasoning(meta)
 
@@ -1505,8 +1505,8 @@ export default function ProviderManager() {
               </label>
             </div>
             <div className="form-group">
-              <label>最大上下文长度</label>
-              <input type="number" value={providerEditData.max_context_tokens ?? 0} onChange={e => setProviderEditField('max_context_tokens', Number(e.target.value))} className="form-control font-mono" />
+              <label>上下文窗口（tokens）<span className="text-muted text-xs">自动从模型 API 元数据探测，不支持手动调整</span></label>
+              <input type="text" value={providerEditData.max_context_tokens ?? 0} className="form-control font-mono" disabled readOnly />
             </div>
             <div className="form-group span-2">
               <label>模态能力 (modalities) <span className="text-muted text-xs">工具调用能力已默认强制启用，无需在此勾选</span></label>

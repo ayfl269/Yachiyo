@@ -28,7 +28,13 @@ function verifyPassword(password: string, stored: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+/** 模型列表条目：id + 自动探测到的上下文窗口（tokens，未探测到时为 undefined）。 */
+interface ModelEntry {
+  id: string;
+  contextLimit?: number;
+}
 
+import { pickContextLimit } from "./model-context-limit.js";
 import type { AsyncQueue } from "@yachiyo/common/async-queue.js";
 import type { MessageEvent } from "@yachiyo/message/event.js";
 import type { ProviderManager } from "@yachiyo/provider/manager.js";
@@ -1043,7 +1049,8 @@ export class DashboardServer {
         return;
       }
       try {
-        const models = await this.fetchModelsFromProvider(type, config);
+        const entries = await this.fetchModelEntriesFromProvider(type, config);
+        const models = entries.map((e) => e.id).sort();
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, models }));
       } catch (err: unknown) {
@@ -2052,20 +2059,25 @@ export class DashboardServer {
           return;
         }
 
-        // 调用内部方法获取模型列表
-        const models = await this.fetchModelsFromProvider(providerType, {
+        // 调用内部方法获取模型列表及探测的上下文窗口元数据
+        const entries = await this.fetchModelEntriesFromProvider(providerType, {
           apiKey,
           baseUrl: apiBase,
         });
+        const models = entries.map((e) => e.id).sort();
 
-        // 构建元数据映射（简化版）
+        // 构建元数据映射：上下文窗口只取 API 官方元数据。
+        // 注意：这里绝不能用默认值或名称启发式"补"一个数——探不到就是探不到，
+        // 持久化的 max_context_tokens 会是 0，运行态据此走
+        // DEFAULT_MODEL_CONTEXT_WINDOW(200k) + context-overflow 降级重试。
+        // 若在这里填入猜测值，运行态会把它当成真实元数据，降级机制就永远不会触发。
         const modelMetadata: Record<string, unknown> = {};
-        for (const model of models) {
-          modelMetadata[model] = {
+        for (const entry of entries) {
+          modelMetadata[entry.id] = {
             modalities: { input: ["text", "image"] },
             tool_call: true,
-            reasoning: model.includes("reasoning") || model.includes("think"),
-            limit: { context: model.includes("32k") ? 32768 : model.includes("128k") ? 131072 : 1024 },
+            reasoning: entry.id.includes("reasoning") || entry.id.includes("think"),
+            limit: { context: entry.contextLimit },
           };
         }
 
@@ -3977,15 +3989,17 @@ export class DashboardServer {
   }
 
   /**
-   * 从提供商获取可用模型列表
+   * 从提供商获取可用模型列表（含自动探测的上下文窗口元数据）。
    * 按 type 严格匹配接口格式：
    *   - openai / openai_responses → OpenAI 兼容 /v1/models + Bearer auth
    *   - gemini                   → Gemini 原生 /v1beta/models?key=xxx
    *   - anthropic                → Anthropic 原生 /v1/models + x-api-key
    * 若用户使用 OpenAI 兼容代理（如 one-api）代理 Gemini 模型，
    * 应将 Provider 类型选为 openai/openai_responses 以使用对应格式获取列表。
+   *
+   * 上下文窗口探测优先级：API 官方元数据字段 > 模型命名启发式 > undefined（由调用方回退）。
    */
-  private async fetchModelsFromProvider(type: string, config: Record<string, unknown>): Promise<string[]> {
+  private async fetchModelEntriesFromProvider(type: string, config: Record<string, unknown>): Promise<ModelEntry[]> {
     const apiKey = (config.apiKey as string) ?? "";
     const rawBaseUrl = ((config.baseUrl as string | undefined) || "").replace(/\/+$/, "");
 
@@ -4003,16 +4017,22 @@ export class DashboardServer {
         throw new Error(`获取模型列表失败 (${response.status}): ${errBody.substring(0, 200) || response.statusText}`);
       }
 
-      const data = await response.json() as { data?: Array<{ id?: string }> };
+      const data = await response.json() as { data?: Array<Record<string, unknown>> };
       if (!Array.isArray(data.data)) {
         throw new Error(`模型列表响应格式异常: 期望 data 数组，得到 ${typeof data.data}。可能是 baseUrl 或 type 配置不匹配。`);
       }
 
-      // 过滤出聊天模型，按 id 排序
       return data.data
-        .map((m) => m.id || "")
-        .filter((id: string) => !!id && !id.startsWith("babbage-") && !id.startsWith("curie-"))
-        .sort();
+        .map((m) => {
+          const id = String(m.id || "");
+          // 动态探测上下文元数据：检查 context_length / context_window /
+          // max_context_length / inputTokenLimit 等常见第三方字段 (如 OpenRouter/OneAPI)。
+          // max_tokens 只作为最后兜底、且必须"像窗口"（≥32k）才采信——多数 OpenAI
+          // 兼容服务用它表示最大**输出**量，误当窗口会让压缩几乎每轮触发。
+          // 判定逻辑见 model-context-limit.ts（有独立单测）。
+          return { id, contextLimit: pickContextLimit(m) };
+        })
+        .filter((e) => !!e.id && !e.id.startsWith("babbage-") && !e.id.startsWith("curie-"));
     }
 
     // Google Gemini — 始终使用 Gemini 原生格式 /v1beta/models
@@ -4061,16 +4081,22 @@ export class DashboardServer {
         throw new Error(`端点返回了非JSON响应。如果是 OpenAI 兼容代理，请将 Provider 类型改为 openai/openai_responses。请求URL: ${url}`);
       }
 
-      const data = JSON.parse(respText) as { models?: Array<{ name?: string; supportedGenerationMethods?: string[] }> };
+      const data = JSON.parse(respText) as { models?: Array<{ name?: string; supportedGenerationMethods?: string[]; inputTokenLimit?: number }> };
       if (!Array.isArray(data.models)) {
         throw new Error(`模型列表响应格式异常: 期望 models 数组，得到 ${typeof data.models}。可能是 baseUrl 或 type 配置不匹配。`);
       }
 
-      // 只返回支持 generateContent 的模型
+      // 只返回支持 generateContent 的模型；上下文窗口取官方 inputTokenLimit 字段
       return data.models
         .filter((m) => m.supportedGenerationMethods?.includes("generateContent"))
-        .map((m) => (m.name || "").replace("models/", ""))
-        .sort();
+        .map((m) => {
+          const id = (m.name || "").replace("models/", "");
+          const contextLimit =
+            typeof m.inputTokenLimit === "number" && m.inputTokenLimit > 1000
+              ? m.inputTokenLimit
+              : undefined;
+          return { id, contextLimit };
+        });
     }
 
     // Anthropic Claude
@@ -4096,7 +4122,13 @@ export class DashboardServer {
         throw new Error(`模型列表响应格式异常: 期望 data 数组，得到 ${typeof data.data}。可能是 baseUrl 或 type 配置不匹配。`);
       }
 
-      return data.data.map((m) => m.id || "").sort();
+      // Anthropic /v1/models 不返回上下文窗口字段 → contextLimit 为 undefined。
+      // 不做任何猜测：运行态会用 DEFAULT_MODEL_CONTEXT_WINDOW(200k) 起步，
+      // claude 系列恰好就是 200k；即使低估也会被 context-overflow 降级重试兜住。
+      return data.data.map((m) => ({
+        id: m.id || "",
+        contextLimit: undefined,
+      }));
     }
 
     throw new Error(`不支持的提供商类型: ${type}，暂无法获取模型列表`);

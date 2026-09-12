@@ -1,5 +1,6 @@
 import type { Message } from "../message.js";
 import type { ContextConfig } from "./config.js";
+import { deriveCompressTriggerTokens } from "./config.js";
 import { EstimateTokenCounter } from "./token-counter.js";
 import type { TokenCounter } from "./token-counter.js";
 import { TruncateByTurnsCompressor, LLMSummaryCompressor } from "./compressor.js";
@@ -42,10 +43,24 @@ export class ContextManager {
     }
   }
 
-  async process(messages: Message[], trustedTokenUsage = 0): Promise<Message[]> {
+  /**
+   * @param overrides.maxContextTokens 运行态 context-overflow 降级时按"下调后的
+   * 窗口"重算压缩触发阈值，而不是沿用构造时的 config。其余步骤不变。
+   */
+  async process(
+    messages: Message[],
+    trustedTokenUsage = 0,
+    overrides?: { maxContextTokens?: number }
+  ): Promise<Message[]> {
     try {
       let result = messages;
       let currentTrustedTokenUsage = trustedTokenUsage;
+
+      const overrideWindow = overrides?.maxContextTokens;
+      const effectiveTrigger =
+        overrideWindow !== undefined && overrideWindow > 0
+          ? deriveCompressTriggerTokens(overrideWindow, this.config.reservedOutputTokens)
+          : this.config.compressTriggerTokens;
 
       // Step 1: Enforce max turns (truncation)
       if (this.config.enforceMaxTurns > 0) {
@@ -59,12 +74,13 @@ export class ContextManager {
         }
       }
 
-      // Step 2: Token-based compression
-      if (this.config.maxContextTokens > 0) {
+      // Step 2: Token-based compression (threshold derived from the model
+      // context window — see createContextConfig / COMPRESS_TRIGGER_RATIO)
+      if (effectiveTrigger > 0) {
         const totalTokens = this.tokenCounter.countTokens(result, currentTrustedTokenUsage);
-        if (this.compressor.shouldCompress(result, totalTokens, this.config.maxContextTokens)) {
+        if (this.compressor.shouldCompress(result, totalTokens, effectiveTrigger)) {
           const prevLen = result.length;
-          result = await this.runCompression(result, totalTokens);
+          result = await this.runCompression(result, totalTokens, effectiveTrigger);
           // Compression modified the message list — trustedTokenUsage is no longer valid
           if (result.length !== prevLen) {
             currentTrustedTokenUsage = 0;
@@ -79,19 +95,21 @@ export class ContextManager {
     }
   }
 
-  private async runCompression(messages: Message[], prevTokens: number): Promise<Message[]> {
-    console.debug("Compress triggered, starting compression...");
-
+  private async runCompression(
+    messages: Message[],
+    prevTokens: number,
+    compressTriggerTokens: number
+  ): Promise<Message[]> {
     let compressed = await this.compressor.compress(messages);
 
     const tokensAfter = this.tokenCounter.countTokens(compressed);
-    const compressRate = (tokensAfter / this.config.maxContextTokens) * 100;
+    const compressRate = (tokensAfter / compressTriggerTokens) * 100;
     console.info(
       `Compress completed. ${prevTokens} -> ${tokensAfter} tokens, compression rate: ${compressRate.toFixed(2)}%.`
     );
 
     // Double check: if still over limit, halve
-    if (tokensAfter > this.config.maxContextTokens) {
+    if (tokensAfter > compressTriggerTokens) {
       console.info("Context still exceeds max tokens after compression, applying halving truncation...");
       compressed = this.truncator.truncateByHalving(compressed);
     }

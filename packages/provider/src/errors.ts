@@ -41,6 +41,74 @@ export class ContextLengthExceededError extends ProviderAPIError {
 }
 
 /**
+ * 已知会报告"上下文超限"的错误文本特征。
+ * 覆盖：OpenAI / OpenAI 兼容（OneAPI、LiteLLM、各家网关）、Anthropic、Gemini。
+ * 注意这只是"是否超限"的判断；真实窗口数字由 {@link parseContextOverflowLimit} 解析。
+ */
+const CONTEXT_OVERFLOW_TEXT_PATTERNS: RegExp[] = [
+  /context_length_exceeded/i,
+  /maximum context length/i,
+  /context length (?:exceeded|too long)/i,
+  /prompt is too long/i,
+  /too many (?:input )?tokens/i,
+  /input (?:tokens|length) exceed/i,
+  /exceed(?:s|ed)? the (?:maximum )?(?:context|token)/i,
+];
+
+/**
+ * 从错误文本里解析 provider 报告的真实上下文窗口（tokens）。
+ *
+ * 主流 provider 的超限报错自带数字，一次失败就能拿到**精确值**——
+ * 这比任何静态阶梯都准（阶梯见 agent 包的 CONTEXT_WINDOW_LADDER，仅作
+ * 报错不带数字时的兜底）。已覆盖：
+ * - OpenAI:  "This model's maximum context length is 16385 tokens. ..."
+ * - Anthropic: "prompt is too long: 12345 tokens > 200000 maximum"
+ * - 常见网关: "... context length limit 8192 tokens ..."
+ *
+ * 识别不到数字时返回 undefined（调用方走阶梯）。上限 1024 起是防止把
+ * "requested 12 tokens" 之类的无关数字当成窗口。
+ */
+export function parseContextOverflowLimit(text: string): number | undefined {
+  if (!text) return undefined;
+  const patterns: RegExp[] = [
+    /maximum context length is (\d+)/i,
+    /maximum context length[^\d]{0,24}(\d{3,})/i,
+    /prompt is too long:\s*\d+\s*tokens?\s*>\s*(\d{3,})/i,
+    /(?:context|input)[^\d]{0,40}?(?:limit|maximum|max)[^\d]{0,24}(\d{4,})/i,
+  ];
+  for (const pattern of patterns) {
+    const m = text.match(pattern);
+    if (!m) continue;
+    const n = parseInt(m[1], 10);
+    if (Number.isFinite(n) && n >= 1024) return n;
+  }
+  return undefined;
+}
+
+/**
+ * 判断错误文本是否为"上下文超限"。供无法按类型抛错的兼容网关兜底——
+ * 能抛 {@link ContextLengthExceededError} 的路径请优先用类型判断。
+ */
+export function isContextOverflowText(text: string): boolean {
+  if (!text) return false;
+  if (parseContextOverflowLimit(text) !== undefined) return true;
+  return CONTEXT_OVERFLOW_TEXT_PATTERNS.some((p) => p.test(text));
+}
+
+/**
+ * 判断一个抛出的错误是否为"上下文超限"。
+ * 优先按类型（{@link ContextLengthExceededError} / errorCode），再按文本兜底。
+ */
+export function isContextOverflowError(error: unknown): boolean {
+  if (error instanceof ContextLengthExceededError) return true;
+  if (error instanceof ProviderAPIError && error.errorCode === "context_length_exceeded") {
+    return true;
+  }
+  const text = error instanceof Error ? `${error.name} ${error.message}` : String(error);
+  return isContextOverflowText(text);
+}
+
+/**
  * 安全解析 API 响应为 JSON。
  * 如果响应体不是有效 JSON（如 HTML 错误页面），返回包含原始文本的错误信息。
  * Body 只读取一次并缓冲，两个错误分支复用同一文本。

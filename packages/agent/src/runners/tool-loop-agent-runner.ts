@@ -18,7 +18,8 @@ import type { BaseAgentRunHooks } from "../hooks.js";
 import type { BaseFunctionToolExecutor } from "../tool-executor.js";
 import { ToolSet } from "../tool.js";
 import type { FunctionTool } from "../tool.js";
-import { createContextConfig } from "../context/config.js";
+import { createContextConfig, DEFAULT_MODEL_CONTEXT_WINDOW, DEFAULT_RESERVED_OUTPUT_TOKENS, deriveToolResultMaxTokens, deriveToolResultPreviewTokens, nextSmallerContextWindow, resolveModelContextWindow } from "../context/config.js";
+import { isContextOverflowText, parseContextOverflowLimit } from "@yachiyo/provider/errors.js";
 import type { ContextConfig } from "../context/config.js";
 import { ContextManager } from "../context/manager.js";
 import { EstimateTokenCounter } from "../context/token-counter.js";
@@ -38,8 +39,6 @@ import type { CachedImage } from "../tool-image-cache.js";
 import { resolveImageToDataUrl, resolveAudioToDataUrl } from "../download-utils.js";
 
 // Constants
-const TOOL_RESULT_MAX_ESTIMATED_TOKENS = 27_500;
-const TOOL_RESULT_PREVIEW_MAX_ESTIMATED_TOKENS = 7_000;
 const EMPTY_OUTPUT_RETRY_ATTEMPTS = 3; // 恢复为 3 次重试以应对偶发网络/API波动
 const EMPTY_OUTPUT_RETRY_WAIT_MIN_S = 1; // 恢复最小等待时间 1 秒
 const EMPTY_OUTPUT_RETRY_WAIT_MAX_S = 5; // 恢复最大等待时间 5 秒
@@ -232,6 +231,41 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
   private toolResultOverflowDir: string | null = null;
   private readTool: FunctionTool | null = null;
   private toolResultTokenCounter = new EstimateTokenCounter();
+  /** 单条工具结果落盘阈值（tokens），由模型上下文窗口自动派生。 */
+  private toolResultMaxTokens = 0;
+  /** 工具结果预览保留量（tokens），由 toolResultMaxTokens 自动派生。 */
+  private toolResultPreviewMaxTokens = 0;
+
+  /**
+   * Index in `runContext.messages` at which messages produced by THIS run begin
+   * (assistant replies, tool results). Everything before it is the loaded
+   * conversation history plus the current user message — those are persisted
+   * separately by the pipeline (`saveUserMessage`).
+   *
+   * Consumed by `ProcessStage.saveRunHistory` so that persistence can append
+   * only what this run actually produced. Without it, persistence had to
+   * re-write the whole view, and since `ContextManager.process()` may have
+   * truncated or summarized the loaded history in place, that write silently
+   * dropped the earliest turns from storage.
+   */
+  private runMessageStartIndex = 0;
+
+  /**
+   * 当前"假设窗口"（tokens）。初始取 reset() 里解析出的 contextWindow，
+   * 收到 context-overflow 错误后按阶梯/报错里的真实值下调
+   * （见 applyContextDowngrade），并保持到本次运行结束——即使切换了
+   * fallback provider 也维持缩小值，避免对新 provider 重复踩同一个坑。
+   */
+  private currentContextWindow = DEFAULT_MODEL_CONTEXT_WINDOW;
+
+  /**
+   * 本次 step 压缩前的消息快照。`ContextManager.process()` 会就地改写
+   * runContext.messages（按轮截断 / LLM 摘要），context-overflow 降级时必须
+   * 从这份未压缩的列表重新压缩，否则每降一级就再丢一层信息
+   * （200k→128k→64k 会链式损失）。存储侧不受影响——saveRunHistory 已是
+   * append-only，只写本次运行产出的部分。
+   */
+  private pristineRunMessages: Message[] = [];
 
   async reset(
     runContext: ContextWrapper<TContext>,
@@ -282,8 +316,29 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
     this.runContext._fallbackProviders = this.fallbackProviders;
 
     // Build context config
+    // 上下文大小控制仅以模型上下文窗口为唯一输入：
+    // - 窗口来自 provider 配置（由模型 API 元数据自动探测写入；探不到时为 0）；
+    // - 未探测到时依次回退：模型名容量后缀（-128k 等显式声明）→
+    //   DEFAULT_MODEL_CONTEXT_WINDOW(200k)，并由 context-overflow 降级重试兜底；
+    // - 输出预留取 provider 的 maxTokens 配置（真实约束为 输入 + 输出 ≤ 窗口），
+    //   未配置时回退 DEFAULT_RESERVED_OUTPUT_TOKENS；
+    // - 压缩触发阈值、工具结果落盘阈值均按窗口比例自动派生，不再支持硬编码或手动指定。
+    const contextWindow = resolveModelContextWindow(
+      this.provider.providerConfig.maxContextTokens,
+      this.req.model
+    );
+    const providerMaxTokens = this.provider.providerConfig.maxTokens;
+    const reservedOutputTokens =
+      typeof providerMaxTokens === "number" && providerMaxTokens > 0
+        ? providerMaxTokens
+        : DEFAULT_RESERVED_OUTPUT_TOKENS;
+    this.toolResultMaxTokens = deriveToolResultMaxTokens(contextWindow);
+    this.toolResultPreviewMaxTokens = deriveToolResultPreviewTokens(this.toolResultMaxTokens);
+    // 记录当前假设窗口：context-overflow 降级时以此为基准按阶梯下调。
+    this.currentContextWindow = contextWindow;
     this.contextConfig = createContextConfig({
-      maxContextTokens: this.provider.providerConfig.maxContextTokens ?? 0,
+      maxContextTokens: contextWindow,
+      reservedOutputTokens,
       enforceMaxTurns: params.enforceMaxTurns ?? -1,
       truncateTurns: params.truncateTurns ?? 1,
       llmCompressInstruction: params.llmCompressInstruction,
@@ -326,9 +381,17 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
       messages.push(validateMessage(userMsg));
     }
 
+    // Everything appended from here on was produced by THIS run. The loaded
+    // history above it (including the current user message, which the pipeline
+    // persists via saveUserMessage) is deliberately excluded from
+    // append-only persistence.
+    this.runMessageStartIndex = messages.length;
+
     // Insert system prompt at the beginning
     if (this.req.systemPrompt) {
       messages.unshift({ role: "system", content: this.req.systemPrompt });
+      // unshift() moved every existing index up by one.
+      this.runMessageStartIndex++;
     }
 
     this.runContext.messages = messages;
@@ -454,7 +517,12 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
     });
     let llmRespResult: LLMResponse | null = null;
 
-    // Context compression/truncation
+    // Context compression/truncation.
+    // Snapshot the pre-compression list first: if the provider then reports a
+    // context overflow, the downgrade retry re-runs compression from THIS list
+    // with a smaller assumed window — never from the already-compressed view,
+    // which would compound information loss on every retry level.
+    this.pristineRunMessages = [...this.runContext.messages];
     const tokenUsage = this.req.conversation?.tokenUsage ?? 0;
     this.runContext.messages = await this.contextManager.process(
       this.runContext.messages,
@@ -754,6 +822,16 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
 
   get currentRunContext(): ContextWrapper<TContext> {
     return this.runContext;
+  }
+
+  /**
+   * Index in `currentRunContext.messages` where messages produced by this run
+   * begin — see `runMessageStartIndex`. Lets the pipeline persist only the new
+   * part of the transcript instead of re-writing the whole (possibly
+   * compressed) view.
+   */
+  get runMessagesStartIndex(): number {
+    return this.runMessageStartIndex;
   }
 
   getFinalLlmResp(): LLMResponse | null {
@@ -1093,50 +1171,115 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
   }
 
   private async *iterLlmResponses(options: { includeModel: boolean }): AsyncGenerator<LLMResponse, void, unknown> {
-    const payload: ProviderChatParams = {
-      contexts: this.sanitizeContextsForProvider(this.runContext.messages),
-      funcTool: this.funcToolForProvider(),
-      sessionId: this.req.sessionId,
-      extraUserContentParts: this.req.extraUserContentParts,
-      abortSignal: this.abortController.signal,
-      temperature: this.req.temperature,
-    };
-    if (options.includeModel) {
-      payload.model = this.req.model;
-    }
+    // Context-overflow downgrade loop: when the provider reports that the
+    // request exceeded its real context window, shrink the assumed window,
+    // re-run compression from the un-truncated snapshot, and retry the same
+    // provider. `this.currentContextWindow` keeps the shrunken value for the
+    // rest of the run (and across fallback providers), so the failure is paid
+    // at most once per model per process.
+    let yieldedAnything = false;
+    for (;;) {
+      const payload: ProviderChatParams = {
+        contexts: this.sanitizeContextsForProvider(this.runContext.messages),
+        funcTool: this.funcToolForProvider(),
+        sessionId: this.req.sessionId,
+        extraUserContentParts: this.req.extraUserContentParts,
+        abortSignal: this.abortController.signal,
+        temperature: this.req.temperature,
+      };
+      if (options.includeModel) {
+        payload.model = this.req.model;
+      }
 
-    if (this.streaming && this.provider.textChatStream) {
-      let hasMeaningfulContent = false;
-      for await (const resp of this.provider.textChatStream(payload)) {
-        if (resp.completionText || resp.reasoningContent || resp.toolsCallName?.length) {
-          hasMeaningfulContent = true;
+      let downgradeTarget: number | undefined;
+      try {
+        if (this.streaming && this.provider.textChatStream) {
+          let hasMeaningfulContent = false;
+          for await (const resp of this.provider.textChatStream(payload)) {
+            if (resp.completionText || resp.reasoningContent || resp.toolsCallName?.length) {
+              hasMeaningfulContent = true;
+            }
+            yieldedAnything = true;
+            yield resp;
+          }
+          // If the entire stream produced no meaningful content, throw to trigger retry
+          if (!hasMeaningfulContent) {
+            throw new EmptyModelOutputError();
+          }
+        } else {
+          const resp = await this.provider.textChat(payload);
+          // A provider may surface an overflow as an err response instead of
+          // throwing — same treatment, but only before anything was yielded.
+          if (resp.role === "err" && !yieldedAnything) {
+            downgradeTarget = this.contextDowngradeTarget(resp.completionText ?? "");
+            if (downgradeTarget !== undefined) {
+              await this.applyContextDowngrade(downgradeTarget);
+              continue;
+            }
+          }
+          // Check for empty response (no text, no reasoning, no tool calls)
+          if (
+            resp.role !== "err" &&
+            !resp.completionText &&
+            !resp.reasoningContent &&
+            !resp.toolsCallName?.length
+          ) {
+            console.warn(
+              `[ToolLoopAgentRunner] LLM returned empty response. ` +
+              `completionText=${JSON.stringify(resp.completionText)}, ` +
+              `reasoningContent=${resp.reasoningContent ? "present" : "none"}, ` +
+              `toolsCallName=${resp.toolsCallName?.length ?? 0}, ` +
+              `usage=${resp.usage ? JSON.stringify(resp.usage) : "none"}`
+            );
+            throw new EmptyModelOutputError();
+          }
+          yield resp;
         }
-        yield resp;
-      }
-      // If the entire stream produced no meaningful content, throw to trigger retry
-      if (!hasMeaningfulContent) {
-        throw new EmptyModelOutputError();
-      }
-    } else {
-      const resp = await this.provider.textChat(payload);
-      // Check for empty response (no text, no reasoning, no tool calls)
-      if (
-        resp.role !== "err" &&
-        !resp.completionText &&
-        !resp.reasoningContent &&
-        !resp.toolsCallName?.length
-      ) {
+        return;
+      } catch (e) {
+        // Empty-output and abort errors are handled upstream — never downgrade on them.
+        if (e instanceof EmptyModelOutputError) throw e;
+        if (this.abortController.signal.aborted) throw e;
+        // Never retry after chunks were already streamed to the platform:
+        // the caller would see duplicated partial output.
+        if (yieldedAnything) throw e;
+        const message = e instanceof Error ? e.message : String(e);
+        downgradeTarget = this.contextDowngradeTarget(message);
+        if (downgradeTarget === undefined) throw e;
         console.warn(
-          `[ToolLoopAgentRunner] LLM returned empty response. ` +
-          `completionText=${JSON.stringify(resp.completionText)}, ` +
-          `reasoningContent=${resp.reasoningContent ? "present" : "none"}, ` +
-          `toolsCallName=${resp.toolsCallName?.length ?? 0}, ` +
-          `usage=${resp.usage ? JSON.stringify(resp.usage) : "none"}`
+          `[ToolLoopAgentRunner] Context overflow detected (assumed window ` +
+          `${this.currentContextWindow}). Retrying with ${downgradeTarget}.`
         );
-        throw new EmptyModelOutputError();
+        await this.applyContextDowngrade(downgradeTarget);
+        // loop → rebuild the payload from the recompressed run view
       }
-      yield resp;
     }
+  }
+
+  /**
+   * 依据错误判断是否需要下调假设窗口，并给出目标窗口。
+   * 返回 undefined 表示这不是 context-overflow（或已到阶梯底部）——调用方应照常抛出。
+   */
+  private contextDowngradeTarget(errorText: string): number | undefined {
+    if (!isContextOverflowText(errorText)) return undefined;
+    return nextSmallerContextWindow(
+      this.currentContextWindow,
+      parseContextOverflowLimit(errorText)
+    );
+  }
+
+  /**
+   * 按"下调后的窗口"重新压缩：必须从 pristineRunMessages（压缩前快照）出发，
+   * 而不是从已被上一次压缩改写过的 runContext.messages 出发，否则每降一级
+   * 就再丢一层历史。存储侧不受影响（saveRunHistory 只写本次运行产出的部分）。
+   */
+  private async applyContextDowngrade(nextWindow: number): Promise<void> {
+    this.currentContextWindow = nextWindow;
+    this.runContext.messages = await this.contextManager.process(
+      this.pristineRunMessages,
+      0,
+      { maxContextTokens: nextWindow }
+    );
   }
 
   private sanitizeContextsForProvider(
@@ -1302,8 +1445,6 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
           // Some API may return null for tools with no parameters
           funcToolArgs = {};
         }
-
-        console.info(`使用工具：${funcToolName}，参数：${JSON.stringify(funcToolArgs)}`);
 
         this.recordTrace("agent.tool.call", {
           tool: funcToolName,
@@ -1708,7 +1849,7 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
       { role: "tool", content, tool_call_id: toolCallId },
     ]);
 
-    if (estimatedTokens <= TOOL_RESULT_MAX_ESTIMATED_TOKENS) return content;
+    if (estimatedTokens <= this.toolResultMaxTokens) return content;
 
     const preview = this.truncateToolResultPreview(content, toolCallId);
 
@@ -1731,7 +1872,7 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
       const tokens = this.toolResultTokenCounter.countTokens([
         { role: "tool", content: preview, tool_call_id: _toolCallId },
       ]);
-      if (tokens <= TOOL_RESULT_PREVIEW_MAX_ESTIMATED_TOKENS) return preview;
+      if (tokens <= this.toolResultPreviewMaxTokens) return preview;
       const nextLen = Math.floor(preview.length / 2);
       if (nextLen <= 0) break;
       preview = preview.slice(0, nextLen);

@@ -704,8 +704,29 @@ class LLMSummaryCompressor implements ContextCompressor {
 ### `createContextConfig(overrides?)`
 
 ```typescript
-function createContextConfig(overrides?: Partial<ContextConfig>): ContextConfig;
-// 默认值: maxContextTokens=0, enforceMaxTurns=-1, truncateTurns=1, llmCompressKeepRecent=0
+function createContextConfig(overrides?: Partial<Omit<ContextConfig, "compressTriggerTokens">>): ContextConfig;
+// 默认值: maxContextTokens=0, reservedOutputTokens=4096, enforceMaxTurns=-1,
+//        truncateTurns=1, llmCompressKeepRecent=0, llmCompressKeepRecentRatio=0.15
+// maxContextTokens 语义为"模型上下文窗口大小"（由模型 API 元数据自动探测写入）；
+// 压缩触发阈值 compressTriggerTokens 由其自动派生，不作为用户可配置项
+// （未暴露到 AppConfig / 前端设置）:
+//   maxContextTokens <= 0  → 0（不启用 token 维度控制）
+//   否则 = floor( max(maxContextTokens - reservedOutputTokens, maxContextTokens / 2) × 0.85 )
+// 其中 reservedOutputTokens 默认 4096（与 anthropic-provider 的 maxTokens 默认一致；
+// provider 配置了 maxTokens>0 时以配置值为准），且输出预留最多占用窗口的一半——
+// 保证小窗口下 (窗口 - 预留) 不会被扣成 0 而失去控制。
+// 窗口未知时（<= 0）不启用 token 维度控制，运行时回退 DEFAULT_MODEL_CONTEXT_WINDOW(200000)。
+// 派生辅助: deriveToolResultMaxTokens(window) = floor(window × 0.2);
+//           deriveToolResultPreviewTokens(max) = floor(max × 0.25)。
+//           deriveCompressTriggerTokens(window, reservedOutputTokens) = 上式（供降级重算）。
+// 窗口解析: resolveModelContextWindow(providerMaxContextTokens, modelName)
+//           = 探测值(>0) > extractContextLimitFromModelName(名称容量后缀如 -128k) > 默认 200000。
+//           dashboard 侧对未知模型不落任何猜测值（探不到即 undefined），
+//           否则运行态会把猜测当成真实元数据，降级机制失效。
+// 运行态降级: provider 报上下文超限时按 CONTEXT_WINDOW_LADDER 下调假设窗口，
+//           并从压缩前快照重新压缩后重试；报错自带真实窗口数字（OpenAI/Anthropic 均带）时优先采用。
+//           见 provider/errors.ts 的 parseContextOverflowLimit / isContextOverflowError
+//           与 runner 的 applyContextDowngrade。
 ```
 
 ### `splitHistory(messages, keepRecent)`
