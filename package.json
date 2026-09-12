@@ -18,7 +18,7 @@
     "test:interactive-shell": "tsx --tsconfig tsconfig.tests.json tests/interactive-shell-test.ts",
     "test:conversation": "tsx --tsconfig tsconfig.tests.json tests/conversation-test.ts",
     "test:watch": "tsx watch --tsconfig tsconfig.tests.json tests/test.ts",
-    "frontend:install": "cd frontend && pnpm install --frozen-lockfile --ignore-workspace",
+    "frontend:install": "cd frontend && pnpm install --frozen-lockfile",
     "frontend:dev": "cd frontend && pnpm run dev",
     "frontend:build": "cd frontend && pnpm run build",
     "reset-admin": "tsx scripts/reset-admin.ts"
