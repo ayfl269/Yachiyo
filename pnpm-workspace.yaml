@@ -6,7 +6,7 @@ allowBuilds:
   esbuild: true
 
 minimumReleaseAgeExclude:
-  - hono@4.13.0
+  - hono@4.13.7
 
 # 锁定已知漏洞的传递依赖到修复版本
 overrides:
@@ -25,8 +25,9 @@ overrides:
   # !!omap 解析时 resolveYamlOmap() 用 objectKeys.indexOf() 线性扫描做键唯一性校验，
   # 整体复杂度 O(n²)，构造的 YAML 文档可使 yaml.load() 同步阻塞事件循环造成 DoS。
   # 影响范围：3.x >= 3.0.0 < 3.15.1；4.x >= 4.0.0 < 4.3.1；来自 @eslint/eslintrc → js-yaml
-  # 修复版本：4.x = 4.3.1（本仓库仅 4.x 链路）
-  js-yaml: 4.3.1
+  # 修复版本：4.x = 4.3.1
+  # Dependabot #58（4.3.1 修复不完整）：maxTotalMergeKeys 对空 merge 源不限制 CPU，4.3.2 修复
+  js-yaml: 4.3.2
   # fast-uri 安全修复链（来自 @modelcontextprotocol/sdk → ajv / ajv-formats → fast-uri）：
   # - GHSA-7p8r-x3mc-p8w7：host confusion via backslash authority introducer（3.1.5 修复）
   # - CVE-2026-75931 / GHSA-5jgf-p345-68v8：scheme-relative 引用跳过 IDN 规范化导致宿主混淆（3.1.6 修复）
@@ -47,6 +48,11 @@ overrides:
   # 兼容范围：express ^6.14.0 / body-parser ^6.15.2
   qs: 6.16.0
   # SB2026080392 / GHSA-8j4g-w8fx-2239：CORS 中间件 ReDoS via Access-Control-Request-Headers
-  # 影响范围：<=4.12.33；仅在使用 cors() 默认/空 allowHeaders 时触发
-  hono: 4.13.0
+  # 影响范围：<=4.12.33；仅在使用 cors() 默认/空 allowHeaders 时触发（4.13.0 修复）
+  # Dependabot #54/#55/#56（4.13.0 修复不完整/后续问题，4.13.7 修复）：
+  # - toSSG() 仍可写出输出目录外文件（CVE-2026-39408 修复不完整；本仓库未用 toSSG）
+  # - query 解析器读取 URL fragment 之后的参数，导致 cache-key 与代理解释分歧
+  # - parseBody() 点号路径无界嵌套可致内存耗尽
+  # 来自 @modelcontextprotocol/sdk → @hono/node-server → hono
+  hono: 4.13.7
   '@hono/node-server': 2.0.10
