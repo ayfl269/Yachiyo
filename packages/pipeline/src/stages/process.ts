@@ -39,8 +39,8 @@ export class ProcessStage extends PipelineStage {
       // Bot 平台动作记录（如 agent 通过工具发起的戳一戳）：
       // 仅把动作描述作为 assistant 记录追加到会话历史，不触发 agent 运行、
       // 不触发 agent 生命周期钩子（OnAgentBegin/Done）、不发送任何回复。
-      // 获取会话锁确保与触发该动作的 agent 运行（saveRunHistory 整体
-      // 重写历史）串行，避免相互覆盖。
+      // 获取会话锁确保与触发该动作的 agent 运行（saveRunHistory 追加写入
+      // 历史）串行，避免并发交错写入。
       if (event.getExtra<boolean>("_botActionNote")) {
         const releaseNoteLock = await this.ctx.sessionLockManager.acquireLock(event.unifiedMsgOrigin);
         try {
@@ -106,8 +106,6 @@ export class ProcessStage extends PipelineStage {
 
       const { agentRunner } = buildResult;
 
-      console.log(`[ProcessStage] Agent built successfully. Starting execution for session: ${event.sessionId}`);
-
         // 在执行 agent 前保存用户消息
         const { convId, umo } = await this.saveUserMessage(event);
 
@@ -142,12 +140,16 @@ export class ProcessStage extends PipelineStage {
           // Record provider token stats after agent run completes
           await this.recordTokenStats(agentRunner);
 
-          await this.applyNonStreamingResult(event, runResult, umo, convId);
+          await this.applyNonStreamingResult(event, runResult);
 
-          // Save clean run context (overwrites any text-only save above);
-          // tool-call intermediates are filtered out inside.
+          // Append-only persistence of the messages this run produced. The
+          // reply text extracted below is passed as a fallback so a reply is
+          // never lost when the run view yields nothing storable. Note the
+          // internal instruction of system-triggered runs needs no special
+          // handling here: it is the run's *prompt*, which the start index
+          // already excludes.
           await this.saveRunHistory(agentRunner, umo, convId, {
-            systemTriggered: event.getExtra<string>("_historyUserMessage") !== undefined,
+            fallbackAssistantText: event.getExtra<string>("_cachedAssistantText"),
           });
           yield;
         } finally {
@@ -175,15 +177,19 @@ export class ProcessStage extends PipelineStage {
   /**
    * Apply the non-streaming agent run result to the event: choose the
    * assistant text from `finalResponse` (preferred) or fall back to the
-   * collected `chains`, persist it to conversation history, set the
-   * `EventResult`, and cache the text so {@link recordConversationToMemory}
-   * can still see it after `respond` clears the result.
+   * collected `chains`, set the `EventResult`, and cache the text so
+   * {@link recordConversationToMemory} can still see it after `respond`
+   * clears the result.
+   *
+   * This method deliberately does NOT write to conversation history: the
+   * reply is persisted by {@link saveRunHistory} (from the run view, with this
+   * text as a fallback). Having two writers for the same message is harmless
+   * under "overwrite" semantics but produces duplicates once persistence is
+   * append-only.
    */
   private async applyNonStreamingResult(
     event: MessageEvent,
     runResult: RunAgentResult,
-    umo: string,
-    convId: string,
   ): Promise<void> {
     if (runResult.finalResponse) {
       const respText = runResult.finalResponse.completionText
@@ -201,7 +207,6 @@ export class ProcessStage extends PipelineStage {
             .plain(assistantText)
         );
       } else {
-        await this.saveAssistantMessage(umo, convId, assistantText);
         event.setResult(
           new EventResult()
             .setResultContentType(ResultContentType.LLM_RESULT)
@@ -215,7 +220,6 @@ export class ProcessStage extends PipelineStage {
         .map(c => c.message)
         .join("");
       if (chainText) {
-        await this.saveAssistantMessage(umo, convId, chainText);
         event.setResult(
           new EventResult()
             .setResultContentType(ResultContentType.LLM_RESULT)
@@ -353,6 +357,18 @@ export class ProcessStage extends PipelineStage {
         historyContexts = [];
       }
 
+      // Prompt-context window: storage keeps the complete history (append-only,
+      // required by background memory indexing), but only the most recent
+      // `maxHistoryMessages` entries are sent to the model as context. This is a
+      // per-request prompt cap only — it never deletes stored data. 0 = unlimited.
+      const maxHistoryMessages =
+        this.ctx.conversationManager?.getMaxHistoryMessages?.() ??
+        this.ctx.config.maxHistoryMessages ??
+        0;
+      if (maxHistoryMessages > 0 && historyContexts.length > maxHistoryMessages) {
+        historyContexts = historyContexts.slice(historyContexts.length - maxHistoryMessages);
+      }
+
       const providerRequest = event.requestLlm(prompt, {
         imageUrls: event.messageObj.components
           .filter((c): c is ImageComponent => c.type === ComponentType.Image)
@@ -441,7 +457,8 @@ export class ProcessStage extends PipelineStage {
     // System-generated events (e.g. proactive reminders) carry internal
     // instructions in messageStr that should NOT be persisted to the user's
     // conversation history. Skip saving the user message entirely — the
-    // model's reply will still be saved by saveAssistantMessage.
+    // model's reply is appended afterwards by saveRunHistory, and the run's
+    // prompt (this internal instruction) is excluded there as well.
     if (event.getExtra<string>("_historyUserMessage") !== undefined) {
       return { convId, umo };
     }
@@ -466,12 +483,10 @@ export class ProcessStage extends PipelineStage {
 
     history.push({ role: "user", content: userContent });
 
-    // Truncate history to prevent unbounded growth
-    const maxHistoryMessages = this.ctx.config.maxHistoryMessages ?? 200;
-    if (history.length > maxHistoryMessages) {
-      history.splice(0, history.length - maxHistoryMessages);
-    }
-
+    // Append-only: persist the complete raw history. Background memory
+    // indexing (MemoryConsolidator -> getUnindexedConversations) reads the
+    // full transcript, and per-request prompt size is handled by the
+    // context-control stage — so storage must never destructively truncate.
     await this.ctx.conversationManager.updateConversation(umo, convId, {
       history: JSON.stringify(history),
     });
@@ -487,12 +502,7 @@ export class ProcessStage extends PipelineStage {
       const history: Array<{ role: string; content: string }> = (() => { try { return JSON.parse(conv.history); } catch { return []; } })();
       history.push({ role: "assistant", content: text });
 
-      // Truncate history to prevent unbounded growth
-      const maxHistoryMessages = this.ctx.config.maxHistoryMessages ?? 200;
-      if (history.length > maxHistoryMessages) {
-        history.splice(0, history.length - maxHistoryMessages);
-      }
-
+      // Append-only: persist the complete raw history (see saveUserMessage).
       await this.ctx.conversationManager.updateConversation(umo, convId, {
         history: JSON.stringify(history),
       });
@@ -502,41 +512,46 @@ export class ProcessStage extends PipelineStage {
   }
 
   /**
-   * Save the agent run context to conversation history as a clean
-   * user/assistant transcript. Tool-call intermediate messages (assistant
-   * messages that only carry tool_calls, and role="tool" result messages)
-   * are NOT persisted — they are per-run mechanics, not conversation
-   * content, and saving them made the stored record count diverge from what
-   * the user actually sent/received. Assistant messages that carry visible
-   * text are kept (without the tool_calls metadata).
-   * Called after the agent run completes in both the streaming and
-   * non-streaming paths.
+   * Append the messages produced by this agent run to the stored conversation
+   * transcript.
+   *
+   * Persistence is **append-only**: only `messages[runMessagesStartIndex…]` —
+   * this run's own assistant output — is written, and it is concatenated onto
+   * the stored history instead of replacing it.
+   *
+   * Why not re-write the whole run view (the previous behaviour): the view is
+   * mutated in place by `ContextManager.process()`, which drops the oldest
+   * turns or replaces them with an LLM summary. Persisting that view therefore
+   * deleted the earliest turns from storage — and storage is precisely what the
+   * background memory indexer reads (`getUnindexedConversations`), so long
+   * conversations lost exactly the history they most needed to keep.
+   *
+   * Loaded history and the current user message are NOT written here: the
+   * loaded part is already in storage and `saveUserMessage` owns the user
+   * message. That gives every message exactly one writer, which is what makes
+   * append-only writes idempotent without needing per-message ids.
+   *
+   * Filtering is unchanged: tool-call mechanics are not conversation content.
    */
   private async saveRunHistory(
     agentRunner: ToolLoopAgentRunner,
     umo: string,
     convId: string,
-    options?: { systemTriggered?: boolean },
+    options?: { fallbackAssistantText?: string },
   ): Promise<void> {
     const messages = agentRunner.currentRunContext?.messages;
-    if (!messages || messages.length === 0) return;
+    // Fall back to "nothing was produced" when a runner does not report a
+    // boundary: skipping is recoverable, re-appending loaded history is not.
+    const startIndex = typeof agentRunner.runMessagesStartIndex === "number"
+      ? agentRunner.runMessagesStartIndex
+      : (messages?.length ?? 0);
 
-    // System-triggered runs (proactive reminders etc.) inject an internal
-    // instruction as the last user message. saveUserMessage already skips
-    // persisting it — skip it here too so the internal prompt never leaks
-    // into the saved history.
-    let lastUserIndex = -1;
-    if (options?.systemTriggered) {
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].role === "user") { lastUserIndex = i; break; }
-      }
-    }
-
-    const history: Record<string, unknown>[] = [];
-    for (const [i, msg] of messages.entries()) {
+    // NOTE: an empty/missing run view must NOT return early — the fallback
+    // below still needs a chance to persist the extracted reply text.
+    const produced: Record<string, unknown>[] = [];
+    for (const msg of (messages ?? []).slice(startIndex)) {
       if (msg.role === "system" || msg.role === "_checkpoint") continue;
       if (msg.role === "tool") continue;
-      if (i === lastUserIndex) continue;
       if (msg._noSave) continue;
       // Skip assistant messages that are pure tool-call requests (no visible
       // text) — they belong to the tool loop, not the conversation record.
@@ -547,18 +562,37 @@ export class ProcessStage extends PipelineStage {
 
       const entry: Record<string, unknown> = { role: msg.role };
       if (msg.content !== undefined) entry.content = msg.content;
-      history.push(entry);
+      produced.push(entry);
     }
-    if (history.length === 0) return;
 
-    // Truncate history to prevent unbounded growth
-    const maxHistoryMessages = this.ctx.config.maxHistoryMessages ?? 200;
-    if (history.length > maxHistoryMessages) {
-      history.splice(0, history.length - maxHistoryMessages);
+    if (produced.length === 0) {
+      // Nothing storable came out of the run (the reply was dropped by
+      // compression, or the run context was already consumed). Fall back to the
+      // text extracted by the pipeline so a reply is never lost entirely. The
+      // pipeline only supplies this for replies that are meant to be persisted
+      // (error responses are deliberately excluded there).
+      const fallback = options?.fallbackAssistantText;
+      if (!fallback || !fallback.trim()) return;
+      produced.push({ role: "assistant", content: fallback });
+    }
+
+    // Read the stored transcript first. If it cannot be read, skip the write
+    // entirely: appending blind could duplicate turns and overwriting could
+    // destroy history — neither is acceptable for an append-only path.
+    let stored: Record<string, unknown>[] = [];
+    try {
+      const conv = await this.ctx.conversationManager.getConversation(umo, convId);
+      if (conv?.history) {
+        const parsed: unknown = JSON.parse(conv.history);
+        if (Array.isArray(parsed)) stored = parsed as Record<string, unknown>[];
+      }
+    } catch (e) {
+      console.error("[ProcessStage] Failed to read conversation history; skipping history append:", e);
+      return;
     }
 
     await this.ctx.conversationManager.updateConversation(umo, convId, {
-      history: JSON.stringify(history),
+      history: JSON.stringify([...stored, ...produced]),
     });
   }
 
@@ -663,78 +697,28 @@ export class ProcessStage extends PipelineStage {
   }
 
   /**
-   * Record a conversation turn (user message + assistant response) to short-term memory.
+   * Check and trigger memory consolidation/indexing after conversation turn.
    * Called after OnAgentDoneEvent.
    *
-   * Debug chat events (marked with `_debugChat` extra) are skipped to avoid
-   * polluting long-term memory with test conversations and to prevent
-   * triggering memory consolidation that could delay debug responses.
+   * Short-term memory is managed in-context via automatic context compression
+   * (ContextManager / LLMSummaryCompressor) and full conversation persistence,
+   * so raw message turns are no longer saved as ephemeral KV rows in the
+   * long-term memories table.
    */
   private recordConversationToMemory(event: MessageEvent): void {
     if (event.getExtra<boolean>("_debugChat") === true) return;
-
-    const store = this.ctx.memoryStore;
-    if (!store) return;
     if (!this.ctx.config.memoryEnabled) return;
 
     try {
-      const umo = event.unifiedMsgOrigin;
-      // System-generated events (e.g. proactive reminders) should not
-      // persist the internal prompt to memory — only save the assistant reply.
-      const isSystemTrigger = event.getExtra<string>("_historyUserMessage") !== undefined;
-      const userMessage = (event.messageStr ?? "").trim();
-      // Try result first; fall back to cached text (respond stage clears result after sending)
-      const result = event.getResult();
-      const assistantMessage = (result?.getPlainText()?.trim())
-        || event.getExtra<string>("_cachedAssistantText")?.trim()
-        || "";
-
-      if (isSystemTrigger) {
-        if (!assistantMessage) return;
-      } else {
-        if (!userMessage || !assistantMessage) return;
-      }
-
-      const timestamp = Date.now();
-
-      if (!isSystemTrigger) {
-        // Save user message as short-term memory.
-        // All memories are global in single-user design; the session id (umo)
-        // is embedded in the key so archiveSession(umo) can still locate them.
-        store.save(
-          `short_term_${umo}_${timestamp}_user`,
-          userMessage,
-          ["conversation", "short_term"],
-          {
-            memoryType: "short_term",
-            scope: "global",
-            scopeId: "",
-            priority: 0,
-          }
-        );
-      }
-
-      // Save assistant response as short-term memory
-      store.save(
-        `short_term_${umo}_${timestamp}_assistant`,
-        assistantMessage,
-        ["conversation", "short_term"],
-        {
-          memoryType: "short_term",
-          scope: "global",
-          scopeId: "",
-          priority: 0,
-        }
-      );
-
-      // Trigger consolidation if thresholds are met
+      // Trigger consolidation/indexing if thresholds are met
       if (this.ctx.memoryConsolidator) {
         this.ctx.memoryConsolidator.checkAndConsolidate().catch((e) => {
           console.error("[ProcessStage] Failed to check and consolidate memory:", e);
         });
       }
     } catch (e) {
-      console.error("[ProcessStage] Failed to record conversation to memory:", e);
+      console.error("[ProcessStage] Failed to check memory consolidation:", e);
     }
   }
 }
+

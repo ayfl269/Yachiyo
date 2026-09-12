@@ -52,7 +52,11 @@ function runMigrations(db: Database.Database): void {
   for (const migration of CHAT_MIGRATIONS) {
     const row = db.prepare("SELECT version FROM _migrations WHERE version = ?").get(migration.version) as { version: number } | undefined;
     if (!row) {
-      db.exec(migration.up);
+      if (typeof migration.up === "function") {
+        migration.up(db);
+      } else {
+        db.exec(migration.up);
+      }
       db.prepare("INSERT INTO _migrations (version, name) VALUES (?, ?)").run(migration.version, migration.name);
     }
   }
@@ -299,13 +303,15 @@ async function testAddMessagePair(): Promise<void> {
 }
 
 async function testMaxHistoryMessages(): Promise<void> {
-  console.log("\n── Test: ConversationManager maxHistoryMessages truncation ──");
+  console.log("\n── Test: ConversationManager history is append-only ──");
   const store = new InMemoryConversationStore();
   await store.initialize();
+  // maxHistoryMessages only caps the prompt-context window; it must never
+  // truncate stored history (background memory indexing reads the full log).
   const manager = new ConversationManager(store, { maxHistoryMessages: 4 });
-  const umo = "umo:truncation-test";
+  const umo = "umo:append-only-test";
 
-  // Add 5 message pairs (10 messages total), but max is 4
+  // Add 5 message pairs (10 messages total), well past the max of 4
   for (let i = 0; i < 5; i++) {
     await manager.addMessagePair(umo, `question ${i}`, `answer ${i}`);
   }
@@ -313,10 +319,9 @@ async function testMaxHistoryMessages(): Promise<void> {
   const convId = await manager.getCurrConversationId(umo);
   const conv = await manager.getConversation(umo, convId!);
   const history = JSON.parse(conv?.history ?? "[]");
-  assertEqual(history.length, 4, "history is truncated to 4 messages");
-  // The last 2 pairs should be kept (4 messages)
-  assertEqual(history[0].content, "question 3", "first kept message is question 3");
-  assertEqual(history[3].content, "answer 4", "last kept message is answer 4");
+  assertEqual(history.length, 10, "stored history keeps all 10 messages (append-only)");
+  assertEqual(history[0].content, "question 0", "first message is preserved");
+  assertEqual(history[9].content, "answer 4", "last message is preserved");
 }
 
 async function testSessionConversationMapping(): Promise<void> {

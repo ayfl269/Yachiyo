@@ -2,7 +2,6 @@ import { PipelineStage, registerStage } from "../stage.js";
 import type { PipelineContext } from "../context.js";
 import type { MessageEvent } from "@yachiyo/message/event.js";
 import { ComponentType, type MessageComponent, type PlainComponent, type RecordComponent, type AtComponent, type ReplyComponent } from "@yachiyo/message/components.js";
-import { ResultContentType } from "@yachiyo/message/event-result.js";
 import { EventType } from "@yachiyo/plugin/event-type.js";
 
 function sleep(ms: number): Promise<void> {
@@ -36,10 +35,7 @@ export class RespondStage extends PipelineStage {
 
   async process(event: MessageEvent): Promise<void> {
     const result = event.getResult();
-    console.log(`[RespondStage] process() called - result: ${result ? 'exists' : 'null'}, contentType: ${result?.resultContentType}`);
-
     if (!result) {
-      console.log(`[RespondStage] No result, returning early`);
       return;
     }
 

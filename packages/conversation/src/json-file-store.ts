@@ -13,6 +13,7 @@ interface SerializedConversationRecord {
   createdAt: string;
   updatedAt: string;
   tokenUsage: number | null;
+  lastIndexedAt?: string | null;
 }
 
 function serializeRecord(record: ConversationRecord): SerializedConversationRecord {
@@ -26,6 +27,7 @@ function serializeRecord(record: ConversationRecord): SerializedConversationReco
     createdAt: record.createdAt.toISOString(),
     updatedAt: record.updatedAt.toISOString(),
     tokenUsage: record.tokenUsage,
+    lastIndexedAt: record.lastIndexedAt ? record.lastIndexedAt.toISOString() : null,
   };
 }
 
@@ -40,6 +42,7 @@ function deserializeRecord(data: SerializedConversationRecord): ConversationReco
     createdAt: new Date(data.createdAt),
     updatedAt: new Date(data.updatedAt),
     tokenUsage: data.tokenUsage,
+    lastIndexedAt: data.lastIndexedAt ? new Date(data.lastIndexedAt) : null,
   };
 }
 
@@ -196,6 +199,7 @@ export class JsonFileConversationStore extends ConversationStore {
       createdAt: c.createdAt,
       updatedAt: c.updatedAt,
       tokenUsage: c.tokenUsage,
+      lastIndexedAt: c.lastIndexedAt ?? null,
     }));
   }
 
@@ -226,6 +230,22 @@ export class JsonFileConversationStore extends ConversationStore {
       Object.assign(conv, updates, { updatedAt: new Date() });
       this.markDirty(id);
     }
+  }
+
+  async updateLastIndexedAt(conversationId: string, timestamp: Date): Promise<void> {
+    const conv = this.cache.get(conversationId);
+    if (conv) {
+      conv.lastIndexedAt = timestamp;
+      this.markDirty(conversationId);
+    }
+  }
+
+  async getUnindexedConversations(limit = 50): Promise<ConversationRecord[]> {
+    const unindexed = [...this.cache.values()].filter((c) => {
+      if (!c.lastIndexedAt) return true;
+      return c.updatedAt > c.lastIndexedAt;
+    });
+    return unindexed.slice(0, limit);
   }
 
   async deleteConversation(id: string): Promise<void> {

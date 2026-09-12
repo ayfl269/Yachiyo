@@ -180,6 +180,14 @@ export const CHAT_MIGRATIONS: Migration[] = [
       FROM conversations c;
     `,
   },
+  {
+    version: 4,
+    name: "add_last_indexed_at",
+    up: `
+      ALTER TABLE conversations ADD COLUMN last_indexed_at TEXT;
+      CREATE INDEX IF NOT EXISTS idx_conversations_last_indexed ON conversations(last_indexed_at);
+    `,
+  },
 ];
 
 // ── Row Types ──
@@ -193,6 +201,7 @@ interface ConversationRow {
   platform_id: string;
   title: string;
   token_usage: number | null;
+  last_indexed_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -205,6 +214,7 @@ interface ConversationMetadataRow {
   platform_id: string;
   title: string;
   token_usage: number | null;
+  last_indexed_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -332,8 +342,8 @@ export class SqliteConversationStore extends ConversationStore {
     this.db.transaction(() => {
       this.db.prepare(`
         INSERT OR REPLACE INTO conversations
-          (id, unified_msg_origin, persona_id, history, platform_id, title, token_usage, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, unified_msg_origin, persona_id, history, platform_id, title, token_usage, last_indexed_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         conversation.id,
         conversation.unifiedMsgOrigin,
@@ -342,6 +352,7 @@ export class SqliteConversationStore extends ConversationStore {
         conversation.platformId,
         conversation.title,
         conversation.tokenUsage,
+        conversation.lastIndexedAt ? conversation.lastIndexedAt.toISOString() : null,
         conversation.createdAt.toISOString(),
         conversation.updatedAt.toISOString(),
       );
@@ -350,18 +361,18 @@ export class SqliteConversationStore extends ConversationStore {
   }
 
   async getConversationById(id: string): Promise<ConversationRecord | null> {
-    const row = this.db.prepare("SELECT id, unified_msg_origin, persona_id, history, platform_id, title, token_usage, created_at, updated_at FROM conversations WHERE id = ?").get(id) as ConversationRow;
+    const row = this.db.prepare("SELECT id, unified_msg_origin, persona_id, history, platform_id, title, token_usage, last_indexed_at, created_at, updated_at FROM conversations WHERE id = ?").get(id) as ConversationRow;
     return row ? this.rowToConversation(row) : null;
   }
 
   async getAllConversations(): Promise<ConversationRecord[]> {
-    const rows = this.db.prepare("SELECT id, unified_msg_origin, persona_id, history, platform_id, title, token_usage, created_at, updated_at FROM conversations ORDER BY updated_at DESC").all() as ConversationRow[];
+    const rows = this.db.prepare("SELECT id, unified_msg_origin, persona_id, history, platform_id, title, token_usage, last_indexed_at, created_at, updated_at FROM conversations ORDER BY updated_at DESC").all() as ConversationRow[];
     return rows.map((r) => this.rowToConversation(r));
   }
 
   async getAllConversationMetadata(): Promise<ConversationMetadata[]> {
     const rows = this.db.prepare(
-      "SELECT id, unified_msg_origin, persona_id, platform_id, title, token_usage, created_at, updated_at FROM conversations ORDER BY updated_at DESC"
+      "SELECT id, unified_msg_origin, persona_id, platform_id, title, token_usage, last_indexed_at, created_at, updated_at FROM conversations ORDER BY updated_at DESC"
     ).all() as ConversationMetadataRow[];
     return rows.map((r) => ({
       id: r.id,
@@ -372,6 +383,7 @@ export class SqliteConversationStore extends ConversationStore {
       createdAt: new Date(r.created_at),
       updatedAt: new Date(r.updated_at),
       tokenUsage: r.token_usage,
+      lastIndexedAt: r.last_indexed_at ? new Date(r.last_indexed_at) : null,
     }));
   }
 
@@ -408,7 +420,7 @@ export class SqliteConversationStore extends ConversationStore {
     const offset = (page - 1) * pageSize;
 
     const rows = this.db.prepare(
-      `SELECT id, unified_msg_origin, persona_id, history, platform_id, title, token_usage, created_at, updated_at FROM conversations ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`
+      `SELECT id, unified_msg_origin, persona_id, history, platform_id, title, token_usage, last_indexed_at, created_at, updated_at FROM conversations ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`
     ).all(...params, pageSize, offset) as ConversationRow[];
 
     return [rows.map((r) => this.rowToConversation(r)), total];
@@ -424,6 +436,10 @@ export class SqliteConversationStore extends ConversationStore {
     if (updates.platformId !== undefined) { setClauses.push("platform_id = ?"); params.push(updates.platformId); }
     if (updates.title !== undefined) { setClauses.push("title = ?"); params.push(updates.title); }
     if (updates.tokenUsage !== undefined) { setClauses.push("token_usage = ?"); params.push(updates.tokenUsage); }
+    if (updates.lastIndexedAt !== undefined) {
+      setClauses.push("last_indexed_at = ?");
+      params.push(updates.lastIndexedAt ? updates.lastIndexedAt.toISOString() : null);
+    }
 
     // Always update timestamp
     setClauses.push("updated_at = ?");
@@ -444,6 +460,23 @@ export class SqliteConversationStore extends ConversationStore {
         }
       }
     })();
+  }
+
+  async updateLastIndexedAt(conversationId: string, timestamp: Date = new Date()): Promise<void> {
+    this.db.prepare(
+      "UPDATE conversations SET last_indexed_at = ? WHERE id = ?"
+    ).run(timestamp.toISOString(), conversationId);
+  }
+
+  async getUnindexedConversations(limit = 50): Promise<ConversationRecord[]> {
+    const rows = this.db.prepare(
+      `SELECT id, unified_msg_origin, persona_id, history, platform_id, title, token_usage, last_indexed_at, created_at, updated_at
+       FROM conversations
+       WHERE last_indexed_at IS NULL OR updated_at > last_indexed_at
+       ORDER BY updated_at ASC
+       LIMIT ?`
+    ).all(limit) as ConversationRow[];
+    return rows.map((r) => this.rowToConversation(r));
   }
 
   async deleteConversation(id: string): Promise<void> {
@@ -830,6 +863,7 @@ export class SqliteConversationStore extends ConversationStore {
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),
       tokenUsage: row.token_usage,
+      lastIndexedAt: row.last_indexed_at ? new Date(row.last_indexed_at) : null,
     };
   }
 

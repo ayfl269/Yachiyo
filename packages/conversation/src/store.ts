@@ -10,6 +10,7 @@ export interface ConversationMetadata {
   createdAt: Date;
   updatedAt: Date;
   tokenUsage: number | null;
+  lastIndexedAt?: Date | null;
 }
 
 export interface PlatformMessageHistory {
@@ -111,6 +112,8 @@ export abstract class ConversationStore {
   }): Promise<[ConversationRecord[], number]>;
   abstract updateConversation(id: string, updates: Partial<ConversationRecord>): Promise<void>;
   abstract deleteConversation(id: string): Promise<void>;
+  abstract updateLastIndexedAt(conversationId: string, timestamp: Date): Promise<void>;
+  abstract getUnindexedConversations(limit?: number): Promise<ConversationRecord[]>;
 
   /**
    * Search conversations by content (title + message history).
@@ -208,6 +211,7 @@ export class InMemoryConversationStore extends ConversationStore {
       createdAt: c.createdAt,
       updatedAt: c.updatedAt,
       tokenUsage: c.tokenUsage,
+      lastIndexedAt: c.lastIndexedAt ?? null,
     }));
   }
   async getFilteredConversations(options: {
@@ -232,6 +236,21 @@ export class InMemoryConversationStore extends ConversationStore {
     if (conv) Object.assign(conv, updates, { updatedAt: new Date() });
   }
   async deleteConversation(id: string): Promise<void> { this.conversations.delete(id); }
+
+  async updateLastIndexedAt(conversationId: string, timestamp: Date): Promise<void> {
+    const conv = this.conversations.get(conversationId);
+    if (conv) {
+      conv.lastIndexedAt = timestamp;
+    }
+  }
+
+  async getUnindexedConversations(limit = 50): Promise<ConversationRecord[]> {
+    const unindexed = [...this.conversations.values()].filter(c => {
+      if (!c.lastIndexedAt) return true;
+      return c.updatedAt > c.lastIndexedAt;
+    });
+    return unindexed.slice(0, limit);
+  }
 
   async searchConversationsByContent(
     query: string,

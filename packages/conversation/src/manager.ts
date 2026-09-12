@@ -12,12 +12,13 @@ export interface ConversationRecord {
   createdAt: Date;
   updatedAt: Date;
   tokenUsage: number | null;
+  lastIndexedAt?: Date | null;
 }
 
 export class ConversationManager {
   private store: ConversationStore | null;
   private memoryConsolidator: MemoryConsolidator | null = null;
-  /** Maximum number of messages to keep in history. 0 = unlimited. */
+  /** Maximum number of messages to keep in history for prompt context. 0 = unlimited. */
   private maxHistoryMessages: number = 200;
 
   constructor(store?: ConversationStore, options?: { maxHistoryMessages?: number }) {
@@ -29,6 +30,10 @@ export class ConversationManager {
 
   setMaxHistoryMessages(max: number): void {
     this.maxHistoryMessages = max;
+  }
+
+  getMaxHistoryMessages(): number {
+    return this.maxHistoryMessages;
   }
 
   setMemoryConsolidator(consolidator: MemoryConsolidator): void {
@@ -83,6 +88,7 @@ export class ConversationManager {
       createdAt: new Date(),
       updatedAt: new Date(),
       tokenUsage: null,
+      lastIndexedAt: null,
     };
     if (this.store) {
       await this.store.createConversation(conversation);
@@ -129,12 +135,23 @@ export class ConversationManager {
     title?: string;
     personaId?: string;
     tokenUsage?: number;
+    lastIndexedAt?: Date | null;
   }): Promise<void> {
     if (!this.store) return;
     await this.store.updateConversation(conversationId, {
       ...options,
       updatedAt: new Date(),
     });
+  }
+
+  async updateLastIndexedAt(conversationId: string, timestamp: Date = new Date()): Promise<void> {
+    if (!this.store) return;
+    await this.store.updateLastIndexedAt(conversationId, timestamp);
+  }
+
+  async getUnindexedConversations(limit?: number): Promise<ConversationRecord[]> {
+    if (!this.store) return [];
+    return this.store.getUnindexedConversations(limit);
   }
 
   async addMessagePair(umo: string, userMessage: string, assistantMessage: string): Promise<void> {
@@ -157,11 +174,7 @@ export class ConversationManager {
     history.push({ role: "user", content: userMessage });
     history.push({ role: "assistant", content: assistantMessage });
 
-    // Truncate history to prevent unbounded growth
-    if (this.maxHistoryMessages > 0 && history.length > this.maxHistoryMessages) {
-      history.splice(0, history.length - this.maxHistoryMessages);
-    }
-
+    // Append-only: preserve complete raw conversation history without destructive truncation.
     await this.store.updateConversation(conversationId, {
       history: JSON.stringify(history),
       updatedAt: new Date(),
@@ -183,4 +196,3 @@ export class ConversationManager {
     return this.store.getMessageCount(options);
   }
 }
-

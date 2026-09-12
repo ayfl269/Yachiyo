@@ -566,15 +566,16 @@ async function testConversationManager(): Promise<void> {
   const updated = await manager.getConversation(umo, convId);
   assert(updated?.history?.includes("Hello") === true, "更新后历史包含 Hello");
 
-  // Test truncation in addMessagePair
+  // addMessagePair is append-only: full history is always preserved.
+  // maxHistoryMessages only limits the prompt-context window, not storage.
   manager.setMaxHistoryMessages(3);
   await manager.addMessagePair(umo, "Hello 1", "Reply 1");
   await manager.addMessagePair(umo, "Hello 2", "Reply 2");
-  const truncatedConv = await manager.getConversation(umo, convId);
-  const truncatedHistory = JSON.parse(truncatedConv?.history || "[]");
-  console.log("  截断后历史消息数:", truncatedHistory.length);
-  assert(truncatedHistory.length === 3, "截断正确 (应该为 3)");
-  assert(truncatedHistory[1].content === "Hello 2", "保留的消息包括 Hello 2");
+  const appendedConv = await manager.getConversation(umo, convId);
+  const appendedHistory = JSON.parse(appendedConv?.history || "[]");
+  console.log("  追加后历史消息数:", appendedHistory.length);
+  assert(appendedHistory.length === 5, "历史全量保留 (Hello + 2 对 = 5)");
+  assert(appendedHistory[4].content === "Reply 2", "保留最新一条回复");
 
   // Get current conversation id
   console.log("  当前对话 id:", await manager.getCurrConversationId(umo));
