@@ -26,6 +26,7 @@ interface Conversation {
   createdAt: string
   updatedAt: string
   tokenUsage: number | null
+  lastIndexedAt?: string | null
 }
 
 interface ChatMessage {
@@ -355,9 +356,36 @@ export default function ChatDataManager() {
                     )}
                   </div>
 
-                  {conv.platformId && (
-                    <div className="session-platform-tag">{conv.platformId}</div>
-                  )}
+                  <div style={{ display: 'flex', gap: '0.35rem', alignItems: 'center', marginTop: '0.3rem', flexWrap: 'wrap' }}>
+                    {conv.platformId && (
+                      <div className="session-platform-tag">{conv.platformId}</div>
+                    )}
+                    {conv.lastIndexedAt ? (
+                      <span style={{
+                        fontSize: '0.68rem',
+                        padding: '0.1rem 0.35rem',
+                        borderRadius: '4px',
+                        background: 'rgba(16, 185, 129, 0.1)',
+                        color: '#10B981',
+                        border: '1px solid rgba(16, 185, 129, 0.2)',
+                        fontWeight: 500,
+                      }}>
+                        已索引
+                      </span>
+                    ) : (
+                      <span style={{
+                        fontSize: '0.68rem',
+                        padding: '0.1rem 0.35rem',
+                        borderRadius: '4px',
+                        background: 'rgba(245, 158, 11, 0.1)',
+                        color: '#F59E0B',
+                        border: '1px solid rgba(245, 158, 11, 0.2)',
+                        fontWeight: 500,
+                      }}>
+                        待索引
+                      </span>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
@@ -421,6 +449,18 @@ export default function ChatDataManager() {
                   </span>
                   <span className="meta-item">
                     <strong>消息数:</strong> {messages.length}
+                  </span>
+                  <span className="meta-item">
+                    <strong>记忆索引:</strong>{' '}
+                    {selectedConv.lastIndexedAt ? (
+                      <span style={{ color: '#10B981', fontWeight: 500 }}>
+                        已建立 ({formatTime(selectedConv.lastIndexedAt)})
+                      </span>
+                    ) : (
+                      <span style={{ color: '#F59E0B', fontWeight: 500 }}>
+                        待建立（后台整理时自动提炼）
+                      </span>
+                    )}
                   </span>
                 </div>
               </div>

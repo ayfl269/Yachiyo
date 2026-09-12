@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import {
   Plus, X, Trash2, Search, Brain, Clock, Tag, Save,
   CheckCircle, AlertCircle, ChevronDown, ChevronUp, Key,
-  Hash, RefreshCw, Layers, Zap, Settings, BarChart3, Workflow
+  Hash, RefreshCw, Layers, Settings, BarChart3, Workflow
 } from 'lucide-react'
 import { useToast, ToastPortal, Modal } from './shared'
 import { apiFetch } from '../lib/api'
@@ -38,8 +38,6 @@ interface ConsolidationConfig {
   memoryEnabled?: boolean
   agingAccessThreshold: number
   agingMaxAgeDays: number
-  promoteOnSessionEnd: boolean
-  shortTermMaxAgeMs: number
   maxMemoryLength: number
   maxRetries: number
   bufferMinMessages: number
@@ -56,13 +54,6 @@ interface EditingMemory {
   priority: number
 }
 
-interface ConsolidationResult {
-  extractionFailed?: boolean
-  extracted: number
-  merged: number
-  expired: number
-  aged?: { demoted?: number; archived?: number }
-}
 
 interface LongTermConsolidationStats {
   lastRunAt: string | null
@@ -84,6 +75,9 @@ interface LongTermConsolidationStats {
 
 
 // ===== Labels =====
+// 注意：这里的 short_term 条目是「历史兼容」用的——分层短期记忆已退役
+// （改为全量会话历史 + 后台记忆索引），新的 short_term 不再写入，但旧库里可能
+// 仍有存量行，需要标签/配色把它们正确显示出来。不要因为"看起来没用"而删除。
 const memoryTypeLabels: Record<MemoryType, string> = {
   short_term: '短期记忆',
   long_term: '长期记忆',
@@ -125,7 +119,6 @@ export default function MemoryManager() {
   const [searching, setSearching] = useState(false)
   const [filterType, setFilterType] = useState<MemoryType | ''>('')
   const [stats, setStats] = useState<MemoryStats | null>(null)
-  const [consolidating, setConsolidating] = useState(false)
   const [consolidationConfig, setConsolidationConfig] = useState<ConsolidationConfig | null>(null)
 
   const [consolidatingLtm, setConsolidatingLtm] = useState(false)
@@ -144,9 +137,6 @@ export default function MemoryManager() {
 
   const [showClearConfirm, setShowClearConfirm] = useState(false)
   const [clearing, setClearing] = useState(false)
-
-  const [showConsolidationResult, setShowConsolidationResult] = useState(false)
-  const [consolidationResult, setConsolidationResult] = useState<ConsolidationResult | null>(null)
 
 
 
@@ -353,30 +343,6 @@ export default function MemoryManager() {
     }
   }
 
-  const handleConsolidate = async () => {
-    setConsolidating(true)
-    try {
-      const res = await apiFetch('/api/memories/consolidate', { method: 'POST' })
-      if (res.ok) {
-        const data = await res.json()
-        if (data.success) {
-          setConsolidationResult(data.result)
-          setShowConsolidationResult(true)
-          showMessage('记忆整理完成')
-          await fetchMemories()
-          await fetchStats()
-        } else {
-          showMessage(data.error || '整理失败', 'error')
-        }
-      }
-    } catch (error) {
-      console.error('记忆整理失败:', error)
-      showMessage('记忆整理失败', 'error')
-    } finally {
-      setConsolidating(false)
-    }
-  }
-
   const handleConsolidateLongTerm = async () => {
     setConsolidatingLtm(true)
     try {
@@ -421,19 +387,15 @@ export default function MemoryManager() {
       <div className="page-header">
         <div>
           <h1>记忆管理</h1>
-          <p>管理短期、长期、角色与用户资料等多层记忆，支持自动整理与老化淘汰</p>
+          <p>管理长期记忆、角色记忆与用户资料，支持语义去重合并与老化淘汰</p>
         </div>
         <div className="header-actions">
           <button className="btn" onClick={() => { fetchMemories(); fetchStats() }} disabled={loading} title="刷新">
             <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
           </button>
-          <button className="btn accent" onClick={handleConsolidate} disabled={consolidating} title="手动整理记忆（短期提取/去重/老化）">
-            <Zap size={16} />
-            {consolidating ? <span>整理中...</span> : <span>整理记忆</span>}
-          </button>
-          <button className="btn accent" onClick={handleConsolidateLongTerm} disabled={consolidatingLtm} title="手动触发长期记忆的周期性整理与合并（语义相似记忆合并）">
+          <button className="btn accent" onClick={handleConsolidateLongTerm} disabled={consolidatingLtm} title="手动触发长期记忆的周期性整理与合并（基于语义相似度合并重复记忆）">
             <Workflow size={16} />
-            {consolidatingLtm ? <span>整理中...</span> : <span>整理长期记忆</span>}
+            {consolidatingLtm ? <span>合并中...</span> : <span>合并长期记忆</span>}
           </button>
           <button className="btn danger" onClick={confirmClear} disabled={memories.length === 0}>
             <Trash2 size={16} /> 清空全部
@@ -444,14 +406,19 @@ export default function MemoryManager() {
         </div>
       </div>
 
-      {/* Stats Bar */}
+      {/* Stats Cards */}
       {stats && (
-        <div className="stats-panel">
-          <div className="mem-stat-card total">
-            <BarChart3 size={18} />
+        <div className="stats-panel" style={{ display: 'flex', gap: '0.65rem', marginBottom: '1rem', flexWrap: 'wrap', alignItems: 'center' }}>
+          <div
+            className={`mem-stat-card total type-card${filterType === '' ? ' active' : ''}`}
+            onClick={() => handleFilterType('')}
+            style={{ cursor: 'pointer' }}
+            title="点击查看全部记忆"
+          >
+            <BarChart3 size={16} />
             <div className="stat-info">
               <span className="stat-value">{stats.total}</span>
-              <span className="stat-label">总记忆数</span>
+              <span className="stat-label">全部</span>
             </div>
           </div>
           {Object.entries(memoryTypeLabels).map(([type, label]) => {
@@ -729,10 +696,14 @@ export default function MemoryManager() {
                   onChange={e => updateEditing({ memoryType: e.target.value as MemoryType })}
                   className="form-control"
                 >
-                  <option value="short_term">短期记忆</option>
                   <option value="long_term">长期记忆</option>
-                  <option value="persona">角色记忆</option>
                   <option value="user_profile">用户资料</option>
+                  <option value="persona">角色记忆</option>
+                  {/* 只读回显：编辑一条遗留 short_term 记录时需要让 select 能表示
+                      它的现值，否则 UI 会显示成别的类型。disabled 表示不可新选。 */}
+                  {isEditing && editingMemory.memoryType === 'short_term' && (
+                    <option value="short_term" disabled>短期记忆 (历史兼容)</option>
+                  )}
                 </select>
               </div>
               <div className="form-group">
@@ -830,48 +801,6 @@ export default function MemoryManager() {
           <p>确定要清空所有 <strong>{total} 条</strong> 记忆吗？</p>
           <p className="confirm-warn">此操作将不可逆地删除所有记忆数据！</p>
         </div>
-      </Modal>
-
-      {/* ===== Consolidation Result Modal ===== */}
-      <Modal
-        open={showConsolidationResult}
-        onClose={() => setShowConsolidationResult(false)}
-        title="记忆整理结果"
-        size="sm"
-        footer={
-          <button className="btn primary" onClick={() => setShowConsolidationResult(false)}>确定</button>
-        }
-      >
-        {consolidationResult && (
-          <div className="consolidation-result">
-            {consolidationResult.extractionFailed && (
-              <div className="result-item">
-                <AlertCircle size={16} className="result-icon warning" />
-                <span>LLM 提取失败，短期缓冲区已保留等待下次重试</span>
-              </div>
-            )}
-            <div className="result-item">
-              <CheckCircle size={16} className="result-icon success" />
-              <span>提取新记忆: <strong>{consolidationResult.extracted}</strong> 条</span>
-            </div>
-            <div className="result-item">
-              <CheckCircle size={16} className="result-icon success" />
-              <span>合并重复: <strong>{consolidationResult.merged}</strong> 条</span>
-            </div>
-            <div className="result-item">
-              <CheckCircle size={16} className="result-icon success" />
-              <span>过期清理: <strong>{consolidationResult.expired}</strong> 条</span>
-            </div>
-            <div className="result-item">
-              <CheckCircle size={16} className="result-icon success" />
-              <span>老化降权: <strong>{consolidationResult.aged?.demoted ?? 0}</strong> 条</span>
-            </div>
-            <div className="result-item">
-              <CheckCircle size={16} className="result-icon success" />
-              <span>老化归档: <strong>{consolidationResult.aged?.archived ?? 0}</strong> 条</span>
-            </div>
-          </div>
-        )}
       </Modal>
 
       {/* ===== Long-Term Consolidation Result Modal ===== */}

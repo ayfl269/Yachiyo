@@ -1,22 +1,30 @@
 // Agent core
-export { Agent, createAgent } from "./agent.js";
+export { type Agent, createAgent } from "./agent.js";
 
 // Message model
+// 类型名统一加 `type` 修饰符：本文件被 tsx 直接以 src 运行时（见根目录
+// tsconfig.tests.json 的 paths 映射），ESM 的具名导出校验发生在 TS 类型擦除后，
+// 纯类型名若不加 `type` 会被当作值导出并在运行时报
+// "does not provide an export named 'X'"（编译到 dist 的 d.ts 流程不受影响）。
 export {
-  ContentPart,
-  TextPart,
-  ThinkPart,
-  ImageURLPart,
-  AudioURLPart,
-  ToolCall,
-  ToolCallPart,
-  CheckpointData,
-  Message,
-  AssistantMessageSegment,
-  ToolCallMessageSegment,
-  UserMessageSegment,
-  SystemMessageSegment,
-  CheckpointMessageSegment,
+  type ContentPartType,
+  type ContentPartBase,
+  type ContentPart,
+  type TextPart,
+  type ThinkPart,
+  type ImageURLPart,
+  type AudioURLPart,
+  type ToolCall,
+  type ToolCallFunction,
+  type ToolCallPart,
+  type CheckpointData,
+  type MessageRole,
+  type Message,
+  type AssistantMessageSegment,
+  type ToolCallMessageSegment,
+  type UserMessageSegment,
+  type SystemMessageSegment,
+  type CheckpointMessageSegment,
   deserializeContentPart,
   serializeContentPart,
   mergeThinkPartInPlace,

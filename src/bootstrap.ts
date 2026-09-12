@@ -298,6 +298,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
     autoConsolidateBufferCount: defaultConfig.memoryConsolidationBufferCount,
   });
   conversationManager.setMemoryConsolidator(memoryConsolidator);
+  memoryConsolidator.setConversationSource(conversationManager);
 
   // 长期记忆周期整理 Job（语义合并，独立于上面的短期记忆整理器）
   const ltmConsolidationJob = new LongTermMemoryConsolidationJob(sqliteMemoryStore, {
@@ -376,8 +377,11 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
   const codeSearchTool = createCodeSearchTool(workspaceRoot);
   toolManager.funcList.push(codeSearchTool);
 
-  // 注册会话搜索工具 (搜索历史会话标题和消息内容)
-  const conversationSearchTool = createConversationSearchTool({ store: sqliteConversationStore });
+  // 注册会话搜索工具 (搜索历史会话标题和消息内容，以及高层次记忆索引)
+  const conversationSearchTool = createConversationSearchTool({
+    store: sqliteConversationStore,
+    memoryStore: sqliteMemoryStore,
+  });
   toolManager.funcList.push(conversationSearchTool);
 
   // 注册向用户提问工具 (澄清需求、提供选项)

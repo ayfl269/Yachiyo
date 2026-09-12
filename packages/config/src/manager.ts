@@ -58,6 +58,11 @@ export interface AgentConfig {
   memoryMaxRetries: number;
   memoryAgingAccessThreshold: number;
   memoryAgingMaxAgeDays: number;
+  // @deprecated 分层短期记忆（short_term）已退役：全量会话历史 + 后台记忆索引
+  // 取代了原来的短期缓冲区，因此这两个开关不再影响任何行为。目前仍被
+  // src/bootstrap.ts 读取并传入 MemoryConsolidator，但那只对「清理旧库遗留的
+  // short_term 行」这一条路径有意义。请勿新增 UI 入口；下个大版本可连同
+  // archiveSession()/archiveShortTermMemories() 一并移除。
   memoryShortTermMaxAgeHours: number;
   memoryPromoteOnSessionEnd: boolean;
   memoryInjectProfileCount: number;
@@ -257,6 +262,8 @@ export class ConfigManager {
       memoryMaxRetries: 3,
       memoryAgingAccessThreshold: 1,
       memoryAgingMaxAgeDays: 90,
+      // @deprecated 见 AgentConfig 上的同名说明：短期记忆层已退役，这两个值
+      // 只保留给存量配置与历史数据清理路径，不再驱动任何实际行为。
       memoryShortTermMaxAgeHours: 168,
       memoryPromoteOnSessionEnd: true,
       memoryInjectProfileCount: 5,

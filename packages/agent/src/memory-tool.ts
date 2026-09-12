@@ -96,8 +96,8 @@ export function createMemoryTool(optionsOrRoot?: string | CreateMemoryToolOption
     name: "memory_tool",
     description:
       "Persistent layered memory storage across sessions. " +
-      "Memory types: short_term (session-scoped, auto-archived), long_term (persistent), " +
-      "persona (bound to a Persona), user_profile (user preferences). " +
+      "Memory types: long_term (persistent), persona (bound to a Persona), " +
+      "user_profile (user preferences). " +
       "Actions: save, recall, search, delete, list, clear, consolidate, consolidate_long_term, stats.",
     parameters: {
       type: "object",
@@ -114,8 +114,11 @@ export function createMemoryTool(optionsOrRoot?: string | CreateMemoryToolOption
         limit: { type: "integer", description: "Maximum number of results for search/list. Default: 20.", minimum: 1, default: 20 },
         memory_type: {
           type: "string",
-          description: "Memory type filter. One of: short_term, long_term, persona, user_profile.",
-          enum: ["short_term", "long_term", "persona", "user_profile"],
+          // short_term is intentionally absent: the layered short-term buffer was
+          // retired in favour of full conversation history + background indexing,
+          // so offering it would only let the model write rows nothing consumes.
+          description: "Memory type filter. One of: long_term, persona, user_profile.",
+          enum: ["long_term", "persona", "user_profile"],
         },
         scope: {
           type: "string",
@@ -187,6 +190,13 @@ function handleSqliteAction(
     case "save": {
       if (!key || !value) {
         return { content: [{ type: "text", text: "error: 'key' and 'value' are required for save action." }], isError: true };
+      }
+      // Reject the retired type explicitly (the schema no longer advertises it,
+      // but a hand-built call could still send it): writing short_term rows would
+      // create data nothing reads, and only adds to the legacy rows that
+      // archiveShortTermMemories() exists to clean up.
+      if (memoryType === "short_term") {
+        return { content: [{ type: "text", text: "error: memory type 'short_term' has been retired; use 'long_term' instead." }], isError: true };
       }
       // Auto-determine scope from context if not specified
       const resolvedScope = scope ?? (context?.event?.personaId ? "persona" : "global");

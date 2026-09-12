@@ -93,6 +93,10 @@ export interface ConversationIndexEntry {
   conversationId: string;
   timestamp: string;
   createdAt: string;
+  summary?: string;
+  startTime?: string | null;
+  endTime?: string | null;
+  messageCount?: number;
 }
 
 // ── Migrations ──
@@ -117,6 +121,13 @@ export const MEMORY_MIGRATIONS: Migration[] = [
         UNIQUE(memory_key, tag)
       );
 
+      -- Tokenizer note: created here without an explicit tokenizer ⇒ FTS5 default
+      -- unicode61, which treats a run of CJK ideographs as ONE token, so Chinese
+      -- substring queries match nothing. Migration v9 (memory_fts_trigram) rebuilds
+      -- both this table and conversation_indices_fts with tokenize='trigram'.
+      -- Under trigram a query still needs >=3 characters, so 1-2 char queries are
+      -- answered by the LIKE fallback in search(); that fallback is the real recall
+      -- path for short input, not a dead branch.
       CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
         key, value, content=memories, content_rowid=rowid
       );
@@ -455,6 +466,122 @@ export const MEMORY_MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 8,
+    name: "memory_conversation_indices_enhanced",
+    // Repair migration: legacy/hand-built databases may have `_migrations`
+    // rows marking v3 as applied without an actual `conversation_indices`
+    // table, and intermediate builds may have created it with the pre-enhance
+    // column set. A bare `ALTER TABLE conversation_indices` would abort with
+    // "no such table" (or "duplicate column") there, breaking the whole
+    // upgrade. Pure SQL cannot introspect, hence the function form. Runs
+    // inside DatabaseManager's transaction.
+    up: (db) => {
+      const tableExists = db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'conversation_indices'"
+        )
+        .get() !== undefined;
+
+      if (!tableExists) {
+        db.exec(`
+          CREATE TABLE conversation_indices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL DEFAULT '',
+            topics TEXT NOT NULL DEFAULT '[]',
+            conversation_id TEXT NOT NULL DEFAULT '',
+            timestamp TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+          );
+
+          CREATE INDEX IF NOT EXISTS idx_conv_indices_timestamp ON conversation_indices(timestamp DESC);
+          CREATE INDEX IF NOT EXISTS idx_conv_indices_conversation ON conversation_indices(conversation_id);
+        `);
+      }
+
+      const cols = new Set(
+        (db.prepare("PRAGMA table_info(conversation_indices)").all() as { name: string }[])
+          .map((c) => c.name)
+      );
+      if (!cols.has("summary")) {
+        db.exec("ALTER TABLE conversation_indices ADD COLUMN summary TEXT NOT NULL DEFAULT ''");
+      }
+      if (!cols.has("start_time")) {
+        db.exec("ALTER TABLE conversation_indices ADD COLUMN start_time TEXT");
+      }
+      if (!cols.has("end_time")) {
+        db.exec("ALTER TABLE conversation_indices ADD COLUMN end_time TEXT");
+      }
+      if (!cols.has("message_count")) {
+        db.exec("ALTER TABLE conversation_indices ADD COLUMN message_count INTEGER NOT NULL DEFAULT 0");
+      }
+
+      db.exec(`
+        -- Created without an explicit tokenizer (FTS5 default unicode61) so that
+        -- this migration stays byte-compatible with already-shipped databases;
+        -- v9 (memory_fts_trigram) immediately rebuilds it with trigram tokenization.
+        CREATE VIRTUAL TABLE IF NOT EXISTS conversation_indices_fts USING fts5(
+          title, topics, summary, content=conversation_indices, content_rowid=id
+        );
+
+        CREATE TRIGGER IF NOT EXISTS conv_indices_ai AFTER INSERT ON conversation_indices BEGIN
+          INSERT INTO conversation_indices_fts(rowid, title, topics, summary)
+          VALUES (NEW.id, NEW.title, NEW.topics, NEW.summary);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS conv_indices_ad AFTER DELETE ON conversation_indices BEGIN
+          INSERT INTO conversation_indices_fts(conversation_indices_fts, rowid, title, topics, summary)
+          VALUES ('delete', OLD.id, OLD.title, OLD.topics, OLD.summary);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS conv_indices_au AFTER UPDATE ON conversation_indices BEGIN
+          INSERT INTO conversation_indices_fts(conversation_indices_fts, rowid, title, topics, summary)
+          VALUES ('delete', OLD.id, OLD.title, OLD.topics, OLD.summary);
+          INSERT INTO conversation_indices_fts(rowid, title, topics, summary)
+          VALUES (NEW.id, NEW.title, NEW.topics, NEW.summary);
+        END;
+
+        INSERT INTO conversation_indices_fts(conversation_indices_fts) VALUES('rebuild');
+      `);
+    },
+  },
+  {
+    version: 9,
+    name: "memory_fts_trigram",
+    // FTS5's default `unicode61` tokenizer treats a run of CJK ideographs as a
+    // SINGLE token, so Chinese substring queries ("记忆", "上下文压缩") matched
+    // nothing and retrieval silently depended on the LIKE fallback in
+    // search() / searchConversationIndices(). `trigram` indexes every 3-char
+    // sequence instead, which makes CJK — and English — substring search work.
+    //
+    // FTS5 has no ALTER for the tokenizer, so both tables are dropped and
+    // re-created with the SAME external-content shape (`content=` /
+    // `content_rowid=`) and then rebuilt from the content tables. The existing
+    // sync triggers are left untouched: DROP TABLE does not drop triggers, and
+    // they only reference the table by name, so they keep working after the
+    // re-create.
+    //
+    // Verified on SQLite 3.53.4: `上下文压缩` / `压缩层` / `Script` now match
+    // (0 rows before), while queries shorter than 3 characters still cannot use
+    // trigram — those keep being served by the LIKE fallback, which is why
+    // sanitizeFtsQuery() needs no change.
+    up: (db) => {
+      db.exec(`
+        DROP TABLE IF EXISTS memories_fts;
+        CREATE VIRTUAL TABLE memories_fts USING fts5(
+          key, value, content=memories, content_rowid=rowid, tokenize='trigram'
+        );
+        INSERT INTO memories_fts(memories_fts) VALUES('rebuild');
+
+        DROP TABLE IF EXISTS conversation_indices_fts;
+        CREATE VIRTUAL TABLE conversation_indices_fts USING fts5(
+          title, topics, summary, content=conversation_indices, content_rowid=id,
+          tokenize='trigram'
+        );
+        INSERT INTO conversation_indices_fts(conversation_indices_fts) VALUES('rebuild');
+      `);
+    },
+  },
 ];
 
 // ── Row Types ──
@@ -532,7 +659,12 @@ interface ConversationIndexRow {
   conversation_id: string;
   timestamp: string;
   created_at: string;
+  summary?: string;
+  start_time?: string | null;
+  end_time?: string | null;
+  message_count?: number;
 }
+
 
 /** Row type for COUNT(*) as cnt queries. */
 interface CountRow {
@@ -874,6 +1006,11 @@ export class SqliteMemoryStore {
   /**
    * Archive short-term memories (promote to long_term or delete).
    * Called when a session ends.
+   *
+   * Legacy-only: after the short-term layer was retired nothing writes
+   * `short_term` rows, so this is a no-op on new databases. It is deliberately
+   * kept as the single automatic cleanup path for short_term rows persisted by
+   * pre-retirement versions.
    */
   archiveShortTermMemories(scopeId: string, options?: {
     promoteToLongTerm?: boolean;
@@ -1098,16 +1235,24 @@ export class SqliteMemoryStore {
     topics: string[];
     conversationId?: string;
     timestamp?: string;
+    summary?: string;
+    startTime?: string | null;
+    endTime?: string | null;
+    messageCount?: number;
   }): number {
     const now = new Date().toISOString();
     const result = this.db.prepare(`
-      INSERT INTO conversation_indices (title, topics, conversation_id, timestamp, created_at)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO conversation_indices (title, topics, conversation_id, timestamp, summary, start_time, end_time, message_count, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       entry.title,
       JSON.stringify(entry.topics),
       entry.conversationId ?? "",
       entry.timestamp ?? now,
+      entry.summary ?? "",
+      entry.startTime ?? null,
+      entry.endTime ?? null,
+      entry.messageCount ?? 0,
       now,
     );
     return Number(result.lastInsertRowid);
@@ -1118,23 +1263,48 @@ export class SqliteMemoryStore {
    */
   listConversationIndices(limit: number = 50): ConversationIndexEntry[] {
     const rows = this.db.prepare(`
-      SELECT id, title, topics, conversation_id, timestamp, created_at FROM conversation_indices ORDER BY timestamp DESC LIMIT ?
+      SELECT id, title, topics, conversation_id, timestamp, summary, start_time, end_time, message_count, created_at
+      FROM conversation_indices
+      ORDER BY timestamp DESC
+      LIMIT ?
     `).all(limit) as ConversationIndexRow[];
     return rows.map(r => this.rowToIndexEntry(r));
   }
 
   /**
-   * Search conversation indices by topic or title.
+   * Search conversation indices by topic, title, or summary.
+   * Prefers FTS5 search with fallback to LIKE search.
    */
   searchConversationIndices(query: string, limit: number = 20): ConversationIndexEntry[] {
+    const ftsQuery = this.sanitizeFtsQuery(query);
+    if (ftsQuery) {
+      try {
+        const ftsRows = this.db.prepare(`
+          SELECT ci.id, ci.title, ci.topics, ci.conversation_id, ci.timestamp, ci.summary, ci.start_time, ci.end_time, ci.message_count, ci.created_at
+          FROM conversation_indices_fts fts
+          JOIN conversation_indices ci ON ci.id = fts.rowid
+          WHERE conversation_indices_fts MATCH ?
+          ORDER BY rank
+          LIMIT ?
+        `).all(ftsQuery, limit) as ConversationIndexRow[];
+        if (ftsRows.length > 0) {
+          return ftsRows.map(r => this.rowToIndexEntry(r));
+        }
+      } catch {
+        // Fallback to LIKE if FTS query syntax error
+      }
+    }
+
     const likeQuery = `%${escapeLike(query)}%`;
     const rows = this.db.prepare(`
-      SELECT id, title, topics, conversation_id, timestamp, created_at FROM conversation_indices
-      WHERE title LIKE ? ESCAPE '\\' OR topics LIKE ? ESCAPE '\\'
+      SELECT id, title, topics, conversation_id, timestamp, summary, start_time, end_time, message_count, created_at
+      FROM conversation_indices
+      WHERE title LIKE ? ESCAPE '\\' OR topics LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\'
       ORDER BY timestamp DESC LIMIT ?
-    `).all(likeQuery, likeQuery, limit) as ConversationIndexRow[];
+    `).all(likeQuery, likeQuery, likeQuery, limit) as ConversationIndexRow[];
     return rows.map(r => this.rowToIndexEntry(r));
   }
+
 
   /**
    * Delete a conversation index by id.
@@ -1516,6 +1686,11 @@ export class SqliteMemoryStore {
       conversationId: row.conversation_id ?? "",
       timestamp: row.timestamp,
       createdAt: row.created_at,
+      summary: row.summary ?? "",
+      startTime: row.start_time ?? null,
+      endTime: row.end_time ?? null,
+      messageCount: row.message_count ?? 0,
     };
   }
+
 }

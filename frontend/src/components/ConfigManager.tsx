@@ -50,8 +50,11 @@ interface AgentConfig {
   memoryMaxRetries: number
   memoryAgingAccessThreshold: number
   memoryAgingMaxAgeDays: number
-  memoryShortTermMaxAgeHours: number
-  memoryPromoteOnSessionEnd: boolean
+  // @deprecated 分层短期记忆已退役（改为全量会话历史 + 后台记忆索引），
+  // 这两个开关不再有任何效果，前端也没有输入入口。字段仅保留以便存量
+  // config blob 原样往返（用户改不到、后端也不再有消费方）。
+  memoryShortTermMaxAgeHours?: number
+  memoryPromoteOnSessionEnd?: boolean
   memoryInjectProfileCount: number
   memoryInjectLongTermCount: number
   memoryInjectPersonaCount: number
@@ -1075,9 +1078,9 @@ export default function ConfigManager() {
 
               {config.memoryEnabled && (
                 <>
-                  {/* 记忆整理 */}
+                  {/* 对话记忆索引生成 */}
                   <div className="section-divider"></div>
-                  <div className="section-subtitle">记忆整理</div>
+                  <div className="section-subtitle">对话记忆索引生成</div>
 
                   <div className="form-group row-checkbox">
                     <input
@@ -1086,11 +1089,11 @@ export default function ConfigManager() {
                       onChange={(e) => updateField('memoryConsolidationEnabled', e.target.checked)}
                       id="memoryConsolidationEnabled"
                     />
-                    <label htmlFor="memoryConsolidationEnabled">启用定时记忆整理</label>
+                    <label htmlFor="memoryConsolidationEnabled">启用定期生成对话记忆索引 (自动提炼全量对话摘要、主题标签与沉淀长期记忆)</label>
                   </div>
                   {config.memoryConsolidationEnabled && (
                     <div className="form-group">
-                      <label>整理间隔</label>
+                      <label>索引生成检查间隔</label>
                       <input
                         type="text"
                         value={config.memoryConsolidationInterval}
@@ -1098,35 +1101,11 @@ export default function ConfigManager() {
                         placeholder="12h"
                         className="form-control font-mono"
                       />
-                      <span className="help-text">支持格式: "12h" (12小时), "30m" (30分钟), "1d6h30m", 默认 12h</span>
+                      <span className="help-text">模型周期性扫描未索引会话的时间间隔，如 "12h" (12小时), "30m" (30分钟), 默认 12h</span>
                     </div>
                   )}
                   <div className="form-group">
-                    <label>单条记忆最大长度 (字符)</label>
-                    <input
-                      type="number"
-                      value={config.memoryMaxLength}
-                      onChange={(e) => updateField('memoryMaxLength', Number(e.target.value))}
-                      min={100}
-                      max={2000}
-                      className="form-control"
-                    />
-                    <span className="help-text">超出部分将被截断，默认400</span>
-                  </div>
-                  <div className="form-group">
-                    <label>LLM 提取失败最大重试次数</label>
-                    <input
-                      type="number"
-                      value={config.memoryMaxRetries}
-                      onChange={(e) => updateField('memoryMaxRetries', Number(e.target.value))}
-                      min={1}
-                      max={10}
-                      className="form-control"
-                    />
-                    <span className="help-text">失败时保留缓冲区数据等待下次重试</span>
-                  </div>
-                  <div className="form-group">
-                    <label>触发整理的最少缓冲区消息数</label>
+                    <label>会话建立索引最少消息数</label>
                     <input
                       type="number"
                       value={config.memoryBufferMinMessages}
@@ -1135,7 +1114,31 @@ export default function ConfigManager() {
                       max={50}
                       className="form-control"
                     />
-                    <span className="help-text">缓冲区消息少于此数不会触发整理</span>
+                    <span className="help-text">未索引会话累计达到此消息数后才为其建立记忆索引摘要，少于此数暂不建立，默认 6</span>
+                  </div>
+                  <div className="form-group">
+                    <label>单条提炼记忆最大长度 (字符)</label>
+                    <input
+                      type="number"
+                      value={config.memoryMaxLength}
+                      onChange={(e) => updateField('memoryMaxLength', Number(e.target.value))}
+                      min={100}
+                      max={2000}
+                      className="form-control"
+                    />
+                    <span className="help-text">从对话中提取沉淀为长期记忆时的单条字符限制，超出将被截断，默认 400</span>
+                  </div>
+                  <div className="form-group">
+                    <label>模型提取失败最大重试次数</label>
+                    <input
+                      type="number"
+                      value={config.memoryMaxRetries}
+                      onChange={(e) => updateField('memoryMaxRetries', Number(e.target.value))}
+                      min={1}
+                      max={10}
+                      className="form-control"
+                    />
+                    <span className="help-text">调用模型提取或总结失败时的重试次数，失败时保留未索引状态等待下次重试，默认 3</span>
                   </div>
 
                   {/* 长期记忆整理 */}
@@ -1239,12 +1242,12 @@ export default function ConfigManager() {
                     </>
                   )}
 
-                  {/* 老化与归档 */}
+                  {/* 长期记忆老化与淘汰 */}
                   <div className="section-divider"></div>
-                  <div className="section-subtitle">老化与归档</div>
+                  <div className="section-subtitle">长期记忆老化与淘汰</div>
 
                   <div className="form-group">
-                    <label>老化降权天数阈值</label>
+                    <label>长期记忆老化降权天数阈值</label>
                     <input
                       type="number"
                       value={config.memoryAgingMaxAgeDays}
@@ -1253,10 +1256,10 @@ export default function ConfigManager() {
                       max={365}
                       className="form-control"
                     />
-                    <span className="help-text">超过此天数且低访问的记忆将被降权，默认90天</span>
+                    <span className="help-text">超过此天数且低访问的长期记忆将被降权，默认90天</span>
                   </div>
                   <div className="form-group">
-                    <label>老化降权访问次数阈值</label>
+                    <label>长期记忆老化访问次数阈值</label>
                     <input
                       type="number"
                       value={config.memoryAgingAccessThreshold}
@@ -1265,28 +1268,7 @@ export default function ConfigManager() {
                       max={100}
                       className="form-control"
                     />
-                    <span className="help-text">访问次数低于此值的记忆会被降权，默认1</span>
-                  </div>
-                  <div className="form-group">
-                    <label>短期记忆最大保留时间 (小时)</label>
-                    <input
-                      type="number"
-                      value={config.memoryShortTermMaxAgeHours}
-                      onChange={(e) => updateField('memoryShortTermMaxAgeHours', Number(e.target.value))}
-                      min={1}
-                      max={720}
-                      className="form-control"
-                    />
-                    <span className="help-text">超时的短期记忆在归档时删除，默认168小时(7天)</span>
-                  </div>
-                  <div className="form-group row-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={config.memoryPromoteOnSessionEnd}
-                      onChange={(e) => updateField('memoryPromoteOnSessionEnd', e.target.checked)}
-                      id="memoryPromoteOnSessionEnd"
-                    />
-                    <label htmlFor="memoryPromoteOnSessionEnd">会话结束时将短期记忆提升为长期记忆</label>
+                    <span className="help-text">访问次数低于此值的长期记忆会被降权，默认1（短期对话已由上下文压缩接管，无临时短期记忆堆积）</span>
                   </div>
 
                   {/* 上下文注入 */}

@@ -45,9 +45,19 @@ export interface ConsolidationConfig {
   agingAccessThreshold: number;
   /** Aging: age in days after which rarely-accessed memories are demoted (default: 90) */
   agingMaxAgeDays: number;
-  /** Whether to promote short_term to long_term on session end (default: true) */
+  /**
+   * Whether to promote short_term to long_term on session end (default: true).
+   * @deprecated The layered short-term buffer was retired (full conversation
+   * history + background indexing replaced it), so nothing writes short_term
+   * any more. Retained only so the historical cleanup path
+   * (`archiveSession` → `archiveShortTermMemories`) keeps working on databases
+   * that still hold legacy short_term rows.
+   */
   promoteOnSessionEnd: boolean;
-  /** Max age in ms for short_term memories before they are deleted on archive (default: 7 days) */
+  /**
+   * Max age in ms for short_term memories before they are deleted on archive (default: 7 days).
+   * @deprecated See `promoteOnSessionEnd` — only meaningful for legacy rows.
+   */
   shortTermMaxAgeMs: number;
   /** Max character length for a single memory value (default: 400). Values exceeding this are truncated. */
   maxMemoryLength: number;
@@ -90,12 +100,25 @@ export interface UserProfile {
   style: string;
 }
 
+export interface ConversationSourceProvider {
+  getUnindexedConversations(limit?: number): Promise<Array<{
+    id: string;
+    unifiedMsgOrigin: string;
+    history: string;
+    createdAt?: Date;
+    updatedAt: Date;
+    lastIndexedAt?: Date | null;
+  }>>;
+  updateLastIndexedAt(conversationId: string, timestamp?: Date): Promise<void>;
+}
+
 // ── MemoryConsolidator ──
 
 export class MemoryConsolidator {
   private store: SqliteMemoryStore;
   private provider: Provider | null = null;
   private fallbackProviders: Provider[] = [];
+  private conversationSource: ConversationSourceProvider | null = null;
   private config: ConsolidationConfig;
   /** Track consecutive extraction failures for retry logic */
   private consecutiveFailures: number = 0;
@@ -122,6 +145,12 @@ export class MemoryConsolidator {
   setFallbackProviders(providers: Provider[]): void {
     this.fallbackProviders = providers;
   }
+
+  /** 设置会话数据源，用于基于真实全量对话历史进行定期记忆索引 */
+  setConversationSource(source: ConversationSourceProvider): void {
+    this.conversationSource = source;
+  }
+
 
   getConfig(): ConsolidationConfig {
     return { ...this.config };
@@ -180,10 +209,14 @@ export class MemoryConsolidator {
       };
 
       let extractionSkipped = false;
+      // Whether real extraction work was attempted this run. Used to decide if
+      // the attempt timestamp should be written (see recordConsolidateAttempt).
+      let extractionAttempted = false;
 
       // Step 1: Extract memories from recent conversations (if provider available)
       // On failure, skip extraction and preserve short-term buffer for retry
       if (this.provider) {
+        extractionAttempted = true;
         const extractionResult = await this.extractFromConversations(options?.force);
         if (extractionResult.failed) {
           result.extractionFailed = true;
@@ -195,6 +228,9 @@ export class MemoryConsolidator {
           // Only proceed with dedup/aging if we've exceeded max retries
           // (otherwise we want to preserve the buffer untouched)
           if (this.consecutiveFailures < this.config.maxRetries) {
+            // Record the attempt so the retry is throttled to the next
+            // interval rather than re-firing on every incoming message.
+            this.recordConsolidateAttempt();
             return result;
           }
           // Max retries exceeded — reset counter and proceed with other steps
@@ -228,16 +264,13 @@ export class MemoryConsolidator {
         (result.extractionFailed ? " (extraction failed, buffer preserved)" : "")
       );
 
-      if (!result.extractionFailed && !extractionSkipped) {
-        try {
-          this.store.save("system_last_consolidate_time", Date.now().toString(), [], {
-            memoryType: "long_term",
-            scope: "global",
-            priority: 0,
-          });
-        } catch (e) {
-          console.error("[MemoryConsolidator] Failed to save system_last_consolidate_time:", e);
-        }
+      // Record the attempt timestamp whenever extraction actually ran and the
+      // outcome was not a no-op skip. This must include failures: a missing
+      // timestamp is treated by checkAndConsolidate() as "never consolidated",
+      // so a persistently failing provider would otherwise be retried on every
+      // single message with no backoff.
+      if (extractionAttempted && !extractionSkipped) {
+        this.recordConsolidateAttempt();
       }
 
       return result;
@@ -247,7 +280,31 @@ export class MemoryConsolidator {
   }
 
   /**
+   * Persist the timestamp of the last consolidation *attempt*.
+   *
+   * Consumed by checkAndConsolidate() as the interval anchor. Written on both
+   * success and failure so that a failing extraction backs off to the next
+   * interval instead of hot-looping per message.
+   */
+  private recordConsolidateAttempt(): void {
+    try {
+      this.store.save("system_last_consolidate_time", Date.now().toString(), [], {
+        memoryType: "long_term",
+        scope: "global",
+        priority: 0,
+      });
+    } catch (e) {
+      console.error("[MemoryConsolidator] Failed to save system_last_consolidate_time:", e);
+    }
+  }
+
+  /**
    * Archive short-term memories for a session (called on session end).
+   *
+   * Legacy-only: nothing writes `short_term` memories any more, so in practice
+   * this returns `{ promoted: 0, deleted: 0 }`. It is kept because it is the
+   * only automatic path that clears short_term rows left behind by pre-retirement
+   * databases — removing it would strand that data.
    */
   archiveSession(scopeId: string): { promoted: number; deleted: number } {
     if (!this.config.enabled || this.config.memoryEnabled === false) {
@@ -261,8 +318,8 @@ export class MemoryConsolidator {
 
   /**
    * Extract memories from conversation history using LLM.
+   * Prioritizes full conversation logs via conversationSource, falling back to legacy short-term buffer.
    * Returns extraction count and failure status.
-   * On failure, short-term memories are NOT cleared (preserved for retry).
    */
   private async extractFromConversations(force = false): Promise<{ count: number; failed: boolean; skipped?: boolean }> {
     if (!this.provider) {
@@ -270,6 +327,127 @@ export class MemoryConsolidator {
       return { count: 0, failed: false, skipped: true };
     }
 
+    // 1. 优先尝试从真实会话数据源（ConversationStore）处理未建立索引的会话
+    if (this.conversationSource) {
+      try {
+        const unindexed = await this.conversationSource.getUnindexedConversations(5);
+        if (unindexed.length > 0) {
+          let totalExtracted = 0;
+          let anyFailed = false;
+
+          for (const conv of unindexed) {
+            let messages: Array<{ role: string; content?: string }> = [];
+            try {
+              messages = JSON.parse(conv.history);
+            } catch {
+              messages = [];
+            }
+            if (!Array.isArray(messages) || messages.length === 0) {
+              await this.conversationSource.updateLastIndexedAt(conv.id, new Date());
+              continue;
+            }
+
+            const bufferTexts: string[] = [];
+            for (const msg of messages) {
+              if (msg.role === "system") continue;
+              const content = typeof msg.content === "string" ? msg.content.trim() : "";
+              if (!content) continue;
+              const roleName = msg.role === "user" ? "用户" : "AI";
+              bufferTexts.push(`${roleName}：${content}`);
+            }
+
+            const minMessages = force ? 1 : this.config.bufferMinMessages;
+            if (bufferTexts.length < minMessages) {
+              continue;
+            }
+
+            console.log(`[MemoryConsolidator] Extracting memory index from conversation ${conv.id} (${bufferTexts.length} messages)`);
+
+            const res = await this.extractMemoriesAndIndexFromTexts(bufferTexts, {
+              conversationId: conv.id,
+              startTime: conv.createdAt ? new Date(conv.createdAt).toISOString() : undefined,
+              endTime: conv.updatedAt ? new Date(conv.updatedAt).toISOString() : undefined,
+              messageCount: bufferTexts.length,
+            });
+
+            if (res.failed) {
+              anyFailed = true;
+              break;
+            } else {
+              totalExtracted += res.count;
+              await this.conversationSource.updateLastIndexedAt(conv.id, new Date());
+            }
+          }
+
+          // Report the outcome unconditionally. Previously a first-conversation
+          // failure (totalExtracted === 0 && anyFailed) fell through to the
+          // legacy short-term buffer path below, which returned
+          // `{failed:false, skipped:true}` — masking the failure, resetting
+          // consecutiveFailures and scheduling an immediate (unthrottled)
+          // retry on the next message.
+          return {
+            count: totalExtracted,
+            failed: anyFailed,
+            skipped: totalExtracted === 0 && !anyFailed,
+          };
+        }
+      } catch (e) {
+        console.warn("[MemoryConsolidator] Failed to extract from conversationSource, checking legacy fallback:", e);
+      }
+    }
+
+    // 2. 降级模式：从旧短期记忆缓冲区读取（兼容旧测试与历史残留数据）
+    // 注意：短期记忆层退役后，正常运行时这里恒为空 → 会走下面的
+    // "insufficient messages" 分支返回 skipped。保留它只为兼容存量数据与旧测试，
+    // 不是当前的主路径（主路径是上面的 conversationSource 全量历史索引）。
+    const shortTermMemories = this.store.list(50, { memoryType: "short_term" });
+    const bufferTexts = shortTermMemories
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .map(m => {
+        const role = m.key.endsWith("_user") ? "用户" : "AI";
+        return `${role}：${m.value}`;
+      });
+
+    const minMessages = force ? 1 : this.config.bufferMinMessages;
+    if (bufferTexts.length < minMessages) {
+      console.log(`[MemoryConsolidator] Conversation buffer has insufficient messages (${bufferTexts.length}/${minMessages}). Skipping extraction.`);
+      return { count: 0, failed: false, skipped: true };
+    }
+
+    console.log(`[MemoryConsolidator] Processing memory extraction on ${bufferTexts.length} short-term messages (force=${force}).`);
+
+    const sessionIds = new Set(
+      shortTermMemories
+        .map(m => extractSessionIdFromKey(m.key))
+        .filter((id): id is string => Boolean(id))
+    );
+    const conversationId = sessionIds.size === 1 ? [...sessionIds][0] : "";
+
+    const res = await this.extractMemoriesAndIndexFromTexts(bufferTexts, {
+      conversationId,
+      messageCount: bufferTexts.length,
+    });
+
+    if (!res.failed && res.count > 0) {
+      const processedKeys = shortTermMemories.map(m => m.key);
+      this.clearShortTermBuffer(processedKeys);
+    }
+
+    return res;
+  }
+
+  /**
+   * Helper to perform LLM structured extraction from dialog texts and commit to store.
+   */
+  private async extractMemoriesAndIndexFromTexts(
+    bufferTexts: string[],
+    meta?: {
+      conversationId?: string;
+      startTime?: string;
+      endTime?: string;
+      messageCount?: number;
+    }
+  ): Promise<{ count: number; failed: boolean }> {
     // Get existing memories for dedup context
     const existingLongTerm = this.store.list(50, { memoryType: "long_term" });
     const existingProfileEntry = this.store.recall("user_profile");
@@ -287,28 +465,11 @@ export class MemoryConsolidator {
       ...(existingProfileEntry ? [`- [profile:user_profile] ${existingProfileEntry.value.slice(0, 100)}`] : []),
     ].join("\n");
 
-    // Get recent short-term conversation buffer
-    const shortTermMemories = this.store.list(50, { memoryType: "short_term" });
-    const bufferTexts = shortTermMemories
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-      .map(m => {
-        const role = m.key.endsWith("_user") ? "用户" : "AI";
-        return `${role}：${m.value}`;
-      });
-
-    const minMessages = force ? 1 : this.config.bufferMinMessages;
-    if (bufferTexts.length < minMessages) {
-      console.log(`[MemoryConsolidator] Conversation buffer has insufficient messages (${bufferTexts.length}/${minMessages}). Skipping extraction.`);
-      return { count: 0, failed: false, skipped: true };
-    }
-
-    console.log(`[MemoryConsolidator] Processing memory extraction on ${bufferTexts.length} short-term messages (force=${force}).`);
-
     const extractionPrompt = `【任务：深度记忆整理】
-请根据以下对话记录，执行四项任务：
+请根据以下对话记录，执行三项任务：
 1. 提取/更新【用户画像】：包含用户的偏好(preferences)、背景信息(background)、语言风格(style)，每项简洁描述。
 2. 提炼【长期记忆】：提取对话中重要的偏好、事实、决策、进展，每条记忆用 key-value 表示。
-3. 生成【历史索引】：提取对话涉及的 3-5 个核心关键词(topics)和一段简短检索标题(title)。
+3. 生成【历史记忆索引】：提取对话涉及的 3-5 个核心关键词(topics)、一段简短检索标题(title)以及一段核心讨论摘要(summary)。
 
 【当前数据】
 当前画像：
@@ -316,7 +477,7 @@ ${existingProfileStr}
 当前长期记忆：
 ${existingSummary || "(空)"}
 
-【最近对话】
+【对话记录】
 <conversation_data>
 ${bufferTexts.join("\n")}
 </conversation_data>
@@ -340,7 +501,8 @@ ${bufferTexts.join("\n")}
   ],
   "index": {
     "title": "简短的检索标题",
-    "topics": ["关键词1", "关键词2"]
+    "topics": ["关键词1", "关键词2"],
+    "summary": "本次讨论片段的核心内容摘要"
   }
 }
 
@@ -359,7 +521,7 @@ ${bufferTexts.join("\n")}
         const response = await prov.textChat({
           contexts: [
             { role: "system", content: extractionPrompt },
-            { role: "user", content: "请从上述对话中提取记忆、更新画像、生成索引。" },
+            { role: "user", content: "请从上述对话中提取记忆、更新画像、生成记忆索引与摘要。" },
           ],
           enableCaching: true,
         });
@@ -367,7 +529,6 @@ ${bufferTexts.join("\n")}
         const text = (response.completionText ?? "").trim();
         if (!text) return { count: 0, failed: true };
 
-        // Parse JSON from response
         const jsonMatch = text.match(/\{[\s\S]*\}/);
         if (!jsonMatch) return { count: 0, failed: true };
 
@@ -379,7 +540,7 @@ ${bufferTexts.join("\n")}
 
         let extracted = 0;
 
-        // 1. Update user profile (structured: preferences, background, style)
+        // 1. Update user profile
         if (parsed.profile && typeof parsed.profile === "object") {
           const profile = parsed.profile as UserProfile;
           const cleanProfile: UserProfile = {
@@ -404,37 +565,21 @@ ${bufferTexts.join("\n")}
         }>;
 
         if (Array.isArray(memories)) {
-          // Cap the number of memories extracted in a single cycle to
-          // prevent LLM hallucination / prompt injection from triggering a
-          // write storm that pollutes long-term storage.
           const MAX_MEMORIES_PER_EXTRACTION = 50;
           const cappedMemories = memories.slice(0, MAX_MEMORIES_PER_EXTRACTION);
-          if (memories.length > MAX_MEMORIES_PER_EXTRACTION) {
-            console.warn(
-              `[MemoryConsolidator] LLM returned ${memories.length} memories, ` +
-              `capping to ${MAX_MEMORIES_PER_EXTRACTION} to prevent write storm.`
-            );
-          }
           for (const mem of cappedMemories) {
-            // Strict schema validation: key and value must be non-empty strings
             if (typeof mem.key !== "string" || typeof mem.value !== "string") continue;
             if (!mem.key || !mem.value) continue;
 
-            // Validate key format to prevent injection via key names
             if (!this.validateMemoryKey(mem.key)) {
               console.warn(`[MemoryConsolidator] Skipping memory with invalid key: ${mem.key.slice(0, 50)}`);
               continue;
             }
 
-            // Sanitize value against prompt injection patterns, then truncate
             const cleanValue = this.truncateValue(this.sanitizeMemoryValue(mem.value));
-
-            // Validate tags are strings
             const cleanTags = Array.isArray(mem.tags)
               ? mem.tags.filter((t) => typeof t === "string").slice(0, 10)
               : [];
-
-            // Clamp priority to 0-10
             const cleanPriority = typeof mem.priority === "number"
               ? Math.max(0, Math.min(10, mem.priority))
               : 0;
@@ -449,32 +594,22 @@ ${bufferTexts.join("\n")}
           }
         }
 
-        // 3. Save history index to conversation_indices table (structured: title + topics)
+        // 3. Save history index to conversation_indices table (with summary and time ranges)
         if (parsed.index) {
-          const indexData = parsed.index as { title: string; topics: string[] };
-          if (indexData.title || (indexData.topics && indexData.topics.length > 0)) {
-            // Link the index back to its conversation/session by parsing the
-            // session id (UMO) out of the short-term memory keys.
-            // Key format: short_term_${umo}_${timestamp}_${user|assistant}
-            // When memories span multiple sessions, leave the link empty.
-            const sessionIds = new Set(
-              shortTermMemories
-                .map(m => extractSessionIdFromKey(m.key))
-                .filter((id): id is string => Boolean(id))
-            );
-            const conversationId = sessionIds.size === 1 ? [...sessionIds][0] : "";
+          const indexData = parsed.index as { title: string; topics: string[]; summary?: string };
+          if (indexData.title || (indexData.topics && indexData.topics.length > 0) || indexData.summary) {
             this.store.addConversationIndex({
               title: indexData.title || "",
               topics: indexData.topics ?? [],
-              conversationId,
+              summary: indexData.summary || "",
+              conversationId: meta?.conversationId ?? "",
+              startTime: meta?.startTime,
+              endTime: meta?.endTime,
+              messageCount: meta?.messageCount ?? bufferTexts.length,
             });
             extracted++;
           }
         }
-
-        // 4. On success, clear the short-term conversation buffer (only the processed keys)
-        const processedKeys = shortTermMemories.map(m => m.key);
-        this.clearShortTermBuffer(processedKeys);
 
         return { count: extracted, failed: false };
       } catch (e) {
@@ -483,7 +618,6 @@ ${bufferTexts.join("\n")}
       }
     }
 
-    // 所有 provider 均失败
     console.error("[MemoryConsolidator] 所有 provider 均无法提取记忆:", lastError?.message);
     return { count: 0, failed: true };
   }
@@ -801,11 +935,25 @@ ${bufferTexts.join("\n")}
       return null;
     }
 
-    // 1. Get the current short-term buffer size
+    // 1. Check conversationSource for unindexed conversations
+    let hasUnindexedConvs = false;
+    if (this.conversationSource) {
+      try {
+        const unindexed = await this.conversationSource.getUnindexedConversations(1);
+        hasUnindexedConvs = unindexed.length > 0;
+      } catch (e) {
+        console.warn("[MemoryConsolidator] Failed to check unindexed conversations:", e);
+      }
+    }
+
+    // 2. Get the current short-term buffer size (for legacy compatibility)
+    //    Always 0 on databases written after the short-term layer was retired —
+    //    conditions 2/3 below therefore effectively require conversationSource
+    //    (condition 1) in production; they stay for legacy data and old tests.
     const shortTermMemories = this.store.list(500, { memoryType: "short_term" });
     const bufferLen = shortTermMemories.length;
 
-    // 2. Get last consolidate time
+    // 3. Get last consolidate time
     let lastTimeMs = 0;
     try {
       const lastTimeEntry = this.store.recall("system_last_consolidate_time");
@@ -820,12 +968,17 @@ ${bufferTexts.join("\n")}
 
     let shouldConsolidate = false;
 
-    // Condition 1: Time interval met AND buffer has at least min messages
-    if (intervalMs > 0 && timeSinceLast >= intervalMs && bufferLen >= this.config.bufferMinMessages) {
+    // Condition 1: When using conversationSource, time interval met AND there are unindexed conversations
+    if (hasUnindexedConvs && (intervalMs <= 0 || timeSinceLast >= intervalMs || lastTimeMs === 0)) {
+      shouldConsolidate = true;
+      console.log(`[MemoryConsolidator] Conversation indexing threshold met: timeSinceLast=${timeSinceLast}ms, hasUnindexedConvs=true. Triggering consolidation.`);
+    }
+    // Condition 2: Time interval met AND buffer has at least min messages
+    else if (intervalMs > 0 && timeSinceLast >= intervalMs && bufferLen >= this.config.bufferMinMessages) {
       shouldConsolidate = true;
       console.log(`[MemoryConsolidator] Time-based threshold met: timeSinceLast=${timeSinceLast}ms >= ${intervalMs}ms, bufferLen=${bufferLen} >= ${this.config.bufferMinMessages}. Triggering consolidation.`);
     }
-    // Condition 2: Buffer length exceeds autoConsolidateBufferCount threshold
+    // Condition 3: Buffer length exceeds autoConsolidateBufferCount threshold
     else if (bufferLen >= this.config.autoConsolidateBufferCount) {
       shouldConsolidate = true;
       console.log(`[MemoryConsolidator] Buffer count threshold met: bufferLen=${bufferLen} >= ${this.config.autoConsolidateBufferCount}. Triggering consolidation.`);

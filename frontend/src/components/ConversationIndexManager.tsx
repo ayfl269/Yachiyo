@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import {
-  FileText, Search, RefreshCw, Trash2, Clock, Tag, X
+  FileText, Search, RefreshCw, Trash2, Clock, Tag, X, Zap
 } from 'lucide-react'
 import { useToast, ToastPortal } from './shared'
 import { apiFetch } from '../lib/api'
@@ -9,7 +9,11 @@ interface ConversationIndexEntry {
   id: number
   title: string
   topics: string[]
-  conversationId: string
+  summary?: string
+  conversationId?: string
+  startTime?: string | null
+  endTime?: string | null
+  messageCount?: number
   timestamp: string
   createdAt: string
 }
@@ -27,7 +31,34 @@ export default function ConversationIndexManager() {
   const [indicesTotal, setIndicesTotal] = useState(0)
   const [indicesLoading, setIndicesLoading] = useState(false)
   const [indicesSearch, setIndicesSearch] = useState('')
+  const [generating, setGenerating] = useState(false)
   const { toast, showMessage } = useToast()
+
+  const handleGenerateIndices = async () => {
+    setGenerating(true)
+    try {
+      const res = await apiFetch('/api/memories/consolidate', { method: 'POST' })
+      if (res.ok) {
+        const data = await res.json()
+        if (data.success) {
+          const count = data.result?.extracted ?? 0
+          if (count > 0) {
+            showMessage(`记忆索引生成完成，已提炼 ${count} 项记忆与索引`)
+          } else {
+            showMessage('当前所有会话均已建立索引')
+          }
+          await fetchIndices()
+        } else {
+          showMessage(data.error || '生成记忆索引失败', 'error')
+        }
+      }
+    } catch (error) {
+      console.error('生成记忆索引失败:', error)
+      showMessage('生成记忆索引失败', 'error')
+    } finally {
+      setGenerating(false)
+    }
+  }
 
   const fetchIndices = async (search?: string) => {
     const q = search !== undefined ? search : indicesSearch
@@ -97,11 +128,20 @@ export default function ConversationIndexManager() {
       <div className="page-header">
         <div>
           <h1>对话历史索引</h1>
-          <p>整理器自动从对话中提炼的检索标题与关键词，当前共 {indicesTotal} 条</p>
+          <p>模型自动从完整会话中提炼的记忆索引与主题摘要，当前共 {indicesTotal} 条</p>
         </div>
         <div className="header-actions">
           <button className="btn" onClick={() => fetchIndices()} disabled={indicesLoading} title="刷新">
             <RefreshCw size={16} className={indicesLoading ? 'animate-spin' : ''} />
+          </button>
+          <button
+            className="btn accent"
+            onClick={handleGenerateIndices}
+            disabled={generating}
+            title="扫描未建立索引的完整会话，调用模型生成摘要索引与提炼长期记忆"
+          >
+            <Zap size={16} className={generating ? 'animate-spin' : ''} />
+            {generating ? <span>生成中...</span> : <span>生成记忆索引</span>}
           </button>
           <button className="btn danger" onClick={handleClearIndices} disabled={indices.length === 0}>
             <Trash2 size={16} /> 清空全部
@@ -117,7 +157,7 @@ export default function ConversationIndexManager() {
               type="text"
               value={indicesSearch}
               onChange={e => setIndicesSearch(e.target.value)}
-              placeholder="搜索对话标题或关键词..."
+              placeholder="搜索对话标题、摘要或主题标签..."
               className="search-input"
               style={{ width: '100%', paddingLeft: '2.2rem' }}
               onKeyDown={e => { if (e.key === 'Enter') fetchIndices() }}
@@ -147,7 +187,7 @@ export default function ConversationIndexManager() {
           <div className="empty-state">
             <FileText size={48} className="empty-icon" />
             <h3>暂无对话索引</h3>
-            <p>整理器在自动整理时会从对话中提炼检索标题与关键词</p>
+            <p>整理器在后台对未索引会话进行分析时，会自动提炼检索标题、摘要与主题关键词</p>
           </div>
         ) : (
           <div className="memory-list">
@@ -155,11 +195,41 @@ export default function ConversationIndexManager() {
               <div key={idx.id} className="memory-card" style={{ padding: '1rem 1.25rem' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
                   <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                       <FileText size={16} className="key-icon" style={{ color: 'var(--accent-primary)', flexShrink: 0 }} />
-                      <span className="memory-key" style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--text-primary)' }}>{idx.title || '(无标题)'}</span>
+                      <span className="memory-key" style={{ fontSize: '1.05rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                        {idx.title || '(无标题)'}
+                      </span>
+                      {idx.messageCount != null && (
+                        <span style={{
+                          fontSize: '0.72rem',
+                          padding: '0.1rem 0.45rem',
+                          borderRadius: '10px',
+                          background: 'rgba(59, 130, 246, 0.1)',
+                          border: '1px solid rgba(59, 130, 246, 0.2)',
+                          color: '#60A5FA',
+                          fontWeight: 500,
+                        }}>
+                          {idx.messageCount} 条消息
+                        </span>
+                      )}
                     </div>
-                    {idx.topics.length > 0 && (
+
+                    {idx.summary && (
+                      <div style={{
+                        fontSize: '0.85rem',
+                        lineHeight: 1.5,
+                        color: 'var(--text-secondary, #D1D5DB)',
+                        background: 'rgba(255, 255, 255, 0.03)',
+                        border: '1px solid rgba(255, 255, 255, 0.07)',
+                        borderRadius: '6px',
+                        padding: '0.5rem 0.75rem',
+                      }}>
+                        {idx.summary}
+                      </div>
+                    )}
+
+                    {idx.topics && idx.topics.length > 0 && (
                       <div className="memory-tags-preview" style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', flexWrap: 'wrap' }}>
                         <Tag size={12} className="tag-icon" style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
                         {idx.topics.map(t => (
@@ -176,8 +246,9 @@ export default function ConversationIndexManager() {
                         ))}
                       </div>
                     )}
-                    {idx.conversationId && (
-                      <div className="memory-meta-row" style={{ marginTop: '0.15rem' }}>
+
+                    <div className="memory-meta-row" style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center', marginTop: '0.1rem' }}>
+                      {idx.conversationId && (
                         <span className="scope-badge" style={{
                           fontSize: '0.7rem',
                           color: 'var(--text-muted)',
@@ -186,17 +257,23 @@ export default function ConversationIndexManager() {
                           padding: '0.1rem 0.35rem',
                           borderRadius: '4px'
                         }}>会话 ID: {idx.conversationId}</span>
-                      </div>
-                    )}
+                      )}
+                      {(idx.startTime || idx.endTime) && (
+                        <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                          时间跨度: {formatDate(idx.startTime || '')} ~ {formatDate(idx.endTime || '')}
+                        </span>
+                      )}
+                    </div>
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.5rem', flexShrink: 0 }}>
                     <span className="meta-time" style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '0.25rem', whiteSpace: 'nowrap' }}>
-                      <Clock size={12} /> {formatDate(idx.timestamp)}
+                      <Clock size={12} /> {formatDate(idx.createdAt || idx.timestamp)}
                     </span>
                     <button
                       className="btn danger sm"
                       onClick={() => handleDeleteIndex(idx.id)}
                       style={{ padding: '0.25rem 0.5rem' }}
+                      title="删除该条索引"
                     >
                       <Trash2 size={14} />
                     </button>

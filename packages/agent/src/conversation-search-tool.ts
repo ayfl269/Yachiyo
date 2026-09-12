@@ -55,9 +55,27 @@ export interface ConversationRecord {
   tokenUsage: number | null;
 }
 
+export interface ConversationIndexItem {
+  id?: number;
+  title: string;
+  topics: string[];
+  summary?: string;
+  conversationId?: string;
+  startTime?: string | null;
+  endTime?: string | null;
+  messageCount?: number;
+  createdAt?: string;
+}
+
+export interface MemoryIndexStore {
+  searchConversationIndices(query: string, limit?: number): ConversationIndexItem[];
+}
+
 export interface CreateConversationSearchToolOptions {
   /** A store that supports getFilteredConversations (e.g. ConversationStore). */
   store: ConversationSearchStore;
+  /** Optional memory store with high-level conversation indices and summaries. */
+  memoryStore?: MemoryIndexStore;
 }
 
 // ── Types ──
@@ -91,16 +109,15 @@ function formatDate(date: Date): string {
 export function createConversationSearchTool(
   options: CreateConversationSearchToolOptions,
 ): FunctionTool<ConversationSearchToolContext> {
-  const { store } = options;
+  const { store, memoryStore } = options;
 
   return createFunctionTool<ConversationSearchToolContext>({
     name: "search_conversations",
     description:
-      "Search past conversation sessions by keyword. Searches both conversation titles " +
-      "and the full content of all messages (user and assistant) within each conversation. " +
-      "Returns matching conversations with excerpts showing the matched text in context, " +
-      "sorted by most recently updated. Use this to find previous discussions about a topic, " +
-      "recall past decisions, or locate information from earlier sessions.",
+      "Search past conversation sessions by keyword. Searches conversation memory indices (summaries, topics) " +
+      "as well as the full content of past messages. " +
+      "Returns matching conversations with summaries and matched text in context. " +
+      "Use this to find previous discussions about a topic, recall past decisions, or locate information from earlier sessions.",
     parameters: {
       type: "object",
       properties: {
@@ -108,7 +125,7 @@ export function createConversationSearchTool(
           type: "string",
           description:
             "The search keyword or phrase to look for. Case-insensitive. " +
-            "Matches against conversation titles and message content.",
+            "Matches against conversation titles, topics, summaries, and message content.",
         },
         platform_id: {
           type: "string",
@@ -149,10 +166,20 @@ export function createConversationSearchTool(
       try {
         const platformIds = platformId ? [platformId] : undefined;
 
-        // Use FTS5 search to find matching conversations by title and message content.
+        // 1. Search high-level conversation memory indices (summaries, topics) if memoryStore provided
+        let indexResults: ConversationIndexItem[] = [];
+        if (memoryStore) {
+          try {
+            indexResults = memoryStore.searchConversationIndices(query, limit);
+          } catch (e) {
+            console.warn("[ConversationSearchTool] Failed to search memory indices:", e);
+          }
+        }
+
+        // 2. Use FTS5 search to find matching conversations by title and message content
         const ftsResults = await store.searchConversationsByContent(query, { platformIds, limit });
 
-        if (ftsResults.length === 0) {
+        if (indexResults.length === 0 && ftsResults.length === 0) {
           return {
             content: [{
               type: "text",
@@ -162,33 +189,50 @@ export function createConversationSearchTool(
           };
         }
 
-        // Format results — fetch full records for display metadata
         const lines: string[] = [];
-        lines.push(`Found ${ftsResults.length} conversation(s) matching "${query}":`);
-        lines.push("");
 
-        for (let i = 0; i < ftsResults.length; i++) {
-          const result = ftsResults[i];
-          const conv = await store.getConversationById(result.conversationId);
-          if (!conv) continue;
-
-          const matchTypes: string[] = [];
-          if (result.titleMatched) matchTypes.push("title");
-          if (result.contentMatched) matchTypes.push("content");
-          const msgCount = parseHistory(conv.history).length;
-
-          lines.push(`── ${i + 1}. ${conv.title || "(untitled)"} ──`);
-          lines.push(`   ID: ${conv.id}`);
-          lines.push(`   Platform: ${conv.platformId || "unknown"}`);
-          lines.push(`   Messages: ${msgCount}`);
-          lines.push(`   Updated: ${formatDate(conv.updatedAt)}`);
-          lines.push(`   Matched: ${matchTypes.join(", ")}`);
-
-          if (includeExcerpts && result.snippet) {
-            lines.push("   Excerpt:");
-            lines.push(`   >>> ${result.snippet}`);
+        // Section A: High-level Conversation Indices
+        if (indexResults.length > 0) {
+          lines.push(`=== 📑 会话记忆索引 (Memory Indices: ${indexResults.length}) ===`);
+          for (let i = 0; i < indexResults.length; i++) {
+            const idx = indexResults[i];
+            lines.push(`[索引 ${i + 1}] ${idx.title || "(无标题)"}`);
+            if (idx.conversationId) lines.push(`   会话ID: ${idx.conversationId}`);
+            if (idx.topics && idx.topics.length > 0) lines.push(`   主题标签: ${idx.topics.join(", ")}`);
+            if (idx.summary) lines.push(`   摘要: ${idx.summary}`);
+            if (idx.startTime || idx.endTime) {
+              lines.push(`   时间范围: ${idx.startTime || "未知"} ~ ${idx.endTime || "进行中"}`);
+            }
+            lines.push("");
           }
-          lines.push("");
+        }
+
+        // Section B: Message Content Matches
+        if (ftsResults.length > 0) {
+          lines.push(`=== 💬 对话原文匹配 (Message Matches: ${ftsResults.length}) ===`);
+          for (let i = 0; i < ftsResults.length; i++) {
+            const result = ftsResults[i];
+            const conv = await store.getConversationById(result.conversationId);
+            if (!conv) continue;
+
+            const matchTypes: string[] = [];
+            if (result.titleMatched) matchTypes.push("title");
+            if (result.contentMatched) matchTypes.push("content");
+            const msgCount = parseHistory(conv.history).length;
+
+            lines.push(`── ${i + 1}. ${conv.title || "(untitled)"} ──`);
+            lines.push(`   ID: ${conv.id}`);
+            lines.push(`   Platform: ${conv.platformId || "unknown"}`);
+            lines.push(`   Messages: ${msgCount}`);
+            lines.push(`   Updated: ${formatDate(conv.updatedAt)}`);
+            lines.push(`   Matched: ${matchTypes.join(", ")}`);
+
+            if (includeExcerpts && result.snippet) {
+              lines.push("   Excerpt:");
+              lines.push(`   >>> ${result.snippet}`);
+            }
+            lines.push("");
+          }
         }
 
         return {

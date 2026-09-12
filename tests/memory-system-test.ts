@@ -213,7 +213,11 @@ async function testV3MigrationFromHistoryIndex() {
   // 先只跑 v1 + v2 迁移，手动插入 history_index 数据
   db.exec("CREATE TABLE IF NOT EXISTS _migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL DEFAULT (datetime('now')))");
   for (const m of MEMORY_MIGRATIONS.filter(m => m.version <= 2)) {
-    db.exec(m.up);
+    if (typeof m.up === "function") {
+      m.up(db);
+    } else {
+      db.exec(m.up);
+    }
     db.prepare("INSERT INTO _migrations (version, name) VALUES (?, ?)").run(m.version, m.name);
   }
 
@@ -240,7 +244,11 @@ async function testV3MigrationFromHistoryIndex() {
 
   // 跑 v3 迁移
   const v3 = MEMORY_MIGRATIONS.find(m => m.version === 3)!;
-  db.exec(v3.up);
+  if (typeof v3.up === "function") {
+    v3.up(db);
+  } else {
+    db.exec(v3.up);
+  }
   db.prepare("INSERT INTO _migrations (version, name) VALUES (?, ?)").run(v3.version, v3.name);
 
   // 验证迁移结果
@@ -921,7 +929,11 @@ async function testLikeQueryEscaping() {
   for (const migration of CHAT_MIGRATIONS) {
     const row = chatDb.prepare("SELECT version FROM _migrations WHERE version = ?").get(migration.version) as any;
     if (!row) {
-      chatDb.exec(migration.up);
+      if (typeof migration.up === "function") {
+        migration.up(chatDb);
+      } else {
+        chatDb.exec(migration.up);
+      }
       chatDb.prepare("INSERT INTO _migrations (version, name) VALUES (?, ?)").run(migration.version, migration.name);
     }
   }
