@@ -1,6 +1,14 @@
 /**
  * SQLite store for adapter configurations.
  * Persists adapter configs to config.db so they survive restarts.
+ *
+ * WARNING (#56): adapter configs (including secrets such as appSecret /
+ * accessToken / bot_token) are stored as PLAINTEXT JSON in the `adapters`
+ * table. There is currently no at-rest encryption for these fields. Anyone
+ * with read access to the database file (or file-level backups) can recover
+ * all platform credentials. Until this is migrated to the encrypted secret
+ * storage used elsewhere, restrict file permissions on the data directory
+ * and treat DB dumps/backups as sensitive.
  */
 
 import type Database from "better-sqlite3";
@@ -46,13 +54,27 @@ export class SqliteAdapterStore {
     this.db = db;
   }
 
+  /** Parse a config JSON column with tolerance for corrupted rows */
+  private parseConfigRow(row: AdapterRow, context: string): AdapterConfigBase | null {
+    try {
+      const config = typeof row.config === "string" ? JSON.parse(row.config) : row.config;
+      if (!config || typeof config !== "object") throw new Error("config is not an object");
+      return { ...config, id: row.id, type: row.type, enabled: row.enabled === 1 };
+    } catch (e) {
+      console.error(`[SqliteAdapterStore] Skipping corrupted adapter row (${context}, id=${row.id}):`, e);
+      return null;
+    }
+  }
+
   /** Load all adapter configs from database */
   loadAll(): AdapterConfigBase[] {
     const rows = this.db.prepare("SELECT id, type, config, enabled, created_at, updated_at FROM adapters ORDER BY created_at ASC").all() as AdapterRow[];
-    return rows.map(row => {
-      const config = typeof row.config === "string" ? JSON.parse(row.config) : row.config;
-      return { ...config, id: row.id, type: row.type, enabled: row.enabled === 1 };
-    });
+    const results: AdapterConfigBase[] = [];
+    for (const row of rows) {
+      const config = this.parseConfigRow(row, "loadAll");
+      if (config) results.push(config);
+    }
+    return results;
   }
 
   /** Save an adapter config (insert or replace) */
@@ -77,7 +99,6 @@ export class SqliteAdapterStore {
   get(id: string): AdapterConfigBase | null {
     const row = this.db.prepare("SELECT id, type, config, enabled, created_at, updated_at FROM adapters WHERE id = ?").get(id) as AdapterRow | undefined;
     if (!row) return null;
-    const config = typeof row.config === "string" ? JSON.parse(row.config) : row.config;
-    return { ...config, id: row.id, type: row.type, enabled: row.enabled === 1 };
+    return this.parseConfigRow(row, "get");
   }
 }

@@ -1,4 +1,5 @@
 import type { MessageEvent } from "@yachiyo/message/event.js";
+import { MessageType } from "@yachiyo/message/types.js";
 
 export abstract class HandlerFilter {
   abstract filter(event: MessageEvent, cfg: Record<string, unknown>): boolean;
@@ -16,7 +17,13 @@ export class CommandFilter extends HandlerFilter {
 
   filter(event: MessageEvent, _cfg: Record<string, unknown>): boolean {
     const msg = event.getMessageStr();
-    return msg.startsWith(this.commandName) || this.alias.some(a => msg.startsWith(a));
+    // 命令后必须是行尾或空白，避免 "help" 前缀误匹配 "helpme xxx"。
+    const matches = (cmd: string): boolean => {
+      if (!msg.startsWith(cmd)) return false;
+      const rest = msg.slice(cmd.length);
+      return rest.length === 0 || /^\s/.test(rest);
+    };
+    return matches(this.commandName) || this.alias.some(matches);
   }
 }
 
@@ -45,9 +52,17 @@ export class EventMessageTypeFilter extends HandlerFilter {
 
   filter(event: MessageEvent, _cfg: Record<string, unknown>): boolean {
     if (this.requiredType === EventMessageType.ALL) return true;
-    if (this.requiredType === EventMessageType.GROUP_MESSAGE) return !event.isPrivateChat();
-    if (this.requiredType === EventMessageType.PRIVATE_MESSAGE) return event.isPrivateChat();
-    return true;
+    // 按 MessageType 精确区分：旧的 `!isPrivateChat()` 会把 OTHER_MESSAGE
+    // 误判为群聊，而 OTHER_MESSAGE 分支则放行一切。
+    if (this.requiredType === EventMessageType.GROUP_MESSAGE) {
+      return event.getMessageType() === MessageType.GROUP_MESSAGE;
+    }
+    if (this.requiredType === EventMessageType.PRIVATE_MESSAGE) {
+      return event.getMessageType() === MessageType.FRIEND_MESSAGE;
+    }
+    // OTHER_MESSAGE：只匹配非群聊、非私聊的消息（如频道/系统事件等）。
+    return event.getMessageType() !== MessageType.GROUP_MESSAGE
+      && event.getMessageType() !== MessageType.FRIEND_MESSAGE;
   }
 }
 

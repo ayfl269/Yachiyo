@@ -94,34 +94,29 @@ function generateWechatUinHeader(): string {
 // Do not "fix" this by changing the cipher mode without a protocol upgrade
 // from WeChat.
 
-function pkcs7Pad(data: Buffer, blockSize: number = 16): Buffer {
-  const padLen = blockSize - (data.length % blockSize);
-  return Buffer.concat([data, Buffer.alloc(padLen, padLen)]);
-}
-
-function pkcs7Unpad(data: Buffer): Buffer {
-  if (data.length === 0) return data;
-  const padLen = data[data.length - 1];
-  if (padLen <= 0 || padLen > 16) return data;
-  for (let i = data.length - padLen; i < data.length; i++) {
-    if (data[i] !== padLen) return data;
-  }
-  return data.subarray(0, data.length - padLen);
-}
-
 function aesEcbEncrypt(plain: Buffer, key: Buffer): Buffer {
+  // PKCS#7 padding 由 Node autoPadding（默认开启）自动添加。
+  // 注意：不要在此手工 pad，否则会与 autoPadding 叠加成双重 padding。
   const cipher = createCipheriv("aes-128-ecb", key, null);
-  return Buffer.concat([cipher.update(pkcs7Pad(plain)), cipher.final()]);
+  return Buffer.concat([cipher.update(plain), cipher.final()]);
 }
 
 function aesEcbDecrypt(cipher: Buffer, key: Buffer): Buffer {
+  // 与加密侧对称：依赖 autoPadding 自动去除 PKCS#7 padding。
   const decipher = createDecipheriv("aes-128-ecb", key, null);
-  return pkcs7Unpad(Buffer.concat([decipher.update(cipher), decipher.final()]));
+  return Buffer.concat([decipher.update(cipher), decipher.final()]);
 }
 
 function parseMediaAesKey(aesKeyValue: string): Buffer {
   const normalized = aesKeyValue.trim();
   if (!normalized) throw new Error("empty media aes key");
+
+  // 32 字符 hex 字符串优先按 hex 解码。
+  // 必须先判 hex：纯 hex 输入经 base64 解码会得到 24 字节垃圾数据，
+  // 永远无法命中 16 字节分支，导致 hex 形式的 aes_key 全部静默失败。
+  if (normalized.length === 32 && /^[0-9a-fA-F]+$/.test(normalized)) {
+    return Buffer.from(normalized, "hex");
+  }
 
   // Try base64 decode — (4 - len % 4) % 4 yields 0/1/2/3, never negative.
   // The old `-len % 4` produced -1/-2/-3 for non-multiple lengths, causing
@@ -130,12 +125,6 @@ function parseMediaAesKey(aesKeyValue: string): Buffer {
   const decoded = Buffer.from(padded, "base64");
 
   if (decoded.length === 16) return decoded;
-
-  // Try hex string
-  const decodedText = decoded.toString("ascii");
-  if (decoded.length === 32 && /^[0-9a-fA-F]+$/.test(decodedText)) {
-    return Buffer.from(decodedText, "hex");
-  }
 
   throw new Error("unsupported media aes key format");
 }
@@ -817,24 +806,9 @@ export class WeixinOCAdapter extends PlatformAdapter {
       const encryptedQueryParam = String(media.encrypt_query_param ?? "").trim();
       if (!encryptedQueryParam) return null;
 
-      const imageAesKey = String(imageItem.aeskey ?? "").trim();
-      let aesKeyValue: string;
+      // 入站媒体未落地：不做下载解密（解密后内容当前无下游用途），仅保留 CDN 密文 URL。
+      console.debug(`[WeixinOC] Inbound image not persisted, only CDN URL is kept`);
 
-      if (imageAesKey) {
-        // aeskey is hex, convert to base64 for parseMediaAesKey
-        const keyBytes = Buffer.from(imageAesKey, "hex");
-        aesKeyValue = keyBytes.toString("base64");
-      } else {
-        aesKeyValue = String(media.aes_key ?? "").trim();
-      }
-
-      if (aesKeyValue) {
-        const content = await this.client.downloadAndDecryptMedia(encryptedQueryParam, aesKeyValue);
-        // For now, we just note the media was received. Saving to disk could be added.
-        console.debug(`[WeixinOC] Downloaded image, size=${content.length}`);
-      }
-
-      // Return image component with CDN URL placeholder
       const cdnUrl = `${this.cdnBaseUrl}/download?encrypted_query_param=${encodeURIComponent(encryptedQueryParam)}`;
       return {
         type: ComponentType.Image,
@@ -855,10 +829,8 @@ export class WeixinOCAdapter extends PlatformAdapter {
       const aesKeyValue = String(media.aes_key ?? "").trim();
       if (!encryptedQueryParam) return null;
 
-      if (aesKeyValue) {
-        const content = await this.client.downloadAndDecryptMedia(encryptedQueryParam, aesKeyValue);
-        console.debug(`[WeixinOC] Downloaded voice, size=${content.length}`);
-      }
+      // 入站媒体未落地：不做下载解密（解密后内容当前无下游用途）。
+      console.debug(`[WeixinOC] Inbound voice not persisted (aesKey present=${Boolean(aesKeyValue)})`);
 
       const voiceText = String(voiceItem.text ?? "").trim();
       return {
@@ -880,10 +852,8 @@ export class WeixinOCAdapter extends PlatformAdapter {
       const aesKeyValue = String(media.aes_key ?? "").trim();
       if (!encryptedQueryParam) return null;
 
-      if (aesKeyValue) {
-        const content = await this.client.downloadAndDecryptMedia(encryptedQueryParam, aesKeyValue);
-        console.debug(`[WeixinOC] Downloaded file, size=${content.length}`);
-      }
+      // 入站媒体未落地：不做下载解密（解密后内容当前无下游用途）。
+      console.debug(`[WeixinOC] Inbound file not persisted (aesKey present=${Boolean(aesKeyValue)})`);
 
       const fileName = String(fileItem.file_name ?? "file.bin").trim();
       return {
@@ -905,10 +875,8 @@ export class WeixinOCAdapter extends PlatformAdapter {
       const aesKeyValue = String(media.aes_key ?? "").trim();
       if (!encryptedQueryParam) return null;
 
-      if (aesKeyValue) {
-        const content = await this.client.downloadAndDecryptMedia(encryptedQueryParam, aesKeyValue);
-        console.debug(`[WeixinOC] Downloaded video, size=${content.length}`);
-      }
+      // 入站媒体未落地：不做下载解密（解密后内容当前无下游用途）。
+      console.debug(`[WeixinOC] Inbound video not persisted (aesKey present=${Boolean(aesKeyValue)})`);
 
       return {
         type: ComponentType.Video,

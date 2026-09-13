@@ -714,7 +714,11 @@ class QQOfficialEvent extends MessageEvent {
         this._umo = `qqofficial:guild:${targetId}`;
         break;
       case "direct":
-        this._umo = `qqofficial:private:${targetId}`;
+        // #48: direct（频道私信）必须与 c2c（私聊）区分。targetId 这里是
+        // 私信频道 ID（DM channel id），若映射成 private 会被发送路径当作
+        // c2c openid 调 /v2/users/{openid}/messages，必然失败。使用独立的
+        // direct UMO 段，发送路径据此走 sendDirectMessage。
+        this._umo = `qqofficial:direct:${targetId}`;
         break;
     }
   }
@@ -982,6 +986,12 @@ export class QQOfficialAdapter extends PlatformAdapter {
   private reconnectAttempts: number = 0;
   private maxReconnectAttempts: number = 10;
   private msgSeqCounter: number = 0;
+  // #55: 心跳 ACK 超时检测 —— 记录最近一次收到 HEARTBEAT_ACK（或服务端心跳
+  // 请求）的时间；TCP 半开时 ACK 不会到来，超过 N 个心跳间隔即判定假活，
+  // 主动断开并重连，避免 healthCheck 误报连接正常。
+  private lastHeartbeatAckAt: number = 0;
+  /** 允许的无 ACK 心跳周期数（超过即强制重连） */
+  private static readonly HEARTBEAT_ACK_TOLERANCE = 3;
 
   /**
    * WebSocket 断开时延迟输出的 close 告警。
@@ -1162,6 +1172,15 @@ export class QQOfficialAdapter extends PlatformAdapter {
     }
 
     const data = await response.json() as AccessTokenResponse;
+    // #54: 校验响应字段。缺失 access_token 或 expires_in 非正数时抛错，
+    // 防止 setTimeout(NaN) 进入 30s 重试死循环、tokenExpiresAt=NaN 被永远
+    // 视为有效。错误交由调用方（运行循环/重连逻辑）按已有重试路径处理。
+    if (!data || typeof data.access_token !== "string" || data.access_token.length === 0) {
+      throw new Error("[QQOfficial] Authentication response missing or empty access_token");
+    }
+    if (typeof data.expires_in !== "number" || !Number.isFinite(data.expires_in) || data.expires_in <= 0) {
+      throw new Error(`[QQOfficial] Authentication response has invalid expires_in: ${String((data as { expires_in?: unknown })?.expires_in)}`);
+    }
     this.accessToken = data.access_token;
     // Refresh token 30 seconds before expiry
     const refreshDelay = Math.max((data.expires_in - 30) * 1000, 60000);
@@ -1304,7 +1323,20 @@ export class QQOfficialAdapter extends PlatformAdapter {
       }
 
       case OP.HEARTBEAT_ACK: {
-        // Heartbeat acknowledged, connection is alive
+        // Heartbeat acknowledged, connection is alive (#55: 记录 ACK 时间)
+        this.lastHeartbeatAckAt = Date.now();
+        break;
+      }
+
+      case OP.HEARTBEAT: {
+        // #55: 服务端主动发来的心跳请求，按协议回 op=1 heartbeat，
+        // 同时视为连接存活信号刷新 ACK 基准。
+        this.lastHeartbeatAckAt = Date.now();
+        try {
+          this.ws?.send(JSON.stringify({ op: OP.HEARTBEAT, d: this.lastSeq } satisfies QQOfficialDispatchPayload));
+        } catch (e: unknown) {
+          console.error("[QQOfficial] Failed to reply server heartbeat:", e);
+        }
         break;
       }
 
@@ -1700,8 +1732,20 @@ export class QQOfficialAdapter extends PlatformAdapter {
       clearInterval(this.heartbeatTimer);
     }
 
+    // #55: 新连接/重连后重置 ACK 计时基准
+    this.lastHeartbeatAckAt = Date.now();
+
     this.heartbeatTimer = setInterval(() => {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        // #55: 超过 N 个心跳间隔未收到任何 ACK，判定连接假活，主动断开重连
+        if (Date.now() - this.lastHeartbeatAckAt > intervalMs * QQOfficialAdapter.HEARTBEAT_ACK_TOLERANCE) {
+          console.error(
+            `[QQOfficial] No HEARTBEAT_ACK for more than ${QQOfficialAdapter.HEARTBEAT_ACK_TOLERANCE} heartbeat intervals, forcing reconnect`,
+          );
+          this.cleanupWs();
+          this.scheduleReconnect();
+          return;
+        }
         const payload: QQOfficialDispatchPayload = {
           op: OP.HEARTBEAT,
           d: this.lastSeq,
@@ -1853,7 +1897,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     groupOpenId: string,
     options: QQOfficialSendOptions,
   ): Promise<QQOfficialSendMessageResult> {
-    const url = `${this.getApiBase()}/v2/groups/${groupOpenId}/messages`;
+    const url = `${this.getApiBase()}/v2/groups/${encodeURIComponent(groupOpenId)}/messages`;
     const body = JSON.stringify(this.buildSendBody(options));
 
     const response = await fetch(url, {
@@ -1878,7 +1922,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     openid: string,
     options: QQOfficialSendOptions,
   ): Promise<QQOfficialSendMessageResult> {
-    const url = `${this.getApiBase()}/v2/users/${openid}/messages`;
+    const url = `${this.getApiBase()}/v2/users/${encodeURIComponent(openid)}/messages`;
     const body = JSON.stringify(this.buildSendBody(options));
 
     const response = await fetch(url, {
@@ -1903,7 +1947,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     channelId: string,
     options: QQOfficialSendOptions,
   ): Promise<QQOfficialSendMessageResult> {
-    const url = `${this.getApiBase()}/channels/${channelId}/messages`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/messages`;
     // 频道消息体: msg_type 频道默认 0, content 必填; msg_id/msg_seq 仅被动回复需要
     const bodyObj: Record<string, unknown> = { content: options.content ?? "" };
     if (options.msg_type !== undefined) bodyObj.msg_type = options.msg_type;
@@ -1936,7 +1980,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     channelId: string,
     options: QQOfficialSendOptions,
   ): Promise<QQOfficialSendMessageResult> {
-    const url = `${this.getApiBase()}/channels/${channelId}/messages`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/messages`;
     const bodyObj: Record<string, unknown> = { content: options.content ?? "" };
     if (options.msg_type !== undefined) bodyObj.msg_type = options.msg_type;
     if (options.markdown) bodyObj.markdown = options.markdown;
@@ -1993,7 +2037,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     url: string,
     fileData?: string,
   ): Promise<QQOfficialRichMediaUploadResult> {
-    const apiUrl = `${this.getApiBase()}/v2/groups/${groupOpenId}/files`;
+    const apiUrl = `${this.getApiBase()}/v2/groups/${encodeURIComponent(groupOpenId)}/files`;
     return this.uploadRichMedia(apiUrl, fileType, url, fileData);
   }
 
@@ -2007,7 +2051,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     url: string,
     fileData?: string,
   ): Promise<QQOfficialRichMediaUploadResult> {
-    const apiUrl = `${this.getApiBase()}/v2/users/${openid}/files`;
+    const apiUrl = `${this.getApiBase()}/v2/users/${encodeURIComponent(openid)}/files`;
     return this.uploadRichMedia(apiUrl, fileType, url, fileData);
   }
 
@@ -2042,7 +2086,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * DELETE /v2/users/{openid}/messages/{message_id}
    */
   async deleteC2CMessage(openid: string, messageId: string): Promise<void> {
-    const url = `${this.getApiBase()}/v2/users/${openid}/messages/${messageId}`;
+    const url = `${this.getApiBase()}/v2/users/${encodeURIComponent(openid)}/messages/${encodeURIComponent(messageId)}`;
     await this.deleteMessage(url);
   }
 
@@ -2051,7 +2095,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * DELETE /v2/groups/{group_openid}/messages/{message_id}
    */
   async deleteGroupMessage(groupOpenId: string, messageId: string): Promise<void> {
-    const url = `${this.getApiBase()}/v2/groups/${groupOpenId}/messages/${messageId}`;
+    const url = `${this.getApiBase()}/v2/groups/${encodeURIComponent(groupOpenId)}/messages/${encodeURIComponent(messageId)}`;
     await this.deleteMessage(url);
   }
 
@@ -2061,7 +2105,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * @param hideTip 是否隐藏提示小灰条, 默认 false
    */
   async deleteGuildMessage(channelId: string, messageId: string, hideTip: boolean = false): Promise<void> {
-    const url = `${this.getApiBase()}/channels/${channelId}/messages/${messageId}?hidetip=${hideTip}`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(messageId)}?hidetip=${hideTip}`;
     await this.deleteMessage(url);
   }
 
@@ -2092,7 +2136,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     type: number,
     id: string,
   ): Promise<void> {
-    const url = `${this.getApiBase()}/channels/${channelId}/messages/${messageId}/reactions/${type}/${id}`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(type)}/${encodeURIComponent(id)}`;
     const response = await fetch(url, {
       method: "PUT",
       headers: this.getAuthHeaders(),
@@ -2115,7 +2159,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     type: number,
     id: string,
   ): Promise<void> {
-    const url = `${this.getApiBase()}/channels/${channelId}/messages/${messageId}/reactions/${type}/${id}`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(type)}/${encodeURIComponent(id)}`;
     const response = await fetch(url, {
       method: "DELETE",
       headers: this.getAuthHeaders(),
@@ -2143,7 +2187,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     if (options.cookie) params.set("cookie", options.cookie);
     if (options.limit !== undefined) params.set("limit", String(options.limit));
     const query = params.toString();
-    const url = `${this.getApiBase()}/channels/${channelId}/messages/${messageId}/reactions/${type}/${id}${query ? `?${query}` : ""}`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(type)}/${encodeURIComponent(id)}${query ? `?${query}` : ""}`;
 
     const response = await fetch(url, {
       method: "GET",
@@ -2207,20 +2251,10 @@ export class QQOfficialAdapter extends PlatformAdapter {
     // QQOfficial 的 UMO 格式: qqofficial:<eventType>:<targetId>
     const parsed = parseQQOfficialUMO(target.umo);
     if (!parsed) {
-      // fallback: 尝试用 sessionId 作为 targetId，默认 c2c
-      console.warn(`[QQOfficial] Cannot parse UMO ${target.umo}, falling back to sessionId as c2c target.`);
-      try {
-        // Use Ex variant to leverage is_wakeup for C2C proactive delivery
-        await this.sendC2CMessageEx(target.sessionId, {
-          content: text,
-          msg_type: 0,
-          is_wakeup: true,
-        });
-        return true;
-      } catch (e) {
-        console.error(`[QQOfficial] Proactive message (fallback c2c, target=${target.sessionId}) failed:`, e);
-        return false;
-      }
+      // #48: 不再用 sessionId 盲目当 c2c openid 重试——目标是错的只会产生
+      // 必然失败的 API 调用。UMO 无法解析时明确报错并放弃。
+      console.error(`[QQOfficial] Cannot parse UMO "${target.umo}", dropping proactive message (no fallback target).`);
+      return false;
     }
 
     try {
@@ -2248,6 +2282,10 @@ export class QQOfficialAdapter extends PlatformAdapter {
           await this.sendGuildMessage(parsed.targetId, text);
           break;
         case "direct":
+          // #48: 频道私信走 DM channel id（POST /channels/{dm_channel_id}/messages）。
+          // 注意：官方 API 的私信发送通常要求 msg_id（被动回复）；主动私信
+          // 需要额外的私信场景权限，若 API 拒绝，此处会以明确错误日志失败
+          // 并返回 false（不再用错误目标重试）。
           await this.sendDirectMessage(parsed.targetId, text);
           break;
       }
@@ -2268,7 +2306,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * GET /guilds/{guild_id}
    */
   async getGuild(guildId: string): Promise<QQOfficialGuild> {
-    const url = `${this.getApiBase()}/guilds/${guildId}`;
+    const url = `${this.getApiBase()}/guilds/${encodeURIComponent(guildId)}`;
     const response = await fetch(url, {
       method: "GET",
       headers: this.getAuthHeaders(),
@@ -2316,7 +2354,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     const params = new URLSearchParams();
     if (options?.after) params.set("after", options.after);
     params.set("limit", String(options?.limit ?? 1));
-    const url = `${this.getApiBase()}/guilds/${guildId}/members?${params.toString()}`;
+    const url = `${this.getApiBase()}/guilds/${encodeURIComponent(guildId)}/members?${params.toString()}`;
 
     const response = await fetch(url, {
       method: "GET",
@@ -2335,7 +2373,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * GET /guilds/{guild_id}/members/{user_id}
    */
   async getGuildMember(guildId: string, userId: string): Promise<QQOfficialMember> {
-    const url = `${this.getApiBase()}/guilds/${guildId}/members/${userId}`;
+    const url = `${this.getApiBase()}/guilds/${encodeURIComponent(guildId)}/members/${encodeURIComponent(userId)}`;
     const response = await fetch(url, {
       method: "GET",
       headers: this.getAuthHeaders(),
@@ -2361,7 +2399,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     if (options?.addBlacklist !== undefined) params.set("add_blacklist", String(options.addBlacklist));
     if (options?.deleteMessageDays !== undefined) params.set("delete_message_days", String(options.deleteMessageDays));
     const query = params.toString() ? `?${params.toString()}` : "";
-    const url = `${this.getApiBase()}/guilds/${guildId}/members/${userId}${query}`;
+    const url = `${this.getApiBase()}/guilds/${encodeURIComponent(guildId)}/members/${encodeURIComponent(userId)}${query}`;
 
     const response = await fetch(url, {
       method: "DELETE",
@@ -2383,7 +2421,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     userId: string,
     options: QQOfficialModifyMemberOptions,
   ): Promise<void> {
-    const url = `${this.getApiBase()}/guilds/${guildId}/members/${userId}`;
+    const url = `${this.getApiBase()}/guilds/${encodeURIComponent(guildId)}/members/${encodeURIComponent(userId)}`;
     const body: Record<string, unknown> = {};
     if (options.nick !== undefined) body.nick = options.nick;
     if (options.mute_seconds !== undefined) body.mute_seconds = options.mute_seconds;
@@ -2421,7 +2459,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * GET /guilds/{guild_id}/roles
    */
   async getGuildRoles(guildId: string): Promise<QQOfficialRole[]> {
-    const url = `${this.getApiBase()}/guilds/${guildId}/roles`;
+    const url = `${this.getApiBase()}/guilds/${encodeURIComponent(guildId)}/roles`;
     const response = await fetch(url, {
       method: "GET",
       headers: this.getAuthHeaders(),
@@ -2447,7 +2485,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     const params = new URLSearchParams();
     if (options?.startIndex) params.set("start_index", options.startIndex);
     params.set("limit", String(options?.limit ?? 1));
-    const url = `${this.getApiBase()}/guilds/${guildId}/roles/${roleId}/members?${params.toString()}`;
+    const url = `${this.getApiBase()}/guilds/${encodeURIComponent(guildId)}/roles/${encodeURIComponent(roleId)}/members?${params.toString()}`;
 
     const response = await fetch(url, {
       method: "GET",
@@ -2466,7 +2504,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * PUT /guilds/{guild_id}/members/{user_id}/roles/{role_id}
    */
   async addRoleToMember(guildId: string, userId: string, roleId: string): Promise<void> {
-    const url = `${this.getApiBase()}/guilds/${guildId}/members/${userId}/roles/${roleId}`;
+    const url = `${this.getApiBase()}/guilds/${encodeURIComponent(guildId)}/members/${encodeURIComponent(userId)}/roles/${encodeURIComponent(roleId)}`;
     const response = await fetch(url, {
       method: "PUT",
       headers: this.getAuthHeaders(),
@@ -2483,7 +2521,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * DELETE /guilds/{guild_id}/members/{user_id}/roles/{role_id}
    */
   async removeRoleFromMember(guildId: string, userId: string, roleId: string): Promise<void> {
-    const url = `${this.getApiBase()}/guilds/${guildId}/members/${userId}/roles/${roleId}`;
+    const url = `${this.getApiBase()}/guilds/${encodeURIComponent(guildId)}/members/${encodeURIComponent(userId)}/roles/${encodeURIComponent(roleId)}`;
     const response = await fetch(url, {
       method: "DELETE",
       headers: this.getAuthHeaders(),
@@ -2502,7 +2540,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * GET /guilds/{guild_id}/channels
    */
   async getGuildChannels(guildId: string): Promise<QQOfficialChannel[]> {
-    const url = `${this.getApiBase()}/guilds/${guildId}/channels`;
+    const url = `${this.getApiBase()}/guilds/${encodeURIComponent(guildId)}/channels`;
     const response = await fetch(url, {
       method: "GET",
       headers: this.getAuthHeaders(),
@@ -2520,7 +2558,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * GET /channels/{channel_id}
    */
   async getChannel(channelId: string): Promise<QQOfficialChannel> {
-    const url = `${this.getApiBase()}/channels/${channelId}`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}`;
     const response = await fetch(url, {
       method: "GET",
       headers: this.getAuthHeaders(),
@@ -2538,7 +2576,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * POST /guilds/{guild_id}/channels
    */
   async createChannel(guildId: string, options: QQOfficialChannelCreateOptions): Promise<QQOfficialChannel> {
-    const url = `${this.getApiBase()}/guilds/${guildId}/channels`;
+    const url = `${this.getApiBase()}/guilds/${encodeURIComponent(guildId)}/channels`;
     const response = await fetch(url, {
       method: "POST",
       headers: this.getAuthHeaders(),
@@ -2557,7 +2595,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * PATCH /channels/{channel_id}
    */
   async updateChannel(channelId: string, options: QQOfficialChannelUpdateOptions): Promise<QQOfficialChannel> {
-    const url = `${this.getApiBase()}/channels/${channelId}`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}`;
     const response = await fetch(url, {
       method: "PATCH",
       headers: this.getAuthHeaders(),
@@ -2576,7 +2614,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * DELETE /channels/{channel_id}
    */
   async deleteChannel(channelId: string): Promise<void> {
-    const url = `${this.getApiBase()}/channels/${channelId}`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}`;
     const response = await fetch(url, {
       method: "DELETE",
       headers: this.getAuthHeaders(),
@@ -2593,7 +2631,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * GET /channels/{channel_id}/online_nums
    */
   async getChannelOnlineNums(channelId: string): Promise<QQOfficialOnlineNums> {
-    const url = `${this.getApiBase()}/channels/${channelId}/online_nums`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/online_nums`;
     const response = await fetch(url, {
       method: "GET",
       headers: this.getAuthHeaders(),
@@ -2611,7 +2649,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * GET /channels/{channel_id}/permissions/{user_id}
    */
   async getChannelUserPermissions(channelId: string, userId: string): Promise<QQOfficialChannelPermissions> {
-    const url = `${this.getApiBase()}/channels/${channelId}/permissions/${userId}`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/permissions/${encodeURIComponent(userId)}`;
     const response = await fetch(url, {
       method: "GET",
       headers: this.getAuthHeaders(),
@@ -2635,7 +2673,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     permissions: QQOfficialChannelPermissions,
     additive: boolean = false,
   ): Promise<void> {
-    const url = `${this.getApiBase()}/channels/${channelId}/permissions/${userId}`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/permissions/${encodeURIComponent(userId)}`;
     const response = await fetch(url, {
       method: additive ? "PATCH" : "PUT",
       headers: this.getAuthHeaders(),
@@ -2653,7 +2691,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * GET /channels/{channel_id}/permissions/{role_id}
    */
   async getChannelRolePermissions(channelId: string, roleId: string): Promise<QQOfficialChannelPermissions> {
-    const url = `${this.getApiBase()}/channels/${channelId}/permissions/${roleId}`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/permissions/${encodeURIComponent(roleId)}`;
     const response = await fetch(url, {
       method: "GET",
       headers: this.getAuthHeaders(),
@@ -2677,7 +2715,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     permissions: QQOfficialChannelPermissions,
     additive: boolean = false,
   ): Promise<void> {
-    const url = `${this.getApiBase()}/channels/${channelId}/permissions/${roleId}`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/permissions/${encodeURIComponent(roleId)}`;
     const response = await fetch(url, {
       method: additive ? "PATCH" : "PUT",
       headers: this.getAuthHeaders(),
@@ -2697,7 +2735,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * GET /guilds/{guild_id}/announces
    */
   async getAnnounces(guildId: string): Promise<QQOfficialAnnounce[]> {
-    const url = `${this.getApiBase()}/guilds/${guildId}/announces`;
+    const url = `${this.getApiBase()}/guilds/${encodeURIComponent(guildId)}/announces`;
     const response = await fetch(url, {
       method: "GET",
       headers: this.getAuthHeaders(),
@@ -2715,7 +2753,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * POST /guilds/{guild_id}/announces
    */
   async createAnnounce(guildId: string, options: QQOfficialAnnounceCreateOptions): Promise<QQOfficialAnnounce> {
-    const url = `${this.getApiBase()}/guilds/${guildId}/announces`;
+    const url = `${this.getApiBase()}/guilds/${encodeURIComponent(guildId)}/announces`;
     const response = await fetch(url, {
       method: "POST",
       headers: this.getAuthHeaders(),
@@ -2734,7 +2772,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * DELETE /guilds/{guild_id}/announces/{message_id}
    */
   async deleteAnnounce(guildId: string, messageId: string): Promise<void> {
-    const url = `${this.getApiBase()}/guilds/${guildId}/announces/${messageId}`;
+    const url = `${this.getApiBase()}/guilds/${encodeURIComponent(guildId)}/announces/${encodeURIComponent(messageId)}`;
     const response = await fetch(url, {
       method: "DELETE",
       headers: this.getAuthHeaders(),
@@ -2756,7 +2794,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     const params = new URLSearchParams();
     if (since) params.set("since", since);
     const query = params.toString() ? `?${params.toString()}` : "";
-    const url = `${this.getApiBase()}/channels/${channelId}/schedules${query}`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/schedules${query}`;
 
     const response = await fetch(url, {
       method: "GET",
@@ -2775,7 +2813,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * POST /channels/{channel_id}/schedules
    */
   async createSchedule(channelId: string, options: QQOfficialScheduleOptions): Promise<QQOfficialSchedule> {
-    const url = `${this.getApiBase()}/channels/${channelId}/schedules`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/schedules`;
     const response = await fetch(url, {
       method: "POST",
       headers: this.getAuthHeaders(),
@@ -2798,7 +2836,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     scheduleId: string,
     options: QQOfficialScheduleOptions,
   ): Promise<QQOfficialSchedule> {
-    const url = `${this.getApiBase()}/channels/${channelId}/schedules/${scheduleId}`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/schedules/${encodeURIComponent(scheduleId)}`;
     const response = await fetch(url, {
       method: "PATCH",
       headers: this.getAuthHeaders(),
@@ -2817,7 +2855,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * DELETE /channels/{channel_id}/schedules/{schedule_id}
    */
   async deleteSchedule(channelId: string, scheduleId: string): Promise<void> {
-    const url = `${this.getApiBase()}/channels/${channelId}/schedules/${scheduleId}`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/schedules/${encodeURIComponent(scheduleId)}`;
     const response = await fetch(url, {
       method: "DELETE",
       headers: this.getAuthHeaders(),
@@ -2836,7 +2874,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * GET /guilds/{guild_id}/api_permission
    */
   async getApiPermissions(guildId: string): Promise<Array<{ path: string; method: string; desc: string }>> {
-    const url = `${this.getApiBase()}/guilds/${guildId}/api_permission`;
+    const url = `${this.getApiBase()}/guilds/${encodeURIComponent(guildId)}/api_permission`;
     const response = await fetch(url, {
       method: "GET",
       headers: this.getAuthHeaders(),
@@ -2858,7 +2896,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     guildId: string,
     options: QQOfficialApiPermissionDemandOptions,
   ): Promise<QQOfficialApiPermissionDemand> {
-    const url = `${this.getApiBase()}/guilds/${guildId}/api_permission/demand`;
+    const url = `${this.getApiBase()}/guilds/${encodeURIComponent(guildId)}/api_permission/demand`;
     const response = await fetch(url, {
       method: "POST",
       headers: this.getAuthHeaders(),
@@ -2946,7 +2984,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     if (options?.limit !== undefined) params.set("limit", String(options.limit));
     if (options?.type !== undefined) params.set("type", String(options.type));
     const query = params.toString() ? `?${params.toString()}` : "";
-    const url = `${this.getApiBase()}/channels/${channelId}/messages${query}`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/messages${query}`;
 
     const response = await fetch(url, {
       method: "GET",
@@ -2965,7 +3003,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * GET /channels/{channel_id}/messages/{message_id}
    */
   async getChannelMessage(channelId: string, messageId: string): Promise<QQOfficialChannelMessage> {
-    const url = `${this.getApiBase()}/channels/${channelId}/messages/${messageId}`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(messageId)}`;
     const response = await fetch(url, {
       method: "GET",
       headers: this.getAuthHeaders(),
@@ -2987,7 +3025,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     messageId: string,
     options: QQOfficialPatchMessageOptions,
   ): Promise<QQOfficialChannelMessage> {
-    const url = `${this.getApiBase()}/channels/${channelId}/messages/${messageId}`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(messageId)}`;
     const response = await fetch(url, {
       method: "PATCH",
       headers: this.getAuthHeaders(),
@@ -3008,7 +3046,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * POST /guilds/{guild_id}/roles
    */
   async createGuildRole(guildId: string, options: QQOfficialRoleOptions): Promise<QQOfficialRoleCreateResult> {
-    const url = `${this.getApiBase()}/guilds/${guildId}/roles`;
+    const url = `${this.getApiBase()}/guilds/${encodeURIComponent(guildId)}/roles`;
     const response = await fetch(url, {
       method: "POST",
       headers: this.getAuthHeaders(),
@@ -3031,7 +3069,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     roleId: string,
     options: QQOfficialRoleOptions,
   ): Promise<QQOfficialRoleCreateResult> {
-    const url = `${this.getApiBase()}/guilds/${guildId}/roles/${roleId}`;
+    const url = `${this.getApiBase()}/guilds/${encodeURIComponent(guildId)}/roles/${encodeURIComponent(roleId)}`;
     const response = await fetch(url, {
       method: "PATCH",
       headers: this.getAuthHeaders(),
@@ -3050,7 +3088,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * DELETE /guilds/{guild_id}/roles/{role_id}
    */
   async deleteGuildRole(guildId: string, roleId: string): Promise<void> {
-    const url = `${this.getApiBase()}/guilds/${guildId}/roles/${roleId}`;
+    const url = `${this.getApiBase()}/guilds/${encodeURIComponent(guildId)}/roles/${encodeURIComponent(roleId)}`;
     const response = await fetch(url, {
       method: "DELETE",
       headers: this.getAuthHeaders(),
@@ -3069,7 +3107,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * PUT /channels/{channel_id}/pins/{message_id}
    */
   async addPinMessage(channelId: string, messageId: string): Promise<QQOfficialPinsResult> {
-    const url = `${this.getApiBase()}/channels/${channelId}/pins/${messageId}`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/pins/${encodeURIComponent(messageId)}`;
     const response = await fetch(url, {
       method: "PUT",
       headers: this.getAuthHeaders(),
@@ -3087,7 +3125,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * DELETE /channels/{channel_id}/pins/{message_id}
    */
   async deletePinMessage(channelId: string, messageId: string): Promise<void> {
-    const url = `${this.getApiBase()}/channels/${channelId}/pins/${messageId}`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/pins/${encodeURIComponent(messageId)}`;
     const response = await fetch(url, {
       method: "DELETE",
       headers: this.getAuthHeaders(),
@@ -3104,7 +3142,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * GET /channels/{channel_id}/pins
    */
   async listPinMessages(channelId: string): Promise<QQOfficialPinsListResult> {
-    const url = `${this.getApiBase()}/channels/${channelId}/pins`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/pins`;
     const response = await fetch(url, {
       method: "GET",
       headers: this.getAuthHeaders(),
@@ -3124,7 +3162,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * GET /guilds/{guild_id}/speak_privilege_settings
    */
   async getSpeakPrivilegeSettings(guildId: string): Promise<QQOfficialSpeakPrivilegeSettings> {
-    const url = `${this.getApiBase()}/guilds/${guildId}/speak_privilege_settings`;
+    const url = `${this.getApiBase()}/guilds/${encodeURIComponent(guildId)}/speak_privilege_settings`;
     const response = await fetch(url, {
       method: "GET",
       headers: this.getAuthHeaders(),
@@ -3145,7 +3183,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     guildId: string,
     settings: QQOfficialSpeakPrivilegeSettings,
   ): Promise<QQOfficialSpeakPrivilegeSettings> {
-    const url = `${this.getApiBase()}/guilds/${guildId}/speak_privilege_settings`;
+    const url = `${this.getApiBase()}/guilds/${encodeURIComponent(guildId)}/speak_privilege_settings`;
     const response = await fetch(url, {
       method: "PUT",
       headers: this.getAuthHeaders(),
@@ -3164,7 +3202,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * GET /guilds/{guild_id}/message_setting
    */
   async getMessageSetting(guildId: string): Promise<QQOfficialMessageSetting> {
-    const url = `${this.getApiBase()}/guilds/${guildId}/message_setting`;
+    const url = `${this.getApiBase()}/guilds/${encodeURIComponent(guildId)}/message_setting`;
     const response = await fetch(url, {
       method: "GET",
       headers: this.getAuthHeaders(),
@@ -3184,7 +3222,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * GET /channels/{channel_id}/threads
    */
   async listThreads(channelId: string): Promise<QQOfficialThreadListResult> {
-    const url = `${this.getApiBase()}/channels/${channelId}/threads`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/threads`;
     const response = await fetch(url, {
       method: "GET",
       headers: this.getAuthHeaders(),
@@ -3202,7 +3240,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * GET /channels/{channel_id}/threads/{thread_id}
    */
   async getThread(channelId: string, threadId: string): Promise<QQOfficialThreadDetail> {
-    const url = `${this.getApiBase()}/channels/${channelId}/threads/${threadId}`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/threads/${encodeURIComponent(threadId)}`;
     const response = await fetch(url, {
       method: "GET",
       headers: this.getAuthHeaders(),
@@ -3225,7 +3263,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
     content: string,
     format?: number,
   ): Promise<QQOfficialThread> {
-    const url = `${this.getApiBase()}/channels/${channelId}/threads`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/threads`;
     const body: Record<string, unknown> = { title, content };
     if (format !== undefined) body.format = format;
     const response = await fetch(url, {
@@ -3246,7 +3284,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * DELETE /channels/{channel_id}/threads/{thread_id}
    */
   async deleteThread(channelId: string, threadId: string): Promise<void> {
-    const url = `${this.getApiBase()}/channels/${channelId}/threads/${threadId}`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/threads/${encodeURIComponent(threadId)}`;
     const response = await fetch(url, {
       method: "DELETE",
       headers: this.getAuthHeaders(),
@@ -3263,7 +3301,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * GET /channels/{channel_id}/threads/{thread_id}/comments
    */
   async listThreadComments(channelId: string, threadId: string): Promise<QQOfficialCommentListResult> {
-    const url = `${this.getApiBase()}/channels/${channelId}/threads/${threadId}/comments`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/threads/${encodeURIComponent(threadId)}/comments`;
     const response = await fetch(url, {
       method: "GET",
       headers: this.getAuthHeaders(),
@@ -3283,7 +3321,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * POST /channels/{channel_id}/audio
    */
   async controlAudio(channelId: string, control: QQOfficialAudioControl): Promise<void> {
-    const url = `${this.getApiBase()}/channels/${channelId}/audio`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/audio`;
     const response = await fetch(url, {
       method: "POST",
       headers: this.getAuthHeaders(),
@@ -3321,7 +3359,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * PUT /channels/{channel_id}/mic
    */
   async onMic(channelId: string): Promise<void> {
-    const url = `${this.getApiBase()}/channels/${channelId}/mic`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/mic`;
     const response = await fetch(url, {
       method: "PUT",
       headers: this.getAuthHeaders(),
@@ -3338,7 +3376,7 @@ export class QQOfficialAdapter extends PlatformAdapter {
    * DELETE /channels/{channel_id}/mic
    */
   async offMic(channelId: string): Promise<void> {
-    const url = `${this.getApiBase()}/channels/${channelId}/mic`;
+    const url = `${this.getApiBase()}/channels/${encodeURIComponent(channelId)}/mic`;
     const response = await fetch(url, {
       method: "DELETE",
       headers: this.getAuthHeaders(),

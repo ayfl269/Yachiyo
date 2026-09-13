@@ -1,8 +1,13 @@
 /**
- * OneBot 11 Adapter — 支持 正向WS (Forward WS) 和 反向WS (Reverse WS)
+ * OneBot 11 Adapter — 支持两种 WS 接入方向（由 config.direction 选择）
  *
- * 正向WS: 主动连接到 OneBot 实现的 WS 服务器
- * 反向WS: 本地启动 WS 服务器，等待 OneBot 实现连接
+ * 注意：本 adapter 内部的 Forward/Reverse 命名与 OneBot 11 标准术语正好
+ * 相反，以实际行为为准（#62 曾因文件头注释与行为对调而误导配置）：
+ *
+ * Forward WS (direction="forward"): 本地启动 WS 服务器，
+ *   等待 OneBot 实现主动连接（即 OneBot 11 标准中的“反向 WS”）
+ * Reverse WS (direction="reverse"): 主动连接到 OneBot 实现的 WS 服务器
+ *   （即 OneBot 11 标准中的“正向 WS”）
  *
  * 协议参考: https://github.com/botuniverse/onebot-11
  */
@@ -20,6 +25,19 @@ import type { OneBot11AdapterConfig } from "../config.js";
 
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer, type Server, type IncomingMessage } from "http";
+import { timingSafeEqual } from "crypto";
+
+/**
+ * #53: 常量时间 token 比较。长度不等时直接返回 false
+ * (timingSafeEqual 要求两 Buffer 等长，不能拿真实长度参与比较)。
+ */
+function isTokenEqual(provided: string | undefined, expected: string): boolean {
+  if (!provided || provided.length === 0) return false;
+  const a = Buffer.from(provided, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
 
 /** 解码常见的 HTML 实体（CQ 码中 &amp; 等）— 单次扫描避免双重解码 */
 function decodeHtmlEntities(str: string): string {
@@ -413,8 +431,17 @@ class OneBot11Event extends MessageEvent {
       }
       params.group_id = gid;
     } else {
-      const uid = this.getExtra<number>("user_id");
-      params.user_id = (uid ?? Number(this.messageObj.sender.userId)) || 0;
+      // #52: 无有效 user_id 时明确报错并放弃发送，而不是兜底 user_id=0
+      // 把消息发到非法目标。
+      const uidRaw = this.getExtra<number>("user_id") ?? this.messageObj.sender.userId;
+      const uid = typeof uidRaw === "number" ? uidRaw : Number(uidRaw);
+      if (!uid || !Number.isFinite(uid)) {
+        console.error(
+          `[OneBot11] Private reply has no valid user_id (raw=${String(uidRaw)}), aborting send instead of targeting user_id=0`,
+        );
+        return;
+      }
+      params.user_id = uid;
     }
 
     params.message = this.componentsToOB11(components);
@@ -541,7 +568,10 @@ class OneBot11Event extends MessageEvent {
           break;
         case ComponentType.Image: {
           const img = comp as ImageComponent;
-          segments.push({ type: "image", data: { file: img.url ?? "", url: img.url ?? "" } });
+          // #51: 支持 url/file/path 任一非空值作为图片来源
+          // (OneBot 11 的 file 字段接受 URL / 本地路径 / base64)。
+          const src = img.url || img.file || img.path || "";
+          segments.push({ type: "image", data: { file: src, url: img.url ?? src } });
           break;
         }
         case ComponentType.At: {
@@ -549,11 +579,18 @@ class OneBot11Event extends MessageEvent {
           segments.push({ type: "at", data: { qq: atComp.qq ?? "all" } });
           break;
         }
-        case ComponentType.Reply:
-          segments.push({ type: "reply", data: { id: (comp as { messageId?: string }).messageId ?? "" } });
+        case ComponentType.Reply: {
+          // #50: ReplyComponent 的字段名是 id（非 messageId），两者都兼容
+          // 且优先 id，保证回复引用不静默丢失。
+          const replyComp = comp as { id?: string | number; messageId?: string | number };
+          segments.push({ type: "reply", data: { id: replyComp.id ?? replyComp.messageId ?? "" } });
           break;
+        }
         default:
-          segments.push({ type: "text", data: { text: JSON.stringify(comp.toDict()) } });
+          // #51: 未支持的组件（语音/视频/文件等）不再 JSON.stringify 成文本
+          // 发出，记 debug 日志后跳过，避免把内部结构当垃圾文本发给用户。
+          console.debug(`[OneBot11] Dropping unsupported message component: ${String(comp.type)}`);
+          break;
       }
     }
     return segments;
@@ -889,7 +926,10 @@ export class OneBot11Adapter extends PlatformAdapter {
           break;
         case ComponentType.Image: {
           const img = comp as ImageComponent;
-          segments.push({ type: "image", data: { file: img.url ?? "", url: img.url ?? "" } });
+          // #51: 支持 url/file/path 任一非空值作为图片来源
+          // (OneBot 11 的 file 字段接受 URL / 本地路径 / base64)。
+          const src = img.url || img.file || img.path || "";
+          segments.push({ type: "image", data: { file: src, url: img.url ?? src } });
           break;
         }
         case ComponentType.At: {
@@ -897,11 +937,18 @@ export class OneBot11Adapter extends PlatformAdapter {
           segments.push({ type: "at", data: { qq: atComp.qq ?? "all" } });
           break;
         }
-        case ComponentType.Reply:
-          segments.push({ type: "reply", data: { id: (comp as { messageId?: string }).messageId ?? "" } });
+        case ComponentType.Reply: {
+          // #50: ReplyComponent 的字段名是 id（非 messageId），两者都兼容
+          // 且优先 id，保证回复引用不静默丢失。
+          const replyComp = comp as { id?: string | number; messageId?: string | number };
+          segments.push({ type: "reply", data: { id: replyComp.id ?? replyComp.messageId ?? "" } });
           break;
+        }
         default:
-          segments.push({ type: "text", data: { text: (comp as PlainComponent).text ?? JSON.stringify(comp.toDict()) } });
+          // #51: 未支持的组件（语音/视频/文件等）不再 JSON.stringify 成文本
+          // 发出，记 debug 日志后跳过，避免把内部结构当垃圾文本发给用户。
+          console.debug(`[OneBot11] Dropping unsupported message component: ${String(comp.type)}`);
+          break;
       }
     }
     return segments;
@@ -918,11 +965,13 @@ export class OneBot11Adapter extends PlatformAdapter {
     });
 
     this.wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
-      // 鉴权
+      // 鉴权 (#53: 常量时间比较 + startsWith("Bearer ") 严格解析)
       if (this.config.accessToken) {
         const auth = req.headers.authorization;
-        const token = auth?.replace("Bearer ", "") ?? req.headers["access-token"] as string;
-        if (token !== this.config.accessToken) {
+        const bearer = typeof auth === "string" && auth.startsWith("Bearer ")
+          ? auth.slice("Bearer ".length)
+          : typeof req.headers["access-token"] === "string" ? req.headers["access-token"] : undefined;
+        if (!isTokenEqual(bearer, this.config.accessToken)) {
           console.warn("[OneBot11] Forward WS: auth failed, closing connection.");
           ws.close(4001, "Unauthorized");
           return;

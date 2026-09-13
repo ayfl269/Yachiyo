@@ -29,6 +29,20 @@ const COMPONENT_TYPE_TO_SERIAL: Record<ComponentType, string> = {
 
 const SERIAL_TO_COMPONENT: Map<string, (data: Record<string, unknown>) => MessageComponent> = new Map();
 
+// #59: 全仓当前没有任何 registerComponentSerializer 调用点，反序列化注册表
+// 实际恒为空，round-trip（serialize → deserialize）会把组件退化为 Unknown。
+// 反序列化导出路径不可用，首次调用时打一次 warn 提醒调用方。
+let deserializerWarned = false;
+
+function warnDeserializersEmptyOnce(): void {
+  if (deserializerWarned) return;
+  deserializerWarned = true;
+  console.warn(
+    "[message/serialize] Component deserializer registry is empty: no registerComponentSerializer() calls exist. " +
+    "deserializeComponents() will degrade every component to Unknown — the deserialization export path is not usable.",
+  );
+}
+
 export function registerComponentSerializer(
   type: string,
   deserializer: (data: Record<string, unknown>) => MessageComponent,
@@ -52,5 +66,6 @@ export function serializeComponents(comps: MessageComponent[]): SerializedCompon
 }
 
 export function deserializeComponents(serials: SerializedComponent[]): MessageComponent[] {
+  if (serials.length > 0) warnDeserializersEmptyOnce();
   return serials.map(deserializeComponent);
 }

@@ -60,11 +60,12 @@ class ProactiveTriggerEvent extends MessageEvent {
   }
 
   async send(components: MessageComponent[]): Promise<void> {
-    if (!this.hasResponded) {
+    const ok = await this.adapter.sendProactiveMessage(this.target, components);
+    // 仅在投递确认成功后才回调 onResponded，避免投递失败时任务被误标已处理。
+    if (ok && !this.hasResponded) {
       this.hasResponded = true;
       this.onResponded?.();
     }
-    await this.adapter.sendProactiveMessage(this.target, components);
   }
 }
 
@@ -152,22 +153,14 @@ export abstract class PlatformAdapter {
    * @returns true 表示推送成功，false 表示无法推送
    */
   async sendProactiveMessage(
-    target: { umo: string; sessionId: string; platformId: string },
-    components: MessageComponent[],
+    _target: { umo: string; sessionId: string; platformId: string },
+    _components: MessageComponent[],
   ): Promise<boolean> {
-    // 默认实现：调用 sendBySession 注入事件到 pipeline。
-    // 支持主动消息的 adapter 应覆盖此方法直接通过平台 API 推送。
-    try {
-      const session = new MessageSession();
-      session.platformId = target.platformId;
-      session.messageType = MessageType.FRIEND_MESSAGE;
-      session.sessionId = target.sessionId;
-      await this.sendBySession(session, components);
-      return true;
-    } catch (e) {
-      console.error(`[PlatformAdapter] sendProactiveMessage failed:`, e);
-      return false;
-    }
+    // 基类不支持主动消息：注入 pipeline 的合成事件其 send() 只写入无人读取的
+    // responseBuffer，消息会被静默丢弃。这里显式抛错，防止调用方误以为投递成功。
+    throw new Error(
+      `[${this.meta().id}] 该适配器不支持主动消息（未覆写 sendProactiveMessage）`,
+    );
   }
 
   async healthCheck(): Promise<string | null> {
@@ -195,7 +188,13 @@ export abstract class PlatformAdapter {
     onResponded?: () => void,
     historyMessage?: string,
   ): void {
-    const isGroup = target.umo.includes(":group:");
+    // 解析 UMO 前缀（platform:type:rest）判断消息类型：
+    //   group  → GROUP_MESSAGE（群聊）
+    //   guild  → GROUP_MESSAGE（频道公屏，入站消息在 qqofficial adapter 中
+    //             同样按 GROUP_MESSAGE 处理，保持会话语义一致）
+    //   private / direct / 其他 → FRIEND_MESSAGE（单聊/私信/兜底）
+    const umoType = target.umo.split(":")[1];
+    const isGroup = umoType === "group" || umoType === "guild";
     const platformMsg = new PlatformMessage();
     platformMsg.type = isGroup ? MessageType.GROUP_MESSAGE : MessageType.FRIEND_MESSAGE;
     platformMsg.selfId = this.meta().id;

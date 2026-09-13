@@ -36,6 +36,12 @@ export class AdapterRegistry {
     const factory = this.factories.get(type);
     if (!factory) throw new Error(`Unknown adapter type: ${type}`);
     const adapter = factory(config, eventQueue);
+    // 重复 id 显式抛错（交由调用方处理）：静默覆盖会让仍在运行的旧实例从
+    // 注册表消失，stopAll/healthCheck 再也触达不到它。
+    const id = adapter.meta().id;
+    if (this.adapters.has(id)) {
+      throw new Error(`Adapter with id "${id}" already exists (type=${type})`);
+    }
     // Register config persistence callback
     const store = this.adapterStore;
     if (store) {
@@ -47,7 +53,7 @@ export class AdapterRegistry {
         }
       };
     }
-    this.adapters.set(adapter.meta().id, adapter);
+    this.adapters.set(id, adapter);
     return adapter;
   }
 

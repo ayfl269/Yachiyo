@@ -33,8 +33,10 @@ export class PluginContext {
     this.configManager = options.configManager ?? null;
   }
 
-  getUsingProvider(_umo: string): Provider | null {
-    return this.providerManager.getUsingProvider("chat_completion" as ProviderType);
+  getUsingProvider(umo: string): Provider | null {
+    // 透传 umo：ProviderManager 目前虽未按 umo 区分选择，但保留该参数是其
+    // 声明的契约（未来 per-umo provider 路由）。
+    return this.providerManager.getUsingProvider("chat_completion" as ProviderType, umo);
   }
 
   getProviderById(providerId: string): Provider | null {
@@ -57,39 +59,20 @@ export class PluginContext {
     return this.eventQueue;
   }
 
-  async sendMessage(session: MessageSession, _components: MessageComponent[]): Promise<void> {
-    let forceStopped = false;
-    const tempFiles: string[] = [];
-    const syntheticEvent = {
-      messageStr: "",
-      messageObj: { type: "friend", groupId: "", selfId: "", sender: { userId: "plugin", nickname: "Plugin" } },
-      platformMeta: { id: "plugin", name: "PluginContext" },
-      session,
-      isWake: false,
-      isAtOrWakeCommand: false,
-      createdAt: Date.now(),
-      stopEvent() { forceStopped = true; },
-      continueEvent() { forceStopped = false; },
-      isStopped() { return forceStopped; },
-      setSkipLlm(_skip: boolean) {},
-      trackTemporaryLocalFile(path: string) { tempFiles.push(path); },
-      cleanupTemporaryLocalFiles() { tempFiles.length = 0; },
-      getMessageStr() { return ""; },
-      get unifiedMsgOrigin() { return "single:user:session"; },
-      get sessionId() { return session?.sessionId ?? "" },
-      getPlatformName() { return "Plugin"; },
-      getPlatformId() { return "plugin"; },
-      getMessageType() { return "friend"; },
-      getGroupId() { return ""; },
-      getSelfId() { return ""; },
-      getSenderId() { return "plugin"; },
-      getSenderName() { return "Plugin"; },
-      isPrivateChat() { return true; },
-      isWakeUp() { return false; },
-      setResult(_result: unknown) {},
-      send: async () => {},
-    } as unknown as MessageEvent;
-    this.eventQueue.put(syntheticEvent);
+  /**
+   * #45: 插件主动发消息 API 暂不支持。
+   *
+   * 旧实现构造的伪 MessageEvent 结构不完整（无组件、send 为 no-op），事件虽
+   * 进入 pipeline，但模型响应最终被 send() 静默丢弃——调用"成功"而消息从未
+   * 发出。真正实现需要 PluginContext 持有适配器注册表/发送通道（当前构造
+   * 依赖中没有），无法可靠落地；按最小改动原则改为抛出明确错误，避免静默
+   * 丢弃掩盖问题。
+   */
+  async sendMessage(_session: MessageSession, _components: MessageComponent[]): Promise<void> {
+    throw new Error(
+      "PluginContext.sendMessage is not supported yet: the plugin context has no access to a platform send channel. " +
+      "Use a pipeline handler (StarHandler) with event.send() to reply to an incoming message instead.",
+    );
   }
 
   async llmGenerate(prompt: string, options?: Record<string, unknown>): Promise<string> {
@@ -230,10 +213,31 @@ export class PluginContext {
     return this.providerManager.getUsingEmbeddingProvider();
   }
 
+  /** Secret-looking config keys that must never reach plugin code. */
+  private static readonly SECRET_KEY_PATTERN = /(key|secret|token|password|credential)/i;
+  private static readonly SECRET_MASK = "********";
+
+  /**
+   * #61: 插件可见的配置必须脱敏。当前 AgentConfig 本身不含密钥字段，但配置
+   * 结构可能演进（或被未来实现加入 provider 凭据），这里对疑似密钥字段统一
+   * 掩码，防止向插件泄露全量配置中的 secret。
+   */
+  private maskSecretFields(config: Record<string, unknown>): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(config)) {
+      if (typeof value === "string" && value.length > 0 && PluginContext.SECRET_KEY_PATTERN.test(key)) {
+        out[key] = PluginContext.SECRET_MASK;
+      } else {
+        out[key] = value;
+      }
+    }
+    return out;
+  }
+
   getConfig(): Record<string, unknown> {
     if (!this.configManager) return {};
     const confInfo = this.configManager.getConfInfo("");
-    return { ...confInfo.config } as unknown as Record<string, unknown>;
+    return this.maskSecretFields({ ...confInfo.config } as unknown as Record<string, unknown>);
   }
 
   getAgentConfig(): AgentConfig | null {
