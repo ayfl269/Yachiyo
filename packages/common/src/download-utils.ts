@@ -275,7 +275,9 @@ function resolveFileUriPath(uri: string): string {
     const { fileURLToPath } = require("url") as typeof import("url");
     return fileURLToPath(uri);
   } catch {
-    let path = uri.replace(/^file:\/\/+/, "");
+    // Strip the scheme but keep one leading slash so POSIX absolute paths
+    // survive: `file:///home/x` → `/home/x` (previously collapsed to `home/x`) (#102).
+    let path = uri.replace(/^file:\/\//, "").replace(/^\/+/, "/");
     if (process.platform === "win32" && /^\/[A-Za-z]:/.test(path)) {
       path = path.slice(1);
     }

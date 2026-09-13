@@ -97,7 +97,18 @@ export class ProcessStage extends PipelineStage {
 
       const systemPrompt = await this.buildSystemPrompt(event);
 
-        const buildResult = await this.buildAgent(event, systemPrompt);
+        // Distinguish "no provider available" (null) from a real exception:
+        // only the former gets the "no available model" message; real errors
+        // get the generic error path below so they are not misdiagnosed (#89).
+        let buildResult: import("@yachiyo/agent/agent-builder.js").MainAgentBuildResult | null;
+        try {
+          buildResult = await this.buildAgent(event, systemPrompt);
+        } catch {
+          // Full error already logged inside buildAgent; send the generic
+          // user-facing message without leaking internals (#89).
+          await event.send([plainText("抱歉，处理您的消息时发生了内部错误，请稍后重试。")]);
+          return;
+        }
       if (!buildResult) {
         console.warn("[ProcessStage] buildAgent returned null - no provider available");
         await event.send([plainText("抱歉，当前没有可用的模型来处理您的消息，请检查 Provider 配置。")]);
@@ -105,6 +116,11 @@ export class ProcessStage extends PipelineStage {
       }
 
       const { agentRunner } = buildResult;
+
+        // Stop check must come BEFORE saveUserMessage (#91): otherwise a
+        // stopped event persists a user message into history that will never
+        // receive a reply.
+        if (event.isStopped()) return;
 
         // 在执行 agent 前保存用户消息
         const { convId, umo } = await this.saveUserMessage(event);
@@ -168,7 +184,12 @@ export class ProcessStage extends PipelineStage {
       // generic message so internal details (file paths, hostnames, SQL
       // fragments, stack traces) cannot leak through the chat reply.
       console.error("[ProcessStage] Pipeline error:", e);
-      await event.send([plainText("抱歉，处理您的消息时发生了内部错误，请稍后重试。")]);
+      // Do not send a duplicate error to the user when the event was already
+      // stopped (nothing will be delivered anyway) or a result is already
+      // pending (respond stage will deliver it) (#90).
+      if (!event.isStopped() && !event.getResult()) {
+        await event.send([plainText("抱歉，处理您的消息时发生了内部错误，请稍后重试。")]);
+      }
     } finally {
       try { await event.stopTyping(); } catch { /* ignore */ }
     }
@@ -427,8 +448,12 @@ export class ProcessStage extends PipelineStage {
 
     return result;
     } catch (e) {
+      // Real errors must NOT be collapsed into "no provider available" (null) —
+      // that misleads debugging into blaming provider configuration (#89).
+      // Log the full error here, then rethrow so the caller sends the generic
+      // user-facing message instead of the misleading "no model" one.
       console.error("Failed to build agent:", e);
-      return null;
+      throw e;
     }
   }
 

@@ -164,6 +164,21 @@ interface SkillRow {
 
 // ── Plugin Store ──
 
+/**
+ * Parse a persisted JSON column with fallback (same defensive style as
+ * `parseConfigJson` in sqlite-config-store.ts): a single corrupted row must
+ * not crash startup-wide `getAllStars()` (#98).
+ */
+function parseJsonColumn<T>(raw: string | null | undefined, fallback: T, column: string, modulePath: string): T {
+  if (raw == null || raw === "") return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch (e) {
+    console.warn(`[SqlitePluginStore] plugin_stars row "${modulePath}" has invalid JSON in "${column}", using fallback:`, e);
+    return fallback;
+  }
+}
+
 export class SqlitePluginStore {
   constructor(private db: Database.Database) {}
 
@@ -204,11 +219,11 @@ export class SqlitePluginStore {
       version: row.version ?? "",
       repo: row.repo ?? "",
       activated: row.activated === 1,
-      config: JSON.parse(row.config || "{}"),
-      handlerFullNames: JSON.parse(row.handler_full_names || "[]"),
+      config: parseJsonColumn(row.config, {}, "config", row.module_path),
+      handlerFullNames: parseJsonColumn(row.handler_full_names, [], "handler_full_names", row.module_path),
       displayName: row.display_name ?? "",
       logoPath: row.logo_path ?? "",
-      supportPlatforms: JSON.parse(row.support_platforms || "[]"),
+      supportPlatforms: parseJsonColumn(row.support_platforms, [], "support_platforms", row.module_path),
     };
   }
 }

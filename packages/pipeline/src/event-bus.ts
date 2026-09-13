@@ -51,6 +51,14 @@ export class EventBus {
    */
   private stopResolver: (() => void) | null = null;
   private stopPromise: Promise<void> = Promise.resolve();
+  /**
+   * Aborts the current dispatch cycle's `eventQueue.get()` wait. Without it,
+   * a `get()` call blocked when `stop()` fires would leave a registered
+   * waiter inside the AsyncQueue; a later `put()` (e.g. after a restart)
+   * would resolve that ghost waiter and the event would be swallowed
+   * instead of processed by the (new) dispatch loop (#88).
+   */
+  private dispatchAbort: AbortController | null = null;
 
   constructor(
     eventQueue: AsyncQueue<MessageEvent>,
@@ -70,6 +78,10 @@ export class EventBus {
     // stopped and later restarted, a new promise ensures the new cycle
     // isn't born already "stopped".
     this.stopPromise = new Promise<void>((resolve) => { this.stopResolver = resolve; });
+    // Fresh abort controller per dispatch cycle so stop() can cancel the
+    // pending eventQueue.get() waiter of THIS cycle (and only this one).
+    const abort = new AbortController();
+    this.dispatchAbort = abort;
 
     while (this.running) {
       try {
@@ -88,10 +100,17 @@ export class EventBus {
           continue;
         }
 
-        // Race the event queue read against the stop signal. Without this,
-        // `eventQueue.get()` would block indefinitely when no events arrive,
-        // and stop() could not take effect until an event arrives.
-        const event = await Promise.race([this.eventQueue.get(), this.stopPromise]);
+        // Race the event queue read against the stop signal. The abort
+        // signal makes the queue remove its waiter on stop, so no ghost
+        // waiter is left behind that could swallow a later put() (#88).
+        // Without the race, `eventQueue.get()` would block indefinitely
+        // when no events arrive, and stop() could not take effect until
+        // an event arrives.
+        const getPromise = this.eventQueue.get(abort.signal);
+        // Swallow the AbortError if stop() wins the race — the rejection is
+        // expected and must not surface as an unhandled error.
+        getPromise.catch(() => { /* aborted via stop() */ });
+        const event = await Promise.race([getPromise, this.stopPromise]);
         if (!this.running) break;
         if (!event) {
           continue;
@@ -162,5 +181,10 @@ export class EventBus {
     // blocked on `eventQueue.get()` or backpressure.
     this.stopResolver?.();
     this.stopResolver = null;
+    // Cancel the pending eventQueue.get() waiter so the AsyncQueue removes
+    // it. Without this, a `put()` after a restart would resolve the ghost
+    // waiter and the first event would be silently swallowed (#88).
+    this.dispatchAbort?.abort();
+    this.dispatchAbort = null;
   }
 }

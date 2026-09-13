@@ -40,7 +40,11 @@ export class RespondStage extends PipelineStage {
     }
 
     if (result.components.length > 0) {
-      if (this.isEmptyMessageChain(result.components)) return;
+      if (this.isEmptyMessageChain(result.components)) {
+        // Clear the result so it does not linger on the event (#94).
+        event.clearResult();
+        return;
+      }
 
       result.components = result.components.filter(
         c => !(c.type === ComponentType.Plain && !(c as PlainComponent).text?.trim())
@@ -74,7 +78,12 @@ export class RespondStage extends PipelineStage {
 
       if (result.components.every(
         c => c.type === ComponentType.Reply || c.type === ComponentType.At
-      )) return;
+      )) {
+        // Only quote/mention wrappers remain — nothing to send; clear the
+        // result so it does not linger on the event (#94).
+        event.clearResult();
+        return;
+      }
 
       const nonRecordComponents = result.components.filter(
         c => c.type !== ComponentType.Record

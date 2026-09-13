@@ -56,6 +56,27 @@ export type OnPreFireCallback = (task: SchedulerTask) => void;
 const DEFAULT_INTERVAL = 30_000;
 const DEFAULT_PREFIRE_WINDOW = 60_000;
 
+/**
+ * Query horizon used for the pre-fire candidate query when a
+ * {@link TaskSchedulerConfig.preFireWindowResolver} is configured (see the
+ * comment in {@link TaskScheduler.tick}). Tasks are few (user-created
+ * reminders), so scanning 24h of pending tasks per tick is cheap; the
+ * per-task window re-check guarantees nothing fires earlier than its own
+ * resolved window allows.
+ */
+const RESOLVER_SCAN_HORIZON_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Delivery-failure retry policy for the fallback fire path (#86): a task
+ * whose delivery failed is retried with exponential backoff
+ * (interval * 2^failures, capped at {@link FIRE_RETRY_BACKOFF_MAX_MS}).
+ * After {@link MAX_FIRE_ATTEMPTS} consecutive failures the task is marked
+ * fired anyway (with an error log) so a permanently broken route cannot
+ * retry forever.
+ */
+const MAX_FIRE_ATTEMPTS = 5;
+const FIRE_RETRY_BACKOFF_MAX_MS = 10 * 60 * 1000;
+
 export class TaskScheduler {
   private store: SqliteSchedulerTaskStore;
   private adapterRegistry: AdapterRegistry | null;
@@ -65,6 +86,13 @@ export class TaskScheduler {
   private preFireWindowResolver: ((task: SchedulerTask) => number) | null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking: boolean = false;
+  /**
+   * Consecutive delivery failures per task id (#86), used to throttle
+   * retries of the fallback fire path (exponential backoff) and to give up
+   * after {@link MAX_FIRE_ATTEMPTS} attempts so a permanently broken route
+   * cannot retry forever.
+   */
+  private fireFailures: Map<string, { count: number; lastAttemptAt: number }> = new Map();
 
   /** Callback for pre-fire events. When set, tasks in the pre-fire window
    *  are sent to the model instead of firing directly. */
@@ -151,20 +179,27 @@ export class TaskScheduler {
       // Phase 1: Pre-fire — send tasks to the model within the window.
       // Pre-fire window is resolved per-task so callers can vary it by
       // provider (reasoning models need a longer window than fast chat
-      // models). We use the max window across all tasks for the
+      // models). We use the broadest window across all tasks for the
       // getPreFireTasks query (broadest candidate set), then
       // individually re-check each returned task against its own
       // resolved window before firing.
       if (this.onPreFire) {
-        // Compute the broadest window to seed the query.
-        let queryWindow = this.preFireWindow;
-        if (this.preFireWindowResolver) {
-          // Heuristic: use the static default as the query window. Tasks
-          // whose resolver returns a smaller window will be filtered out
-          // by the per-task check below; tasks with a larger window
-          // would be missed, so we cap up to a 2x safety margin.
-          queryWindow = Math.max(this.preFireWindow, this.preFireWindow * 2);
-        }
+        // The query window must be the UNION of the static window and every
+        // per-task resolver window. The resolver output is only known per
+        // task, and candidate tasks are only known after the query, so we
+        // cannot size the query from resolver values directly. When a
+        // resolver is configured we therefore scan a generous fixed horizon
+        // and rely on the per-task re-check below to narrow it back down:
+        // each task is only pre-fired if it is within its OWN resolved
+        // window. This replaces the old `Math.max(x, 2x)` heuristic, which
+        // was always 2x (silently dropping tasks whose resolver window
+        // exceeded 2x) and completely disabled pre-fire when
+        // preFireWindow = 0. Note preFireWindow=0 with a resolver now still
+        // pre-fires tasks whose resolver window is > 0 — resolver=0 still
+        // routes those tasks straight to the fallback path.
+        const queryWindow = this.preFireWindowResolver
+          ? RESOLVER_SCAN_HORIZON_MS
+          : this.preFireWindow;
         if (queryWindow > 0) {
           const preFireTasks = this.store.getPreFireTasks(now, queryWindow);
           for (const task of preFireTasks) {
@@ -204,8 +239,10 @@ export class TaskScheduler {
           }
         } catch (e) {
           console.error(`[TaskScheduler] Error firing task ${task.id}:`, e);
-          // Mark as fired to avoid infinite retry on the same due time
-          this.store.markFired(task.id, new Date());
+          // Task stays un-marked: fireTask's failure throttle/backoff (#86)
+          // decides when it is retried or given up on, instead of losing the
+          // reminder by marking it fired on the first error.
+          skipped++;
         }
       }
     } catch (e) {
@@ -226,15 +263,38 @@ export class TaskScheduler {
    * in time (task is still "notifying") or when no pre-fire callback
    * is configured (task is still "pending").
    *
-   * Returns true if the message was delivered (or attempted), false if it
-   * was skipped (no routing info or adapter unavailable). In all cases
-   * the task is marked fired.
+   * Delivery-first ordering (#86): the task is only marked fired AFTER the
+   * message was delivered successfully, so a failed delivery keeps the task
+   * due and it is retried on a later tick. Retries are throttled with
+   * exponential backoff ({@link MAX_FIRE_ATTEMPTS} /
+   * {@link FIRE_RETRY_BACKOFF_MAX_MS}) to prevent an infinite retry storm.
+   *
+   * Returns true if the message was delivered, false if it was skipped,
+   * throttled, or the delivery failed (task retained for retry).
    */
   private async fireTask(task: SchedulerTask): Promise<boolean> {
-    // Mark fired first (advances next_fire_at for recurring tasks).
-    // The conditional WHERE in markFired prevents double-advancing if
-    // the model already responded and called markFired via onResponded.
-    this.store.markFired(task.id, new Date());
+    // Retry throttle: skip this tick if the task failed recently and its
+    // backoff window has not elapsed yet.
+    const failure = this.fireFailures.get(task.id);
+    if (failure) {
+      const backoff = Math.min(this.interval * 2 ** failure.count, FIRE_RETRY_BACKOFF_MAX_MS);
+      if (Date.now() - failure.lastAttemptAt < backoff) {
+        return false;
+      }
+    }
+
+    /** Record a failed attempt; give up (mark fired) after too many tries. */
+    const markAttemptFailed = (): void => {
+      const count = (this.fireFailures.get(task.id)?.count ?? 0) + 1;
+      this.fireFailures.set(task.id, { count, lastAttemptAt: Date.now() });
+      if (count >= MAX_FIRE_ATTEMPTS) {
+        console.error(
+          `[TaskScheduler] Task ${task.id} failed to deliver ${count} times, giving up and marking as fired.`,
+        );
+        this.store.markFired(task.id, new Date());
+        this.fireFailures.delete(task.id);
+      }
+    };
 
     // Build the user-facing reminder text
     const messageText = buildReminderMessage(task);
@@ -242,18 +302,21 @@ export class TaskScheduler {
     // Need routing info to deliver
     if (!task.umo || !task.platformId) {
       console.warn(`[TaskScheduler] Task ${task.id} has no routing info (umo/platformId), skipping delivery.`);
+      markAttemptFailed();
       return false;
     }
 
     // Look up the adapter that owns this session
     if (!this.adapterRegistry) {
       console.warn(`[TaskScheduler] No adapter registry available, cannot deliver task ${task.id}.`);
+      markAttemptFailed();
       return false;
     }
 
     const adapter = this.adapterRegistry.getAdapter(task.platformId);
     if (!adapter) {
       console.warn(`[TaskScheduler] Adapter "${task.platformId}" not found for task ${task.id}.`);
+      markAttemptFailed();
       return false;
     }
 
@@ -274,13 +337,22 @@ export class TaskScheduler {
     try {
       const delivered = await adapter.sendProactiveMessage(target, components as MessageComponent[]);
       if (delivered) {
+        // Delivery succeeded — only now advance the task (#86). The
+        // conditional WHERE in markFired prevents double-advancing if
+        // the model already responded and called markFired via onResponded.
+        this.fireFailures.delete(task.id);
+        this.store.markFired(task.id, new Date());
         console.log(`[TaskScheduler] Task "${task.title}" (${task.id}) delivered to ${target.umo}.`);
       } else {
-        console.warn(`[TaskScheduler] Task "${task.title}" (${task.id}) delivery returned false (session may be inactive).`);
+        // Delivery rejected (session may be inactive) — keep the task due
+        // and retry on a later tick with backoff.
+        console.warn(`[TaskScheduler] Task "${task.title}" (${task.id}) delivery returned false (session may be inactive); will retry.`);
+        markAttemptFailed();
       }
       return delivered;
     } catch (e) {
       console.error(`[TaskScheduler] Failed to deliver task ${task.id}:`, e);
+      markAttemptFailed();
       return false;
     }
   }

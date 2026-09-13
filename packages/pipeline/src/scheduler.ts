@@ -63,9 +63,15 @@ export class PipelineScheduler {
 
   async initialize(): Promise<void> {
     const stages = getRegisteredStages();
-    stages.sort((a, b) =>
-      STAGES_ORDER.indexOf(a.name) - STAGES_ORDER.indexOf(b.name)
-    );
+    // Stages not listed in STAGES_ORDER (e.g. plugin-registered stages) sort
+    // last: indexOf returns -1 for them, and a raw subtraction would place
+    // them BEFORE every built-in stage, letting plugin code bypass the
+    // built-in wake/whitelist/rate-limit checks.
+    const orderOf = (name: string): number => {
+      const idx = STAGES_ORDER.indexOf(name);
+      return idx === -1 ? STAGES_ORDER.length : idx;
+    };
+    stages.sort((a, b) => orderOf(a.name) - orderOf(b.name));
 
     for (const stageCls of stages) {
       const instance = new stageCls() as PipelineStage;
@@ -84,19 +90,31 @@ export class PipelineScheduler {
       if (isAsyncGenerator(result)) {
         // Onion model: advance generator to first yield (pre-processing),
         // then run subsequent stages, then resume generator (post-processing).
+        //
+        // Repeat guard (#83): a generator stage may yield more than once
+        // (e.g. once for the agent run and once for a follow-up turn).
+        // Downstream stages must run exactly ONCE per stage execution —
+        // on the first yield. Later yields only resume this generator's
+        // post-yield logic; re-running the downstream stages would repeat
+        // LLM calls and re-send messages.
         let genResult = await result.next();
+        let downstreamRan = false;
         while (!genResult.done) {
           if (event.isStopped()) {
             await result.return(undefined);
             break;
           }
-          // Run all subsequent stages while this stage is yielded
-          await this.processStages(event, i + 1);
+          if (!downstreamRan) {
+            // Run all subsequent stages while this stage is yielded
+            await this.processStages(event, i + 1);
+            downstreamRan = true;
+          }
           if (event.isStopped()) {
             await result.return(undefined);
             break;
           }
-          // Resume generator to run post-yield logic
+          // Resume generator to run post-yield logic (downstream is NOT
+          // re-executed on subsequent yields — see repeat guard above).
           genResult = await result.next();
         }
         // Generator is done (or stopped); skip remaining stages since
@@ -132,6 +150,19 @@ export class PipelineScheduler {
     // processStages loop breaks at the next stage boundary. The timer
     // is unref'd so it doesn't keep the event loop alive on its own;
     // it only fires if the pipeline is genuinely still running.
+    //
+    // KNOWN LIMITATION (#84) — "boundary cooperative" timeout only:
+    // The watchdog merely sets the stopEvent flag. It takes effect when
+    // control returns to a stage boundary (processStages loop check) or
+    // when a stage/agent internally polls `event.isStopped()` (via
+    // shouldStop / abort signals). It CANNOT interrupt a promise that is
+    // genuinely hung and does not respond to abort — e.g. a plugin handler
+    // awaiting a socket that never resolves, or a provider whose transport
+    // ignores the abort signal. In that case the pipeline stays blocked,
+    // the event stays in activeEventRegistry, and the config's serial
+    // queue is blocked until the underlying promise settles (which may be
+    // never). Mitigation lives at the source: every network/tool call
+    // must carry its own timeout or honor the abort signal.
     let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
     if (this.totalTimeoutMs > 0) {
       timeoutTimer = setTimeout(() => {

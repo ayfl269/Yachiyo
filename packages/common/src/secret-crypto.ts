@@ -6,8 +6,17 @@
  * scrypt) and sourced from the `YACHIYO_DB_KEY` environment variable, or from
  * an auto-generated key file when the env var is absent.
  *
+ * Formats:
+ * - v2 (current): `enc:v2:<saltB64>:<ivB64>:<tagB64>:<dataB64>`. A fresh
+ *   random salt is embedded in every ciphertext and the AES key is derived
+ *   per-secret via scrypt, so identical plaintexts never produce identical
+ *   ciphertexts and precomputed-dictionary attacks against the master key
+ *   are infeasible (#97).
+ * - v1 (legacy, read-only): `enc:v1:<base64(iv)>:<base64(ciphertext+tag)>`
+ *   with a fixed salt. Still decryptable for existing rows; no longer written.
+ *
  * Backward compatibility: {@link decryptSecret} returns the input unchanged
- * when it does not carry the `enc:v1:` prefix, so existing plaintext rows
+ * when it does not carry an `enc:` prefix, so existing plaintext rows
  * continue to work after enabling encryption.
  */
 
@@ -20,56 +29,123 @@ import {
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { dirname } from "path";
 
-const ENCRYPTED_PREFIX = "enc:v1:";
-const SCRYPT_SALT = "yachiyo-secret-crypto-v1";
+const ENCRYPTED_PREFIX_V1 = "enc:v1:";
+const ENCRYPTED_PREFIX_V2 = "enc:v2:";
+/** Fixed salt for the legacy v1 format (kept so existing rows stay readable). */
+const LEGACY_SCRYPT_SALT = "yachiyo-secret-crypto-v1";
 const KEY_LENGTH = 32; // AES-256
+/** Salt length for the v2 format (embedded in each ciphertext). */
+const V2_SALT_LENGTH = 16;
 
 /**
- * Derive a 32-byte AES key from a passphrase using scrypt.
- * The salt is fixed so the same passphrase always yields the same key
- * (allowing key rotation by changing the passphrase).
+ * Derive the master key from a passphrase using scrypt.
+ *
+ * The salt is fixed so the same passphrase always yields the same master
+ * key (required for key identification across restarts). Per-secret
+ * randomization for the v2 format happens inside {@link encryptSecret},
+ * which re-derives an AES key from this master key with a fresh random salt.
  */
 export function deriveKey(passphrase: string): Buffer {
-  return scryptSync(passphrase, SCRYPT_SALT, KEY_LENGTH);
+  return scryptSync(passphrase, LEGACY_SCRYPT_SALT, KEY_LENGTH);
 }
 
 /**
- * Encrypt a plaintext secret.
- * Returns a string of the form `enc:v1:<base64(iv)>:<base64(ciphertext+tag)>`.
- * Returns the empty string unchanged.
+ * Encrypt a plaintext secret (v2 format).
+ * Returns `enc:v2:<saltB64>:<ivB64>:<tagB64>:<dataB64>` where `salt` is a
+ * fresh random salt used to derive the per-secret AES key from the master
+ * key. Returns the empty string unchanged.
  */
 export function encryptSecret(plaintext: string, key: Buffer): string {
   if (plaintext === "") return "";
+  const salt = randomBytes(V2_SALT_LENGTH);
+  const derivedKey = scryptSync(key, salt, KEY_LENGTH);
   const iv = randomBytes(12); // 96-bit IV (GCM standard)
-  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const cipher = createCipheriv("aes-256-gcm", derivedKey, iv);
   const encrypted = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
   const tag = cipher.getAuthTag();
-  // Pack ciphertext + tag together (tag appended at the end, 16 bytes)
-  const payload = Buffer.concat([encrypted, tag]);
-  return `${ENCRYPTED_PREFIX}${iv.toString("base64")}:${payload.toString("base64")}`;
+  // Prefix already ends with ":"; the four fields are joined with ":".
+  return ENCRYPTED_PREFIX_V2 + [
+    salt.toString("base64"),
+    iv.toString("base64"),
+    tag.toString("base64"),
+    encrypted.toString("base64"),
+  ].join(":");
 }
 
 /**
- * Decrypt a secret produced by {@link encryptSecret}.
- * If the input does not carry the `enc:v1:` prefix it is returned as-is
- * (backward compatibility with pre-encryption plaintext rows).
+ * Decrypt a secret produced by {@link encryptSecret} (v2) or by the legacy
+ * v1 format.
+ *
+ * - Input without an `enc:` prefix is returned as-is (legacy plaintext rows).
+ * - Malformed input or a failed decryption (wrong key, corrupted ciphertext,
+ *   tampered tag) is logged with context and returns `null` so callers can
+ *   degrade gracefully instead of receiving garbage that looks like a secret.
  */
-export function decryptSecret(stored: string, key: Buffer): string {
-  if (!stored || !stored.startsWith(ENCRYPTED_PREFIX)) {
-    return stored; // plaintext (legacy) or empty
+export function decryptSecret(stored: string, key: Buffer): string | null {
+  if (!stored) return stored;
+
+  if (stored.startsWith(ENCRYPTED_PREFIX_V2)) {
+    const parts = stored.slice(ENCRYPTED_PREFIX_V2.length).split(":");
+    if (parts.length !== 4) {
+      console.error("[secret-crypto] Malformed v2 ciphertext (expected 4 fields, " +
+        `got ${parts.length}); refusing to return garbage.`);
+      return null;
+    }
+    try {
+      const salt = Buffer.from(parts[0], "base64");
+      const iv = Buffer.from(parts[1], "base64");
+      const tag = Buffer.from(parts[2], "base64");
+      const ciphertext = Buffer.from(parts[3], "base64");
+      const derivedKey = scryptSync(key, salt, KEY_LENGTH);
+      const decipher = createDecipheriv("aes-256-gcm", derivedKey, iv);
+      decipher.setAuthTag(tag);
+      const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+      return decrypted.toString("utf8");
+    } catch (e) {
+      console.error("[secret-crypto] Failed to decrypt v2 ciphertext " +
+        "(wrong key or corrupted/tampered data):", e);
+      return null;
+    }
   }
-  const rest = stored.slice(ENCRYPTED_PREFIX.length);
-  const sepIndex = rest.indexOf(":");
-  if (sepIndex === -1) return stored; // malformed — return as-is rather than crash
-  const iv = Buffer.from(rest.slice(0, sepIndex), "base64");
-  const payload = Buffer.from(rest.slice(sepIndex + 1), "base64");
-  if (payload.length < 16) return stored; // malformed
-  const ciphertext = payload.subarray(0, -16);
-  const tag = payload.subarray(-16);
-  const decipher = createDecipheriv("aes-256-gcm", key, iv);
-  decipher.setAuthTag(tag);
-  const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-  return decrypted.toString("utf8");
+
+  if (stored.startsWith(ENCRYPTED_PREFIX_V1)) {
+    // Legacy v1: fixed salt, master key used directly as the AES key,
+    // tag appended to the ciphertext. Kept read-only for existing rows.
+    const rest = stored.slice(ENCRYPTED_PREFIX_V1.length);
+    const sepIndex = rest.indexOf(":");
+    if (sepIndex === -1) {
+      console.error("[secret-crypto] Malformed v1 ciphertext (missing iv separator); " +
+        "refusing to return garbage.");
+      return null;
+    }
+    try {
+      const iv = Buffer.from(rest.slice(0, sepIndex), "base64");
+      const payload = Buffer.from(rest.slice(sepIndex + 1), "base64");
+      if (payload.length < 16) {
+        console.error("[secret-crypto] Malformed v1 ciphertext (payload too short); " +
+          "refusing to return garbage.");
+        return null;
+      }
+      const ciphertext = payload.subarray(0, -16);
+      const tag = payload.subarray(-16);
+      const decipher = createDecipheriv("aes-256-gcm", key, iv);
+      decipher.setAuthTag(tag);
+      const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+      return decrypted.toString("utf8");
+    } catch (e) {
+      console.error("[secret-crypto] Failed to decrypt v1 ciphertext " +
+        "(wrong key or corrupted/tampered data):", e);
+      return null;
+    }
+  }
+
+  if (stored.startsWith("enc:")) {
+    console.error("[secret-crypto] Unknown ciphertext version prefix " +
+      `"${stored.slice(0, stored.indexOf(":") + 1)}"; refusing to return garbage.`);
+    return null;
+  }
+
+  return stored; // plaintext (legacy) or empty
 }
 
 export interface EncryptionKeyOptions {

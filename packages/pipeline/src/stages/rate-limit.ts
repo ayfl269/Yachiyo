@@ -11,11 +11,12 @@ export class RateLimitStage extends PipelineStage {
    * and the effective limit is `maxRequests * instance_count`. For shared
    * enforcement, migrate the counter store to Redis or another shared
    * KV backend.
+   *
+   * NOTE: all rate-limit settings are read from `ctx.config` dynamically on
+   * every request (same pattern as SessionStatusCheckStage) so Dashboard
+   * config changes take effect immediately without restart (#92).
    */
-  private rateLimitEnabled: boolean = false;
-  private maxRequests: number = 10;
-  private windowSeconds: number = 60;
-  private strategy: "STALL" | "DISCARD" = "DISCARD";
+  private ctx: PipelineContext | null = null;
   private counters: Map<string, { count: number; windowStart: number }> = new Map();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   /** Number of events currently blocked in the STALL strategy. */
@@ -24,13 +25,10 @@ export class RateLimitStage extends PipelineStage {
   private readonly maxPendingStall: number = 256;
 
   async initialize(ctx: PipelineContext): Promise<void> {
-    this.rateLimitEnabled = ctx.config.rateLimitEnabled ?? false;
-    this.maxRequests = ctx.config.rateLimitMaxRequests ?? 10;
-    this.windowSeconds = ctx.config.rateLimitWindowSeconds ?? 60;
-    this.strategy = ctx.config.rateLimitStrategy ?? "DISCARD";
+    this.ctx = ctx;
 
     // Periodically purge expired counters to prevent unbounded growth
-    const cleanupIntervalMs = Math.max(this.windowSeconds * 1000, 60_000);
+    const cleanupIntervalMs = Math.max((ctx.config.rateLimitWindowSeconds ?? 60) * 1000, 60_000);
     this.cleanupTimer = setInterval(() => this.purgeExpired(), cleanupIntervalMs);
     // Allow the Node.js process to exit even if this timer is active
     if (this.cleanupTimer && typeof this.cleanupTimer === "object" && "unref" in this.cleanupTimer) {
@@ -40,7 +38,7 @@ export class RateLimitStage extends PipelineStage {
 
   private purgeExpired(): void {
     const now = Date.now();
-    const threshold = this.windowSeconds * 1000;
+    const threshold = (this.ctx?.config.rateLimitWindowSeconds ?? 60) * 1000;
     for (const [key, counter] of this.counters) {
       if (now - counter.windowStart > threshold) {
         this.counters.delete(key);
@@ -49,24 +47,31 @@ export class RateLimitStage extends PipelineStage {
   }
 
   async process(event: MessageEvent): Promise<void> {
-    if (!this.rateLimitEnabled) return;
+    // Dynamic config read: rate-limit settings follow the live config so
+    // Dashboard updates apply without a restart (#92).
+    const ctx = this.ctx;
+    if (!ctx || !(ctx.config.rateLimitEnabled ?? false)) return;
 
     // System-generated events bypass rate limiting.
     if (event.isSystem) return;
+
+    const maxRequests = ctx.config.rateLimitMaxRequests ?? 10;
+    const windowSeconds = ctx.config.rateLimitWindowSeconds ?? 60;
+    const strategy = ctx.config.rateLimitStrategy ?? "DISCARD";
 
     const key = event.unifiedMsgOrigin;
     const now = Date.now();
     let counter = this.counters.get(key);
 
-    if (!counter || now - counter.windowStart > this.windowSeconds * 1000) {
+    if (!counter || now - counter.windowStart > windowSeconds * 1000) {
       counter = { count: 0, windowStart: now };
       this.counters.set(key, counter);
     }
 
     counter.count++;
 
-    if (counter.count > this.maxRequests) {
-      if (this.strategy === "DISCARD") {
+    if (counter.count > maxRequests) {
+      if (strategy === "DISCARD") {
         event.stopEvent();
       } else {
         // Guard against unbounded memory growth: if too many events are
@@ -76,7 +81,7 @@ export class RateLimitStage extends PipelineStage {
           event.stopEvent();
           return;
         }
-        const waitMs = this.windowSeconds * 1000 - (now - counter.windowStart);
+        const waitMs = windowSeconds * 1000 - (now - counter.windowStart);
         this.pendingStallCount++;
         try {
           await new Promise(resolve => setTimeout(resolve, waitMs));

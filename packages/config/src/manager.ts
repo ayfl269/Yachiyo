@@ -109,7 +109,11 @@ export class ConfigManager {
     if (this.sqliteStore) {
       this.configs = this.sqliteStore.getAllConfigs();
     } else if (filePath) {
-      this.loadFromFile().catch(() => {});
+      this.loadFromFile().catch((e) => {
+        // Surface load failures: a corrupted/missing config file previously
+        // degraded silently to "empty config" (#99).
+        console.warn("[ConfigManager] Failed to load config file:", filePath, e);
+      });
     }
   }
 
@@ -196,7 +200,10 @@ export class ConfigManager {
           this.configs.set(id, config);
         }
       }
-    } catch {
+    } catch (e) {
+      // Do not swallow silently: a corrupted config file must be visible in
+      // logs instead of manifesting as a mysteriously empty config (#99).
+      console.warn(`[ConfigManager] Failed to load config from "${this.filePath}":`, e);
     }
   }
 
@@ -288,9 +295,12 @@ export class ConfigManager {
       // Session whitelist
       sessionWhitelistEnabled: false,
       // Platform tools
-      platformAdminToolsEnabled: true,
+      // Default to disabled (least privilege, #100): group-admin write
+      // operations and runtime proxy redirection must be opted into
+      // explicitly. Existing saved configs are unaffected.
+      platformAdminToolsEnabled: false,
       // Proxy management
-      proxyManageToolEnabled: true,
+      proxyManageToolEnabled: false,
     };
   }
 }

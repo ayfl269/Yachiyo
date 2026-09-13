@@ -40,7 +40,12 @@ export async function* callHandler(
     if (e instanceof TypeError) {
       console.error(`Handler ${handler.handlerFullName} TypeError: ${e}`);
     }
-    throw e;
+    // Attach the handler name to the error so log entries and the pipeline
+    // top-level catch identify the failing handler instead of an anonymous
+    // "undefined is not a function" style message (#96). The original error
+    // is preserved as `cause`.
+    const detail = e instanceof Error ? e.message : String(e);
+    throw new Error(`Handler ${handler.handlerFullName} failed: ${detail}`, { cause: e });
   }
 }
 

@@ -209,7 +209,10 @@ export class PreProcessStage extends PipelineStage {
   private applyPathMapping(path: string): string {
     for (const [from, to] of this.pathMappings) {
       if (path.startsWith(from)) {
-        return path.replace(from, to);
+        // Use a function as the replacement so `to` is inserted literally:
+        // a string replacement would interpret `$&`, `$1` etc. in `to` as
+        // match patterns (#95).
+        return path.replace(from, () => to);
       }
     }
     return path;

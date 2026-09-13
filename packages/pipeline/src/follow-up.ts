@@ -9,6 +9,13 @@ interface FollowUpOrderState {
   statuses: Map<number, "pending" | "active" | "consumed" | "finished">;
   nextOrder: number;
   nextTurn: number;
+  /**
+   * Set to true when the state is force-cleaned (cleanup timer deleting an
+   * orphaned entry). Waiters blocked in `activateAndWaitFollowUpTurn` check
+   * this flag after each wake-up and abort instead of re-waiting on a state
+   * nobody will ever notify again (#87).
+   */
+  settled: boolean;
 }
 
 const FOLLOW_UP_ORDER_STATE = new Map<string, FollowUpOrderState>();
@@ -29,7 +36,11 @@ function startFollowUpCleanup(): void {
       }
       // If the runner is gone and the entry has been idle too long, force-clean
       if (!ACTIVE_AGENT_RUNNERS.has(umo)) {
-        // If runner is gone but statuses remain, notifyAll to unblock waiters then delete
+        // If runner is gone but statuses remain, wake all waiters first and
+        // mark the state settled BEFORE deleting it. Deleting without the
+        // settled flag would leave waiters looping on a state nobody will
+        // ever notify again, permanently hanging the event-bus serial chain (#87).
+        state.settled = true;
         state.condition.notifyAll();
         state.statuses.clear();
         FOLLOW_UP_ORDER_STATE.delete(umo);
@@ -94,7 +105,7 @@ export async function prepareFollowUpCapture(capture: FollowUpCapture): Promise<
 function allocateFollowUpOrder(umo: string): number {
   let state = FOLLOW_UP_ORDER_STATE.get(umo);
   if (!state) {
-    state = { condition: new Condition(), statuses: new Map(), nextOrder: 0, nextTurn: 0 };
+    state = { condition: new Condition(), statuses: new Map(), nextOrder: 0, nextTurn: 0, settled: false };
     FOLLOW_UP_ORDER_STATE.set(umo, state);
   }
   const seq = state.nextOrder++;
@@ -108,6 +119,11 @@ async function activateAndWaitFollowUpTurn(umo: string, seq: number): Promise<vo
   state.statuses.set(seq, "active");
 
   while (state.nextTurn !== seq) {
+    // Abort instead of re-waiting when the state was force-cleaned while we
+    // were parked on the condition — otherwise this loop would wait forever (#87).
+    if (state.settled) {
+      throw new Error(`Follow-up order state for "${umo}" was cleaned up while waiting (seq=${seq})`);
+    }
     await state.condition.wait();
   }
 }
