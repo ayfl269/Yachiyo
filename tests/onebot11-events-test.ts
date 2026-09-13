@@ -138,8 +138,8 @@ async function main(): Promise<void> {
   // Phase 3: Request Event Handling
   // ══════════════════════════════════════════════════════
 
-  // ── Test: friend request auto-reject (default) ──
-  console.log("\n=== Phase 3: friend request auto-reject (default) ===");
+  // ── Test: friend request left pending (default, no auto handling) ──
+  console.log("\n=== Phase 3: friend request left pending (default) ===");
   {
     const { adapter, server, eventQueue } = await createAdapterAndServer(port);
 
@@ -163,9 +163,38 @@ async function main(): Promise<void> {
 
     await new Promise(r => setTimeout(r, 300));
 
-    assert(received.action === "set_friend_add_request", "Should call set_friend_add_request");
-    assert(received.params?.flag === "flag_friend_001", "Should pass correct flag");
-    assert(received.params?.approve === false, "Should auto-reject by default");
+    // 语义修正后：默认不调用任何 API，请求保持待定由人工处理。
+    assert(received.action === null, "Should NOT call any API by default (left pending)");
+
+    await adapter.stop();
+    await server.close();
+    await new Promise(r => setTimeout(r, 200));
+  }
+
+  // ── Test: friend request auto-reject (explicit config) ──
+  console.log("\n=== Phase 3: friend request auto-reject (explicit) ===");
+  {
+    const { adapter, server, eventQueue } = await createAdapterAndServer(port, { autoRejectFriend: true });
+
+    const received = { params: null as Record<string, unknown> | null };
+    server.messageHandler = (msg) => {
+      received.params = msg.params;
+      server.broadcast({ echo: msg.echo, retcode: 0, status: "ok", data: {} });
+    };
+
+    server.broadcast({
+      post_type: "request",
+      request_type: "friend",
+      user_id: 111112,
+      comment: "Hello again",
+      flag: "flag_friend_001b",
+      time: Math.floor(Date.now() / 1000),
+      self_id: 999,
+    });
+
+    await new Promise(r => setTimeout(r, 300));
+    assert(received.params?.approve === false, "Should auto-reject when autoRejectFriend is set");
+    assert(received.params?.flag === "flag_friend_001b", "Should pass correct flag");
 
     await adapter.stop();
     await server.close();
@@ -202,10 +231,43 @@ async function main(): Promise<void> {
     await new Promise(r => setTimeout(r, 200));
   }
 
-  // ── Test: group request auto-reject ──
-  console.log("\n=== Phase 3: group request auto-reject ===");
+  // ── Test: group request left pending (default) ──
+  console.log("\n=== Phase 3: group request left pending (default) ===");
   {
-    const { adapter, server, eventQueue } = await createAdapterAndServer(port, { autoRejectReason: "Not accepting" });
+    const { adapter, server, eventQueue } = await createAdapterAndServer(port);
+
+    const received = { action: null as string | null, params: null as Record<string, unknown> | null };
+    server.messageHandler = (msg) => {
+      received.action = msg.action;
+      received.params = msg.params;
+      server.broadcast({ echo: msg.echo, retcode: 0, status: "ok", data: {} });
+    };
+
+    server.broadcast({
+      post_type: "request",
+      request_type: "group",
+      sub_type: "add",
+      group_id: 333333,
+      user_id: 444444,
+      comment: "Let me in",
+      flag: "flag_group_001",
+      time: Math.floor(Date.now() / 1000),
+      self_id: 999,
+    });
+
+    await new Promise(r => setTimeout(r, 300));
+    // 语义修正后：默认不调用任何 API，请求保持待定。
+    assert(received.action === null, "Should NOT call any API by default (left pending)");
+
+    await adapter.stop();
+    await server.close();
+    await new Promise(r => setTimeout(r, 200));
+  }
+
+  // ── Test: group request auto-reject (explicit config) ──
+  console.log("\n=== Phase 3: group request auto-reject (explicit) ===");
+  {
+    const { adapter, server, eventQueue } = await createAdapterAndServer(port, { autoRejectGroup: true, autoRejectReason: "Not accepting" });
 
     const received = { action: null as string | null, params: null as Record<string, unknown> | null };
     server.messageHandler = (msg) => {
@@ -228,7 +290,7 @@ async function main(): Promise<void> {
 
     await new Promise(r => setTimeout(r, 300));
     assert(received.action === "set_group_add_request", "Should call set_group_add_request");
-    assert(received.params?.approve === false, "Should auto-reject group request by default");
+    assert(received.params?.approve === false, "Should auto-reject when autoRejectGroup is set");
     assert(received.params?.reason === "Not accepting", "Should pass reject reason");
     assert(received.params?.sub_type === "add", "Should pass sub_type");
 

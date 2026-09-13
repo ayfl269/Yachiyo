@@ -6,13 +6,28 @@
  * `release()`. A watchdog timer checks for expired locks periodically.
  *
  * Holders of long-running operations (e.g. LLM streaming, multi-step tool
- * execution) should call `renewLock(umo)` periodically to push the TTL
- * forward. Without renewal, the watchdog will force-release the lock while
- * the holder is still active, allowing a second consumer to acquire it and
- * causing concurrent writes to the same session.
+ * execution) should call `renewLock(umo, token)` periodically to push the
+ * TTL forward. Without renewal, the watchdog will force-release the lock
+ * while the holder is still active, allowing a second consumer to acquire
+ * it and causing concurrent writes to the same session.
+ *
+ * Release identity: every acquired lock carries a unique token. The release
+ * closure only deletes the map entry if the token still matches. Without
+ * this, a stale holder whose lock expired (watchdog force-release) and was
+ * re-acquired by consumer B would — on its own `finally { release() }` —
+ * delete B's lock and let consumer C in, producing exactly the concurrent
+ * session access the lock exists to prevent.
  */
 export class SessionLockManager {
-  private locks: Map<string, { promise: Promise<void>; release: () => void; acquiredAt: number; ttlMs: number; watchdog: ReturnType<typeof setInterval> }> = new Map();
+  private locks: Map<string, {
+    promise: Promise<void>;
+    release: () => void;
+    acquiredAt: number;
+    ttlMs: number;
+    watchdog: ReturnType<typeof setInterval>;
+    /** Unique per-acquisition identity used to validate release calls. */
+    token: object;
+  }> = new Map();
   private defaultTtlMs: number;
   private watchdogIntervalMs: number;
 
@@ -31,23 +46,30 @@ export class SessionLockManager {
     const promise = new Promise<void>(resolve => { release = resolve; });
     const acquiredAt = Date.now();
     const ttlMs = this.defaultTtlMs;
+    const token: object = {};
 
     // Per-lock watchdog: periodically check if the lock has exceeded its
     // TTL and force-release it if so. This handles crashes/forgotten releases.
+    // The token check ensures the watchdog only forces out the acquisition
+    // it was created for (defensive — the entry is cleared in forceRelease).
     const watchdog = setInterval(() => {
       const entry = this.locks.get(umo);
-      if (entry && Date.now() - entry.acquiredAt > entry.ttlMs) {
+      if (entry && entry.token === token && Date.now() - entry.acquiredAt > entry.ttlMs) {
         console.warn(`[SessionLockManager] Lock '${umo}' exceeded TTL (${entry.ttlMs}ms), force-releasing.`);
-        this.forceRelease(umo);
+        this.forceRelease(umo, token);
       }
     }, this.watchdogIntervalMs);
     // Don't keep the event loop alive just for the watchdog.
     watchdog.unref();
 
-    this.locks.set(umo, { promise, release, acquiredAt, ttlMs, watchdog });
+    this.locks.set(umo, { promise, release, acquiredAt, ttlMs, watchdog, token });
 
+    // Identity-bound release: only removes the entry if this acquisition
+    // still owns the lock. A stale holder's release is a no-op (its own
+    // lock was already force-released and possibly re-acquired by someone
+    // else — deleting the new holder's entry here would be catastrophic).
     return () => {
-      this.forceRelease(umo);
+      this.forceRelease(umo, token);
     };
   }
 
@@ -70,9 +92,22 @@ export class SessionLockManager {
     return true;
   }
 
-  private forceRelease(umo: string): void {
+  /**
+   * Release the lock for `umo` — but only if it is still owned by the
+   * acquisition identified by `token`. A mismatch means the original lock
+   * expired (watchdog force-release) and was re-acquired by another
+   * consumer; the stale release must NOT delete the new holder's entry.
+   */
+  private forceRelease(umo: string, token?: object): void {
     const entry = this.locks.get(umo);
     if (!entry) return;
+    if (token !== undefined && entry.token !== token) {
+      console.warn(
+        `[SessionLockManager] Stale release for '${umo}' ignored ` +
+        `(lock expired and was re-acquired by another consumer).`,
+      );
+      return;
+    }
     clearInterval(entry.watchdog);
     this.locks.delete(umo);
     entry.release();

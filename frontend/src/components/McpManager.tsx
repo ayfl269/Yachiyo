@@ -172,14 +172,19 @@ function shellSplitArgs(input: string): string[] {
   return tokens
 }
 
-function formToConfig(form: EditForm): Record<string, any> {
-  // Try JSON config first if non-empty
+/**
+ * Build the server config.
+ * - jsonDirty === false（或 JSON 为空）：以上方表单字段为准构建。
+ * - jsonDirty === true：以 JSON 文本为准解析；解析失败返回 null，由调用方处理。
+ */
+function formToConfig(form: EditForm, jsonDirty: boolean): Record<string, any> | null {
+  // JSON was manually edited: parse it as the source of truth
   const jsonTrim = form.jsonConfig.trim()
-  if (jsonTrim) {
+  if (jsonDirty && jsonTrim) {
     try {
       return JSON.parse(jsonTrim)
     } catch {
-      // fall through to form-based construction
+      return null
     }
   }
 
@@ -227,6 +232,9 @@ export default function McpManager() {
   const [isAdding, setIsAdding] = useState(false)
   const [saving, setSaving] = useState(false)
 
+  // 用户是否手动编辑过 JSON 文本框（true 时表单编辑不再回写 JSON，保存以 JSON 为准）
+  const [jsonDirty, setJsonDirty] = useState(false)
+
   // Test connection
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<TestResult | null>(null)
@@ -237,8 +245,11 @@ export default function McpManager() {
   // ===== JSON sync helpers =====
   function syncJsonFromForm() {
     setEditForm(prev => {
+      // 用户手动编辑过 JSON 时不回写，避免覆盖用户输入
+      if (jsonDirty) return prev
       try {
-        const config = formToConfig(prev)
+        const config = formToConfig(prev, false)
+        if (!config) return prev
         return { ...prev, jsonConfig: JSON.stringify(config, null, 2) }
       } catch {
         return prev
@@ -323,7 +334,11 @@ export default function McpManager() {
     setTesting(true)
     setTestResult(null)
     try {
-      const config = formToConfig(editForm)
+      const config = formToConfig(editForm, jsonDirty)
+      if (!config) {
+        showMessage('JSON 配置格式错误', 'error')
+        return
+      }
       const res = await apiFetch('/api/tools/mcp/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -375,7 +390,12 @@ export default function McpManager() {
     }
 
     setSaving(true)
-    const config = formToConfig(editForm)
+    const config = formToConfig(editForm, jsonDirty)
+    if (!config) {
+      showMessage('JSON 配置格式错误', 'error')
+      setSaving(false)
+      return
+    }
     try {
       const endpoint = isAdding ? '/api/tools/mcp/add' : '/api/tools/mcp/update'
       const body: Record<string, any> = {
@@ -386,7 +406,7 @@ export default function McpManager() {
         body.active = true
       }
 
-      const res = await fetch(endpoint, {
+      const res = await apiFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
@@ -433,6 +453,7 @@ export default function McpManager() {
   function openAddDialog() {
     setIsAdding(true)
     setEditForm(createEmptyForm())
+    setJsonDirty(false)
     setTestResult(null)
     setShowAddDialog(true)
   }
@@ -440,6 +461,7 @@ export default function McpManager() {
   function openEditDialog(server: McpServer) {
     setIsAdding(false)
     setEditForm(configToForm(server.name, server.config))
+    setJsonDirty(false)
     setTestResult(null)
     setShowEditDialog(true)
   }
@@ -847,11 +869,12 @@ export default function McpManager() {
 
                 {/* JSON Config */}
                 <div className="form-group span-2">
-                  <label>JSON 配置（可直接编辑，优先级高于上方表单）</label>
+                  <label>JSON 配置（手动编辑后保存将以 JSON 为准）</label>
                   <textarea
                     value={editForm.jsonConfig}
                     onChange={e => {
                       setEditForm(prev => ({ ...prev, jsonConfig: e.target.value }))
+                      setJsonDirty(true)
                       syncFormFromJson()
                     }}
                     className="form-control font-mono textarea-json"

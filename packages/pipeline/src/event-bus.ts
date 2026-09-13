@@ -27,6 +27,15 @@ export class EventBus {
    */
   private confChains: Map<string, Promise<void>> = new Map();
   /**
+   * Number of events accepted into each config's serial chain but not yet
+   * executed. Incremented when an event is chained, decremented when its
+   * execution settles. This is the real per-config pending depth — the
+   * confChains Map only stores the tail Promise, so its `.size` is the
+   * number of *active configs*, not events, and cannot express per-config
+   * backpressure (a single-config deployment would always have size 1).
+   */
+  private pendingPerConfig: Map<string, number> = new Map();
+  /**
    * Maximum number of pending events per config before the dispatch loop
    * applies backpressure (stops reading from the event queue until the
    * oldest chain settles). Prevents unbounded Promise chain growth under
@@ -109,13 +118,21 @@ export class EventBus {
             console.error(`Unhandled error executing event in PipelineScheduler for config ${confId}:`, err);
           });
         this.confChains.set(confId, next);
+        this.pendingPerConfig.set(confId, (this.pendingPerConfig.get(confId) ?? 0) + 1);
 
-        // Free the chain reference once settled so the Map doesn't grow
-        // unboundedly as idle configs come and go. Only delete if `next`
-        // is still the tail (a newer event may have already replaced it).
+        // Free the chain reference and pending count once settled so the
+        // Maps don't grow unboundedly as idle configs come and go. Only
+        // delete if `next` is still the tail (a newer event may have
+        // already replaced it).
         next.finally(() => {
           if (this.confChains.get(confId) === next) {
             this.confChains.delete(confId);
+          }
+          const pending = (this.pendingPerConfig.get(confId) ?? 1) - 1;
+          if (pending <= 0) {
+            this.pendingPerConfig.delete(confId);
+          } else {
+            this.pendingPerConfig.set(confId, pending);
           }
         });
       } catch (err) {
@@ -125,21 +142,17 @@ export class EventBus {
   }
 
   /**
-   * Check if any config's pending chain exceeds the backpressure threshold.
-   * Since we only track the tail Promise (not a counter), we approximate
-   * by checking the number of configs with active chains against a cap —
-   * a config is "active" while its tail Promise is pending. In practice
-   * this limits total in-flight work across all configs.
+   * Check if any config's pending event count exceeds the backpressure
+   * threshold. Counts come from {@link pendingPerConfig}, which tracks the
+   * real per-config chain depth (events accepted but not yet executed) —
+   * unlike `confChains.size`, which only counts active configs and would
+   * never trigger backpressure in a single-config deployment.
    */
   private tooManyPending(): boolean {
-    // The confChains Map only contains configs with at least one pending
-    // event (entries are deleted on settle). If the total number of active
-    // configs exceeds the cap, apply backpressure.
-    // Note: a single config may have multiple events queued in its chain,
-    // but they are serialized so they will drain naturally. The cap below
-    // prevents the dispatch loop from flooding the event loop with too many
-    // concurrent Promise chains.
-    return this.confChains.size > this.maxPendingPerConfig;
+    for (const pending of this.pendingPerConfig.values()) {
+      if (pending > this.maxPendingPerConfig) return true;
+    }
+    return false;
   }
 
   stop(): void {

@@ -241,6 +241,8 @@ export class DashboardServer {
   private static readonly LOGIN_RATE_LIMIT_MAX = 5;
   /** Login rate-limit window in ms (1 minute). */
   private static readonly LOGIN_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+  /** Upper bound on tracked rate-limit keys (memory-exhaustion guard). */
+  private static readonly LOGIN_ATTEMPTS_MAX_ENTRIES = 10_000;
   private loginAttempts: Map<string, { count: number; firstAttemptAt: number }> = new Map();
 
   // ── Session persistence (SQLite-backed) ──
@@ -256,6 +258,20 @@ export class DashboardServer {
   private deleteSession(token: string): void {
     const db = this.ctx.dbManager.getDb("config");
     db.prepare("DELETE FROM dashboard_sessions WHERE token = ?").run(token);
+  }
+
+  /**
+   * Revoke all sessions belonging to `username` except `keepToken`.
+   * Called on credential change so that other issued tokens (possibly
+   * stolen ones) cannot outlive the rotation.
+   */
+  private revokeOtherSessions(username: string, keepToken: string): void {
+    const db = this.ctx.dbManager.getDb("config");
+    const result = db.prepare("DELETE FROM dashboard_sessions WHERE username = ? AND token != ?")
+      .run(username, keepToken);
+    if (result.changes > 0) {
+      console.info(`[DashboardServer] Revoked ${result.changes} other session(s) for user "${username}" after credential change.`);
+    }
   }
 
   private getSession(token: string): { username: string; mustChange: boolean; expiresAt: number } | null {
@@ -370,6 +386,16 @@ export class DashboardServer {
         // If mustChange is true, only /api/auth/change-credentials is allowed
         return pathname === "/api/auth/change-credentials";
       }
+      // Defense in depth: the session must belong to an existing user.
+      // Sessions issued before revocation-on-credential-change was added
+      // (or for users deleted via other paths) would otherwise stay valid
+      // for their whole absolute lifetime.
+      const db = this.ctx.dbManager.getDb("config");
+      const userExists = db.prepare("SELECT 1 FROM dashboard_users WHERE username = ?").get(session.username);
+      if (!userExists) {
+        this.deleteSession(token);
+        return false;
+      }
       return true;
     }
 
@@ -387,6 +413,7 @@ export class DashboardServer {
     if (!entry || now - entry.firstAttemptAt > DashboardServer.LOGIN_RATE_LIMIT_WINDOW_MS) {
       // Reset window.
       this.loginAttempts.set(key, { count: 1, firstAttemptAt: now });
+      this.pruneLoginAttempts(now);
       return null;
     }
     entry.count++;
@@ -402,11 +429,87 @@ export class DashboardServer {
     this.loginAttempts.delete(`${username}:${clientIp}`);
   }
 
-  /** Extract client IP from request, accounting for trusted proxies. */
+  /**
+   * Bound the loginAttempts map: entries are only replaced per-key, so an
+   * attacker rotating usernames/IPs could otherwise grow it without limit.
+   * First drop expired windows; if still oversized, evict the oldest.
+   */
+  private pruneLoginAttempts(now: number): void {
+    if (this.loginAttempts.size < DashboardServer.LOGIN_ATTEMPTS_MAX_ENTRIES) return;
+    for (const [key, entry] of this.loginAttempts) {
+      if (now - entry.firstAttemptAt > DashboardServer.LOGIN_RATE_LIMIT_WINDOW_MS) {
+        this.loginAttempts.delete(key);
+      }
+    }
+    while (this.loginAttempts.size >= DashboardServer.LOGIN_ATTEMPTS_MAX_ENTRIES) {
+      let oldestKey: string | null = null;
+      let oldestAt = Number.POSITIVE_INFINITY;
+      for (const [key, entry] of this.loginAttempts) {
+        if (entry.firstAttemptAt < oldestAt) {
+          oldestAt = entry.firstAttemptAt;
+          oldestKey = key;
+        }
+      }
+      if (!oldestKey) break;
+      this.loginAttempts.delete(oldestKey);
+    }
+  }
+
+  /** Secret-bearing keys in adapter configs, masked at the API boundary. */
+  private static readonly ADAPTER_SECRET_KEYS = ["appSecret", "accessToken", "token"] as const;
+  private static readonly SECRET_MASK = "********";
+
+  /**
+   * Return a copy of the adapter config with secret values replaced by the
+   * mask. The list endpoint must never echo real platform credentials —
+   * unlike provider keys (mask + rate-limited reveal), adapters previously
+   * returned appSecret/accessToken/token in plaintext.
+   */
+  private maskAdapterConfig(config: Record<string, unknown> | undefined): Record<string, unknown> {
+    const out = { ...(config ?? {}) };
+    for (const key of DashboardServer.ADAPTER_SECRET_KEYS) {
+      if (typeof out[key] === "string" && (out[key] as string).length > 0) {
+        out[key] = DashboardServer.SECRET_MASK;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Merge a submitted adapter config onto the previous one: secret fields
+   * that are absent (the frontend strips masked values before submitting)
+   * or still contain the mask keep their previous value. An explicit empty
+   * string clears the secret.
+   */
+  private restoreAdapterSecrets(
+    submitted: Record<string, unknown>,
+    previous: Record<string, unknown> | undefined,
+  ): Record<string, unknown> {
+    const out = { ...submitted };
+    for (const key of DashboardServer.ADAPTER_SECRET_KEYS) {
+      const value = out[key];
+      const maskedOrAbsent = value === undefined || value === DashboardServer.SECRET_MASK;
+      if (maskedOrAbsent && previous && typeof previous[key] === "string") {
+        out[key] = previous[key];
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Extract client IP from request. `X-Forwarded-For` is only honored when
+   * the deployment explicitly declares a trusted proxy (env
+   * DASHBOARD_TRUST_PROXY=true) — the header is client-forgeable, and the
+   * login rate limit is keyed on this value. Unconditionally trusting it
+   * let an attacker rotate the header per request and bypass the limit
+   * entirely.
+   */
   private getClientIp(req: IncomingMessage): string {
-    const forwarded = req.headers["x-forwarded-for"];
-    if (typeof forwarded === "string" && forwarded.length > 0) {
-      return forwarded.split(",")[0].trim();
+    if (process.env.DASHBOARD_TRUST_PROXY === "true") {
+      const forwarded = req.headers["x-forwarded-for"];
+      if (typeof forwarded === "string" && forwarded.length > 0) {
+        return forwarded.split(",")[0].trim();
+      }
     }
     return req.socket.remoteAddress || "unknown";
   }
@@ -728,6 +831,10 @@ export class DashboardServer {
         return;
       }
 
+      // Credential rotation: revoke ALL other sessions of this user —
+      // otherwise a stolen token survives the rotation for its full
+      // absolute lifetime (defeats the purpose of changing credentials).
+      this.revokeOtherSessions(session.username, token);
       this.deleteSession(token);
       const newSessionToken = randomBytes(24).toString("hex");
       const now = Date.now();
@@ -833,7 +940,9 @@ export class DashboardServer {
         return;
       }
 
-      // Issue a new session token (invalidates old one).
+      // Issue a new session token (invalidates old one). Revoke all other
+      // sessions of this user so stolen tokens die with the rotation.
+      this.revokeOtherSessions(session.username, token);
       this.deleteSession(token);
       const newSessionToken = randomBytes(24).toString("hex");
       const now = Date.now();
@@ -1493,6 +1602,11 @@ export class DashboardServer {
       try {
         const body = await this.readBody(req);
         const options = JSON.parse(body);
+        if (options.chunkSize !== undefined && (!Number.isFinite(Number(options.chunkSize)) || Number(options.chunkSize) < 1)) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: `Invalid chunkSize: ${options.chunkSize}. Must be a positive number.` }));
+          return;
+        }
         const kb = await this.ctx.knowledgeBaseManager.createKb(options);
         res.writeHead(200);
         res.end(JSON.stringify(kb));
@@ -1706,7 +1820,7 @@ export class DashboardServer {
         status: a.status,
         isRunning: a.isRunning,
         meta: a.meta(),
-        config: (a as { config?: Record<string, unknown> }).config || {},
+        config: this.maskAdapterConfig((a as { config?: Record<string, unknown> }).config),
       }));
       res.writeHead(200);
       res.end(JSON.stringify(list));
@@ -1735,7 +1849,7 @@ export class DashboardServer {
             status: adapter.status,
             isRunning: adapter.isRunning,
             meta: adapter.meta(),
-            config: (adapter as { config?: Record<string, unknown> }).config || {},
+            config: this.maskAdapterConfig((adapter as { config?: Record<string, unknown> }).config),
           }
         }));
       } catch (err: unknown) {
@@ -1771,6 +1885,11 @@ export class DashboardServer {
           res.end(JSON.stringify({ error: "Missing adapter type" }));
           return;
         }
+        // Snapshot the previous config BEFORE removal so masked/absent
+        // secret fields can be carried over (the frontend submits "********"
+        // or omits them — real secrets are never echoed to the client).
+        const previousConfig = (this.ctx.adapterRegistry.getAdapter(id) as
+          { config?: Record<string, unknown> } | undefined)?.config;
         // Stop & remove old adapter (ignore errors)
         try {
           await this.ctx.adapterRegistry.removeAdapter(id);
@@ -1779,8 +1898,10 @@ export class DashboardServer {
           // Force remove from map even if stop failed
           (this.ctx.adapterRegistry as unknown as { adapters: Map<string, unknown> }).adapters.delete(id);
         }
-        // Create new adapter with updated config
-        const fullConfig = { ...config, type, id };
+        // Create new adapter with updated config, carrying over secrets the
+        // client masked instead of resubmitting.
+        const mergedConfig = this.restoreAdapterSecrets(config ?? {}, previousConfig);
+        const fullConfig = { ...mergedConfig, type, id };
         const adapter = await this.ctx.adapterRegistry.addAndStart(
           type, fullConfig, this.ctx.eventQueue,
         );

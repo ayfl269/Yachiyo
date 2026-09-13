@@ -77,6 +77,14 @@ export class KnowledgeBaseManager {
   }
 
   async createKb(options: CreateKbOptions): Promise<KnowledgeBase> {
+    // A chunkSize < 1 makes TextChunker.hardSplit loop forever (synchronous
+    // full-process hang). Reject it here and in the dashboard route.
+    if (options.chunkSize !== undefined && (!Number.isFinite(options.chunkSize) || options.chunkSize < 1)) {
+      throw new KnowledgeBaseUploadError({
+        stage: "create",
+        userMessage: `Invalid chunkSize: ${options.chunkSize}. Must be a positive number.`,
+      });
+    }
     const embeddingProvider = this.providerManager.embeddingInsts.find(
       (p) => p.providerConfig.id === options.embeddingProviderId,
     );

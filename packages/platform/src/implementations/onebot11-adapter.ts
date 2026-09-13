@@ -935,7 +935,18 @@ export class OneBot11Adapter extends PlatformAdapter {
     });
 
     const port = this.config.port ?? 8080;
-    const host = this.config.host ?? "0.0.0.0";
+    // 默认只监听回环地址：未配置 accessToken 时该端口完全不设防，绑定
+    // 0.0.0.0 意味着任何能访问此端口的客户端都可以伪造消息事件注入
+    // pipeline。确需局域网/容器访问时，请显式配置 host 并务必设置
+    // accessToken。
+    const host = this.config.host ?? "127.0.0.1";
+    if (!this.config.accessToken) {
+      console.warn(
+        `[OneBot11] Forward WS: accessToken is NOT configured. ` +
+        `Anyone who can reach ${host}:${port} can inject fake message events. ` +
+        `Configure accessToken (or keep the default loopback host) to protect this endpoint.`,
+      );
+    }
 
     await new Promise<void>((resolve, reject) => {
       this.httpServer!.listen(port, host, () => {
@@ -1137,12 +1148,25 @@ export class OneBot11Adapter extends PlatformAdapter {
       const friendReq = event as Ob11FriendRequestEvent;
       console.info(`[OneBot11] Friend request from ${friendReq.user_id}: ${friendReq.comment || "(no comment)"}`);
 
-      const shouldApprove = this.config.autoApproveFriend ?? false;
-      try {
-        await this.setFriendAddRequest(friendReq.flag, shouldApprove);
-        console.info(`[OneBot11] Friend request ${shouldApprove ? "approved" : "rejected"}: ${friendReq.user_id}`);
-      } catch (e) {
-        console.error(`[OneBot11] Failed to handle friend request:`, e);
+      // 语义修正：默认（未配置任何自动开关）不做任何处理，请求保持待定，
+      // 由用户在 QQ 客户端人工处理。此前未开启 autoApprove 时会显式调用
+      // approve=false，等于默认自动拒绝一切好友请求。
+      if (this.config.autoApproveFriend === true) {
+        try {
+          await this.setFriendAddRequest(friendReq.flag, true);
+          console.info(`[OneBot11] Friend request approved: ${friendReq.user_id}`);
+        } catch (e) {
+          console.error(`[OneBot11] Failed to approve friend request:`, e);
+        }
+      } else if (this.config.autoRejectFriend === true) {
+        try {
+          await this.setFriendAddRequest(friendReq.flag, false);
+          console.info(`[OneBot11] Friend request rejected: ${friendReq.user_id}`);
+        } catch (e) {
+          console.error(`[OneBot11] Failed to reject friend request:`, e);
+        }
+      } else {
+        console.info(`[OneBot11] Friend request left pending for manual handling: ${friendReq.user_id}`);
       }
       return;
     }
@@ -1152,13 +1176,24 @@ export class OneBot11Adapter extends PlatformAdapter {
       const action = groupReq.sub_type === "add" ? "加群请求" : "加群邀请";
       console.info(`[OneBot11] ${action} from ${groupReq.user_id} for group ${groupReq.group_id}: ${groupReq.comment || "(no comment)"}`);
 
-      const shouldApprove = this.config.autoApproveGroup ?? false;
-      const reason = shouldApprove ? "" : (this.config.autoRejectReason ?? "");
-      try {
-        await this.setGroupAddRequest(groupReq.flag, groupReq.sub_type, shouldApprove, reason);
-        console.info(`[OneBot11] Group request ${shouldApprove ? "approved" : "rejected"}: group=${groupReq.group_id}`);
-      } catch (e) {
-        console.error(`[OneBot11] Failed to handle group request:`, e);
+      // 同上：默认不处理；autoApproveGroup 通过，autoRejectGroup 拒绝。
+      if (this.config.autoApproveGroup === true) {
+        try {
+          await this.setGroupAddRequest(groupReq.flag, groupReq.sub_type, true);
+          console.info(`[OneBot11] Group request approved: group=${groupReq.group_id}`);
+        } catch (e) {
+          console.error(`[OneBot11] Failed to approve group request:`, e);
+        }
+      } else if (this.config.autoRejectGroup === true) {
+        const reason = this.config.autoRejectReason ?? "";
+        try {
+          await this.setGroupAddRequest(groupReq.flag, groupReq.sub_type, false, reason);
+          console.info(`[OneBot11] Group request rejected: group=${groupReq.group_id}`);
+        } catch (e) {
+          console.error(`[OneBot11] Failed to reject group request:`, e);
+        }
+      } else {
+        console.info(`[OneBot11] Group request left pending for manual handling: group=${groupReq.group_id}`);
       }
       return;
     }

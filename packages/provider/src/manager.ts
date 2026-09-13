@@ -587,25 +587,7 @@ export class ProviderManager {
     } catch (e) {
       // Rollback: restore the old instance and config.
       if (oldInstance && oldConfig) {
-        // Re-register the old instance. removeProviderInstance cleared it
-        // from instMap and all typed arrays; we restore it directly since
-        // the instance is already constructed. The category must match the
-        // logic in createAndRegisterProvider so the instance lands in the
-        // correct typed array.
-        this.instMap.set(id, oldInstance);
-        this.providerConfigs.set(id, oldConfig);
-        const chatTypes = new Set(["openai", "openai_responses", "gemini", "anthropic"]);
-        const embeddingTypes = new Set(["openai_embedding", "gemini_embedding"]);
-        const rerankTypes = new Set(["cohere", "jina", "voyage", "generic"]);
-        const ttsTypes = new Set(["openai_tts"]);
-        const sttTypes = new Set(["openai_stt"]);
-        // The typed arrays hold the provider instances directly (not wrapped),
-        // so we push `oldInstance` cast to the matching interface.
-        if (chatTypes.has(type)) this.providerInsts.push(oldInstance as Provider);
-        else if (embeddingTypes.has(type)) this.embeddingInsts.push(oldInstance as EmbeddingProvider);
-        else if (rerankTypes.has(type)) this.rerankInsts.push(oldInstance as RerankProvider);
-        else if (ttsTypes.has(type)) this.ttsInsts.push(oldInstance as TTSProvider);
-        else if (sttTypes.has(type)) this.sttInsts.push(oldInstance as STTProvider);
+        this.restoreProviderInstance(id, oldInstance, oldConfig);
       }
       throw e;
     }
@@ -690,17 +672,67 @@ export class ProviderManager {
       );
     }
 
-    // Remove old provider
-    if (this.instMap.has(originProviderId)) {
+    // Snapshot the old state BEFORE any mutation so a failed load can be
+    // rolled back. The previous implementation removed the old instance
+    // first — if loadProvider threw, the system lost the provider entirely.
+    const oldInstance = this.instMap.get(originProviderId);
+    const oldConfig = this.providerConfigs.get(originProviderId);
+    const wasDefault = this.defaultProviderId === originProviderId;
+    const wasFallback = this.fallbackProviderIds.includes(originProviderId);
+
+    // Temporarily remove the old instance (kept alive for rollback).
+    if (oldInstance) {
       this.removeProviderInstance(originProviderId);
       this.providerConfigs.delete(originProviderId);
     }
 
-    // Load with new config
-    const config = { ...newConfig, id: newId };
-    await this.loadProvider(config);
+    try {
+      // Load with new config.
+      const config = { ...newConfig, id: newId };
+      await this.loadProvider(config);
 
-    this.notifyChange(newId, this.guessProviderType(config.type), "update");
+      // Migrate default/fallback references when the ID changed so they
+      // don't dangle (deleteProvider clears them; a rename must rewire).
+      if (newId !== originProviderId) {
+        if (wasDefault) {
+          this.setDefaultProvider(newId);
+          if (this.defaultProviderId !== newId) {
+            // New config is not a chat provider — clear the dangling
+            // default reference (same semantics as deleteProvider).
+            this.defaultProviderId = null;
+            this.sqliteStore?.setDefaultProvider("");
+          }
+        }
+        if (wasFallback) {
+          this.fallbackProviderIds = this.fallbackProviderIds.map(
+            (id) => (id === originProviderId ? newId : id),
+          );
+          this.sqliteStore?.setFallbackProviders(this.fallbackProviderIds);
+        }
+        // The old config row is stale after a rename — loadProvider only
+        // saved the new ID. Remove it so a restart doesn't resurrect the
+        // old provider.
+        this.sqliteStore?.deleteProviderConfig(originProviderId);
+      }
+
+      // New instance is live — now it's safe to dispose the old one
+      // (releases resources such as Gemini server-side cachedContents).
+      if (oldInstance?.dispose) {
+        try {
+          await oldInstance.dispose();
+        } catch (e) {
+          console.warn(`[ProviderManager] Failed to dispose old instance of ${originProviderId} after update: ${e}`);
+        }
+      }
+
+      this.notifyChange(newId, this.guessProviderType(config.type), "update");
+    } catch (e) {
+      // Rollback: restore the old instance and config.
+      if (oldInstance && oldConfig) {
+        this.restoreProviderInstance(originProviderId, oldInstance, oldConfig);
+      }
+      throw e;
+    }
   }
 
   /**
@@ -766,6 +798,35 @@ export class ProviderManager {
     this.sttInsts = this.sttInsts.filter(
       (p) => this.extractId(p.providerConfig) !== id
     );
+  }
+
+  /**
+   * Re-register a previously removed instance (rollback path of
+   * reloadProvider/updateProvider). The instance is already constructed, so
+   * we restore it directly. The category is derived from the CONFIG's own
+   * type — using the *requested* type would push an old instance into the
+   * wrong typed array when a reload/update changed the type.
+   */
+  private restoreProviderInstance(
+    id: string,
+    instance: AnyProvider,
+    config: Record<string, unknown>,
+  ): void {
+    this.instMap.set(id, instance);
+    this.providerConfigs.set(id, config);
+    const type = String(config.type ?? "");
+    const chatTypes = new Set(["openai", "openai_responses", "gemini", "anthropic"]);
+    const embeddingTypes = new Set(["openai_embedding", "gemini_embedding"]);
+    const rerankTypes = new Set(["cohere", "jina", "voyage", "generic"]);
+    const ttsTypes = new Set(["openai_tts"]);
+    const sttTypes = new Set(["openai_stt"]);
+    // The typed arrays hold the provider instances directly (not wrapped),
+    // so we push `instance` cast to the matching interface.
+    if (chatTypes.has(type)) this.providerInsts.push(instance as Provider);
+    else if (embeddingTypes.has(type)) this.embeddingInsts.push(instance as EmbeddingProvider);
+    else if (rerankTypes.has(type)) this.rerankInsts.push(instance as RerankProvider);
+    else if (ttsTypes.has(type)) this.ttsInsts.push(instance as TTSProvider);
+    else if (sttTypes.has(type)) this.sttInsts.push(instance as STTProvider);
   }
 
   /**

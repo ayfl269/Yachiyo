@@ -56,10 +56,17 @@ export class TextChunker {
   }
 
   private hardSplit(text: string, chunkSize: number): string[] {
-    if (text.length <= chunkSize) return [text];
+    // Defense in depth: a chunkSize <= 0 would make `i += chunkSize` never
+    // advance — an infinite synchronous loop blocking the whole process.
+    // Callers validate config, but stored/legacy KBs could still carry a
+    // bad value, so clamp instead of looping forever.
+    const safeChunkSize = Number.isFinite(chunkSize) && chunkSize >= 1
+      ? Math.floor(chunkSize)
+      : 500;
+    if (text.length <= safeChunkSize) return [text];
     const pieces: string[] = [];
-    for (let i = 0; i < text.length; i += chunkSize) {
-      pieces.push(text.slice(i, i + chunkSize));
+    for (let i = 0; i < text.length; i += safeChunkSize) {
+      pieces.push(text.slice(i, i + safeChunkSize));
     }
     return pieces;
   }

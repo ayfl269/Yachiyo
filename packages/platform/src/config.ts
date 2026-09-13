@@ -25,10 +25,14 @@ export interface OneBot11AdapterConfig extends AdapterConfigBase {
   reconnectInterval?: number;
   /** 鉴权 Token (可选) */
   accessToken?: string;
-  /** 自动通过好友请求 (默认 false) */
+  /** 自动通过好友请求 (默认不处理，请求保持待定) */
   autoApproveFriend?: boolean;
-  /** 自动通过加群请求/邀请 (默认 false) */
+  /** 自动拒绝好友请求 (默认不处理) */
+  autoRejectFriend?: boolean;
+  /** 自动通过加群请求/邀请 (默认不处理，请求保持待定) */
   autoApproveGroup?: boolean;
+  /** 自动拒绝加群请求/邀请 (默认不处理) */
+  autoRejectGroup?: boolean;
   /** 自动拒绝时的理由 (可选) */
   autoRejectReason?: string;
   /** 将戳一戳(poke)事件转为消息送入 pipeline (默认 true) */

@@ -40,6 +40,15 @@ interface QRLoginStatus {
 
 type WxMode = 'create' | 'scanning' | 'success' | 'error'
 
+// 后端对 /api/adapters 列表中的 secret 字段统一掩码为该占位符；
+// 保存时值为该占位符的字段不提交，后端会保留旧值。
+const SECRET_MASK = '********'
+const SECRET_FIELDS = ['appSecret', 'accessToken', 'token'] as const
+
+function maskSecret(value: string | undefined | null): string {
+  return value ? SECRET_MASK : ''
+}
+
 // ===== Helpers =====
 function getStatusText(status: string): string {
   switch (status.toLowerCase()) {
@@ -316,15 +325,15 @@ export default function MessagePlatformManager() {
       setOb11Path(adapter.config.path ?? '/ws')
       setOb11ReverseUrl(adapter.config.reverseUrl ?? 'ws://127.0.0.1:6700')
       setOb11ReconnectInterval(adapter.config.reconnectInterval ?? 5000)
-      setOb11AccessToken(adapter.config.accessToken ?? '')
+      setOb11AccessToken(maskSecret(adapter.config.accessToken))
     } else if (adapter.type === 'qqofficial') {
       setQqAppId(adapter.config.appId ?? '')
-      setQqAppSecret(adapter.config.appSecret ?? '')
+      setQqAppSecret(maskSecret(adapter.config.appSecret))
     } else if (adapter.type === 'weixin_oc') {
       const initialAccountId = adapter.config.accountId ?? ''
       const initialLoggedIn = !!adapter.config.token
       setEditingWxAccountId(initialAccountId)
-      setEditingWxToken(adapter.config.token ?? '')
+      setEditingWxToken(maskSecret(adapter.config.token))
       setEditingWxLoggedIn(initialLoggedIn)
       fetchQrLoginStatus(adapter.id).then((status) => {
         if (status) {
@@ -355,6 +364,12 @@ export default function MessagePlatformManager() {
     } else if (modalAdapterType === 'qqofficial') {
       config.appId = qqAppId.trim()
       config.appSecret = qqAppSecret.trim()
+    }
+    // 值仍为掩码占位符的 secret 字段不提交，后端会保留旧值
+    for (const field of SECRET_FIELDS) {
+      if (config[field] === SECRET_MASK) {
+        delete config[field]
+      }
     }
     return config
   }
@@ -712,6 +727,7 @@ export default function MessagePlatformManager() {
                   {showOb11Token ? <EyeOff size={15} /> : <Eye size={15} />}
                 </button>
               </div>
+              {isEditMode ? <span className="help-text">留空或保持 ******** 表示不修改</span> : null}
             </div>
           </div>
         )}
@@ -754,6 +770,7 @@ export default function MessagePlatformManager() {
                       {showQqAppSecret ? <EyeOff size={15} /> : <Eye size={15} />}
                     </button>
                   </div>
+                  <span className="help-text">留空或保持 ******** 表示不修改</span>
                 </div>
 
                 <button

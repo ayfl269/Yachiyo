@@ -96,6 +96,33 @@ function formatDate(dateStr: string | null): string {
   }
 }
 
+function pad2(n: number): string {
+  return String(n).padStart(2, '0')
+}
+
+/** 把存储的 UTC ISO 字符串转成 datetime-local 需要的本地墙钟格式 "YYYY-MM-DDTHH:mm"。 */
+function utcIsoToLocalInput(iso: string): string {
+  try {
+    const d = new Date(iso)
+    if (isNaN(d.getTime())) return ''
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+  } catch {
+    return ''
+  }
+}
+
+/** 把 datetime-local 的本地墙钟值按本地时区转成 UTC ISO 字符串；空值或非法输入返回空串。 */
+function localInputToUtcIso(value: string): string {
+  if (!value) return ''
+  try {
+    const d = new Date(value)
+    if (isNaN(d.getTime())) return ''
+    return d.toISOString()
+  } catch {
+    return ''
+  }
+}
+
 const emptyEditing: EditingTask = {
   type: 'reminder',
   title: '',
@@ -554,8 +581,8 @@ export default function SchedulerManager() {
               <input
                 type="datetime-local"
                 className="form-control"
-                value={editing.scheduledAt ? editing.scheduledAt.slice(0, 16) : ''}
-                onChange={(e) => setEditing({ ...editing, scheduledAt: e.target.value ? new Date(e.target.value + 'Z').toISOString() : '' })}
+                value={editing.scheduledAt ? utcIsoToLocalInput(editing.scheduledAt) : ''}
+                onChange={(e) => setEditing({ ...editing, scheduledAt: localInputToUtcIso(e.target.value) })}
               />
             </div>
           )}

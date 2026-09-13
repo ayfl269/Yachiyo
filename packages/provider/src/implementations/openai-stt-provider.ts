@@ -3,7 +3,8 @@ import { withRetry } from "../retry.js";
 import { ProviderAPIError } from "../errors.js";
 import { safeFetch } from "@yachiyo/common/ssrf-guard.js";
 import { readFileSync } from "fs";
-import { basename } from "path";
+import { basename, isAbsolute, relative, resolve } from "path";
+import { tmpdir } from "os";
 
 export interface OpenAISttProviderConfig {
   apiKey: string;
@@ -33,7 +34,22 @@ export class OpenAISttProvider extends STTProvider {
       const downloaded = await this.downloadAudio(audioUrl);
       filePath = downloaded;
     } else {
-      filePath = audioUrl;
+      // Local paths are attacker-influencable (the value comes from message
+      // content). Only files inside the OS temp directory may be read —
+      // that is where our own TTS/STT flow writes its intermediates.
+      // Anything else (e.g. /etc/passwd, ~/.ssh/id_rsa) must never be
+      // uploaded to the external transcription API.
+      filePath = resolve(audioUrl);
+      const base = resolve(tmpdir());
+      const rel = relative(base, filePath);
+      if (!isAbsolute(audioUrl) || rel.startsWith("..") || resolve(base, rel) !== filePath) {
+        throw new ProviderAPIError(
+          "openai_stt",
+          0,
+          "INVALID_AUDIO_PATH",
+          `STT: local audio path is outside the allowed temp directory: ${audioUrl}`,
+        );
+      }
     }
 
     const fileBuffer = readFileSync(filePath);
