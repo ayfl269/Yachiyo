@@ -51,10 +51,6 @@ jobs:
       - name: Run core tests
         run: pnpm run test
 
-      - name: Run Windows sandbox tests
-        if: matrix.os == 'windows-latest'
-        run: pnpm run test:windows
-
   security-audit:
     permissions:
       contents: read

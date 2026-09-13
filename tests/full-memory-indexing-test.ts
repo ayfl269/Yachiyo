@@ -161,9 +161,10 @@ async function run() {
     memoryStore: memoryStore,
   });
 
-  const toolOutput = (await searchTool.handler!("上下文压缩")) as any;
+  const toolOutput = (await searchTool.handler!(undefined, "上下文压缩")) as any; // (_ctx, query)
 
   const textOutput = toolOutput.content[0].type === "text" ? toolOutput.content[0].text : "";
+  console.log("  tool 输出前 500 字:", textOutput.slice(0, 500));
   assert(textOutput.includes("会话记忆索引"), "搜索结果包含 会话记忆索引 章节");
   assert(textOutput.includes("探讨记忆系统优化与索引架构"), "搜索结果展示了索引标题");
   assert(textOutput.includes("这是助手的第 1 条回答") || textOutput.includes("对话原文匹配") || textOutput.includes("上下文压缩"), "检索正常完成");

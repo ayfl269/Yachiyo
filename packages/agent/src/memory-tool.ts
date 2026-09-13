@@ -13,9 +13,10 @@
 
 import { createFunctionTool, type FunctionTool } from "./tool.js";
 import type { ContextWrapper, CallToolResult } from "./types.js";
-import { readFile, writeFile, mkdir } from "fs/promises";
+import { readFile, writeFile, mkdir, rename } from "fs/promises";
 import { existsSync } from "fs";
 import { join, dirname } from "path";
+import { randomUUID } from "crypto";
 import type { SqliteMemoryStore, MemoryType, MemoryScope } from "./sqlite-memory-store.js";
 import type { MemoryConsolidator } from "./memory-consolidator.js";
 import type { LongTermMemoryConsolidationJob } from "./long-term-consolidation-job.js";
@@ -59,13 +60,28 @@ async function loadStore(filePath: string): Promise<MemoryStore> {
     const data = await readFile(filePath, "utf-8");
     return JSON.parse(data) as MemoryStore;
   } catch {
+    // Corrupted file (likely a torn write). Back it up instead of leaving it
+    // in place — otherwise the next save would silently overwrite it with an
+    // empty store and destroy whatever data was recoverable.
+    try {
+      await rename(filePath, `${filePath}.corrupt-${Date.now()}`);
+    } catch { /* ignore — best-effort backup */ }
     return { entries: {} };
   }
 }
 
 async function saveStore(filePath: string, store: MemoryStore): Promise<void> {
   await mkdir(dirname(filePath), { recursive: true });
-  await writeFile(filePath, JSON.stringify(store, null, 2), "utf-8");
+  // Atomic write: write to a temp file then rename, so a crash mid-write
+  // cannot leave a truncated JSON file behind.
+  const tmpPath = `${filePath}.tmp-${randomUUID()}`;
+  await writeFile(tmpPath, JSON.stringify(store, null, 2), "utf-8");
+  try {
+    await rename(tmpPath, filePath);
+  } catch (e) {
+    try { await writeFile(filePath, JSON.stringify(store, null, 2), "utf-8"); } catch { /* ignore */ }
+    throw e;
+  }
 }
 
 function getMemoryFilePath(context: MemoryToolContext, workspaceRoot?: string): string {
@@ -135,6 +151,10 @@ export function createMemoryTool(optionsOrRoot?: string | CreateMemoryToolOption
           minimum: 0,
           maximum: 10,
         },
+        confirm: {
+          type: "boolean",
+          description: "Must be true for the destructive 'clear' action. Ignored by other actions.",
+        },
       },
       required: ["action"],
     },
@@ -145,22 +165,25 @@ export function createMemoryTool(optionsOrRoot?: string | CreateMemoryToolOption
       const value = args[2] != null ? String(args[2]) : undefined;
       const tags = (args[3] as string[]) ?? undefined;
       const query = args[4] != null ? String(args[4]) : undefined;
-      const limit = args[5] != null ? Number(args[5]) : 20;
+      const limitRaw = args[5] != null ? Number(args[5]) : NaN;
+      const limit = Number.isFinite(limitRaw) ? Math.min(100, Math.max(1, Math.trunc(limitRaw))) : 20;
       const memoryType = args[6] != null ? String(args[6]) as MemoryType : undefined;
       const scope = args[7] != null ? String(args[7]) as MemoryScope : undefined;
       const scopeId = args[8] != null ? String(args[8]) : undefined;
-      const priority = args[9] != null ? Number(args[9]) : undefined;
+      const priorityRaw = args[9] != null ? Number(args[9]) : NaN;
+      const priority = Number.isFinite(priorityRaw) ? Math.min(10, Math.max(0, Math.trunc(priorityRaw))) : undefined;
+      const confirm = args[10] === true;
       const context = getToolContext(_ctx);
 
       try {
         // Use SQLite store if available
         if (sqliteStore) {
-          return handleSqliteAction(sqliteStore, consolidator ?? null, ltmConsolidator ?? null, action, key, value, tags, query, limit, memoryType, scope, scopeId, priority, context);
+          return handleSqliteAction(sqliteStore, consolidator ?? null, ltmConsolidator ?? null, action, key, value, tags, query, limit, memoryType, scope, scopeId, priority, context, confirm);
         }
 
         // Fallback to JSON file store
         const filePath = getMemoryFilePath(context, workspaceRoot);
-        return await handleJsonAction(filePath, action, key, value, tags, query, limit);
+        return await handleJsonAction(filePath, action, key, value, tags, query, limit, confirm);
       } catch (e) {
         return { content: [{ type: "text", text: `error: Memory operation failed: ${e}` }], isError: true };
       }
@@ -185,7 +208,9 @@ function handleSqliteAction(
   scopeId?: string,
   priority?: number,
   context?: MemoryToolContext,
+  confirm: boolean = false,
 ): CallToolResult {
+  const personaId = context?.event?.personaId;
   switch (action) {
     case "save": {
       if (!key || !value) {
@@ -199,8 +224,11 @@ function handleSqliteAction(
         return { content: [{ type: "text", text: "error: memory type 'short_term' has been retired; use 'long_term' instead." }], isError: true };
       }
       // Auto-determine scope from context if not specified
-      const resolvedScope = scope ?? (context?.event?.personaId ? "persona" : "global");
-      const resolvedScopeId = scopeId ?? (context?.event?.personaId ?? "");
+      const resolvedScope = scope ?? (personaId ? "persona" : "global");
+      // A global-scope memory must NOT silently inherit the session's persona
+      // id — only persona scope carries a scope id.
+      const resolvedScopeId = scopeId
+        ?? (resolvedScope === "persona" ? (personaId ?? "") : "");
       store.save(key, value, tags, {
         memoryType: memoryType ?? "long_term",
         scope: resolvedScope,
@@ -214,7 +242,14 @@ function handleSqliteAction(
       if (!key) {
         return { content: [{ type: "text", text: "error: 'key' is required for recall action." }], isError: true };
       }
-      const entry = store.recall(key);
+      // Scope-aware recall: with an explicit scope filter only that scope is
+      // visible; otherwise prefer the session's persona scope and fall back
+      // to the unfiltered lookup (global + legacy rows).
+      const entry = (scope || scopeId)
+        ? store.recall(key, { scope, scopeId })
+        : (personaId
+          ? (store.recall(key, { scope: "persona", scopeId: personaId }) ?? store.recall(key))
+          : store.recall(key));
       if (!entry) {
         return { content: [{ type: "text", text: `Memory not found: "${key}"` }] };
       }
@@ -245,7 +280,14 @@ function handleSqliteAction(
       if (!key) {
         return { content: [{ type: "text", text: "error: 'key' is required for delete action." }], isError: true };
       }
-      const deleted = store.delete(key);
+      // Scope-aware delete: never silently delete another persona's memory.
+      // With an explicit scope filter, only that scope is targeted; otherwise
+      // prefer the session's persona scope and fall back to global scope.
+      const deleted = (scope || scopeId)
+        ? store.delete(key, { scope, scopeId })
+        : (personaId
+          ? (store.delete(key, { scope: "persona", scopeId: personaId }) || store.delete(key, { scope: "global" }))
+          : store.delete(key));
       if (!deleted) {
         return { content: [{ type: "text", text: `Memory not found: "${key}"` }], isError: true };
       }
@@ -269,7 +311,19 @@ function handleSqliteAction(
     }
 
     case "clear": {
-      const count = store.clear();
+      // Destructive operation exposed to the LLM: require explicit confirm
+      // and honour scope filters so a persona session cannot wipe global data.
+      if (!confirm) {
+        return {
+          content: [{
+            type: "text",
+            text: "error: 'clear' deletes memory entries permanently. Re-call this action with confirm=true to proceed" +
+              ((scope || scopeId) ? ` (clearing scope: ${scope ?? "any"}${scopeId ? `/${scopeId}` : ""})` : " (clearing ALL scopes)."),
+          }],
+          isError: true,
+        };
+      }
+      const count = store.clear((scope || scopeId) ? { scope, scopeId } : undefined);
       return { content: [{ type: "text", text: `Cleared ${count} memory entries.` }] };
     }
 
@@ -350,6 +404,7 @@ async function handleJsonAction(
   tags?: string[],
   query?: string,
   limit: number = 20,
+  confirm: boolean = false,
 ): Promise<CallToolResult> {
   const store = await loadStore(filePath);
   const now = new Date().toISOString();
@@ -435,6 +490,15 @@ async function handleJsonAction(
     }
 
     case "clear": {
+      if (!confirm) {
+        return {
+          content: [{
+            type: "text",
+            text: "error: 'clear' deletes memory entries permanently. Re-call this action with confirm=true to proceed.",
+          }],
+          isError: true,
+        };
+      }
       const count = Object.keys(store.entries).length;
       store.entries = {};
       await saveStore(filePath, store);

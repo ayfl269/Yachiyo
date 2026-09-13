@@ -245,6 +245,11 @@ function convertSchemaForGoogle(schema: Record<string, unknown>): Record<string,
 
   if (Array.isArray(originType)) {
     targetType = originType.find((t) => t !== "null") || "string";
+    // Gemini has no union types: express `["string", "null"]` as the
+    // non-null type plus `nullable: true` so the nullability survives.
+    if (originType.includes("null")) {
+      result.nullable = true;
+    }
   } else {
     targetType = originType;
   }

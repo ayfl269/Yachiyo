@@ -800,22 +800,41 @@ export class SqliteMemoryStore {
   /**
    * Recall a memory by key. Increments access_count (never bumps memory_version).
    * Superseded memories are not returned — their content lives on in the merged row.
+   *
+   * When `scope`/`scopeId` are given, only memories in that scope are visible
+   * (persona isolation). Without a filter, the most recently updated active
+   * row for the key is returned deterministically.
    */
-  recall(key: string): MemoryEntry | null {
+  recall(key: string, options?: {
+    scope?: MemoryScope;
+    scopeId?: string;
+  }): MemoryEntry | null {
+    let where = "key = ? AND status = 'active'";
+    const params: unknown[] = [key];
+    if (options?.scope) {
+      where += " AND scope = ?";
+      params.push(options.scope);
+    }
+    if (options?.scopeId) {
+      where += " AND scope_id = ?";
+      params.push(options.scopeId);
+    }
+
     const row = this.db.prepare(
-      `SELECT ${MEMORY_COLUMNS} FROM memories WHERE key = ? AND status = 'active'`
-    ).get(key) as MemoryRow | undefined;
+      `SELECT ${MEMORY_COLUMNS} FROM memories WHERE ${where} ORDER BY updated_at DESC LIMIT 1`
+    ).get(...params) as MemoryRow | undefined;
     if (!row) return null;
 
-    // Update access stats
+    // Update access stats for this row only (by id — a bare `WHERE key = ?`
+    // would hit every same-key row across scopes).
     this.db.prepare(`
-      UPDATE memories SET access_count = access_count + 1, last_accessed_at = ? WHERE key = ?
-    `).run(new Date().toISOString(), key);
+      UPDATE memories SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?
+    `).run(new Date().toISOString(), row.id);
 
     // Re-read to get updated access_count
     const updatedRow = this.db.prepare(
-      `SELECT ${MEMORY_COLUMNS} FROM memories WHERE key = ? AND status = 'active'`
-    ).get(key) as MemoryRow | undefined;
+      `SELECT ${MEMORY_COLUMNS} FROM memories WHERE id = ?`
+    ).get(row.id) as MemoryRow | undefined;
     return updatedRow ? this.rowToEntry(updatedRow) : null;
   }
 
@@ -888,13 +907,28 @@ export class SqliteMemoryStore {
 
   /**
    * Delete a memory by key. Also removes its cached embedding.
+   * When `scope`/`scopeId` are given, only rows in that scope are deleted
+   * (persona isolation — a delete without a filter would hit every scope).
    */
-  delete(key: string): boolean {
+  delete(key: string, options?: {
+    scope?: MemoryScope;
+    scopeId?: string;
+  }): boolean {
+    let where = "key = ?";
+    const params: unknown[] = [key];
+    if (options?.scope) {
+      where += " AND scope = ?";
+      params.push(options.scope);
+    }
+    if (options?.scopeId) {
+      where += " AND scope_id = ?";
+      params.push(options.scopeId);
+    }
     const result = this.db.transaction(() => {
       this.db.prepare(`
-        DELETE FROM memory_embeddings WHERE memory_id IN (SELECT id FROM memories WHERE key = ?)
-      `).run(key);
-      return this.db.prepare("DELETE FROM memories WHERE key = ?").run(key);
+        DELETE FROM memory_embeddings WHERE memory_id IN (SELECT id FROM memories WHERE ${where})
+      `).run(...params);
+      return this.db.prepare(`DELETE FROM memories WHERE ${where}`).run(...params);
     })();
     return result.changes > 0;
   }
@@ -964,18 +998,32 @@ export class SqliteMemoryStore {
   }
 
   /**
-   * Clear all user-visible memories. Preserves internal `system_*` keys
+   * Clear user-visible memories. Preserves internal `system_*` keys
    * (e.g. `system_last_consolidate_time`) so consolidation bookkeeping
    * survives a user-initiated "clear all" action.
+   * When `scope`/`scopeId` are given, only that scope is cleared.
    */
-  clear(): number {
-    const countBefore = this.count({ includeSuperseded: true });
+  clear(options?: {
+    scope?: MemoryScope;
+    scopeId?: string;
+  }): number {
+    const countBefore = this.count({ includeSuperseded: true, scope: options?.scope, scopeId: options?.scopeId });
+    let filter = "key NOT LIKE 'system_%'";
+    const params: unknown[] = [];
+    if (options?.scope) {
+      filter += " AND scope = ?";
+      params.push(options.scope);
+    }
+    if (options?.scopeId) {
+      filter += " AND scope_id = ?";
+      params.push(options.scopeId);
+    }
     this.db.transaction(() => {
-      this.db.prepare("DELETE FROM memory_tags WHERE memory_key NOT LIKE 'system_%'").run();
+      this.db.prepare(`DELETE FROM memory_tags WHERE memory_key IN (SELECT key FROM memories WHERE ${filter})`).run(...params);
       this.db.prepare(`
-        DELETE FROM memory_embeddings WHERE memory_id IN (SELECT id FROM memories WHERE key NOT LIKE 'system_%')
-      `).run();
-      this.db.prepare("DELETE FROM memories WHERE key NOT LIKE 'system_%'").run();
+        DELETE FROM memory_embeddings WHERE memory_id IN (SELECT id FROM memories WHERE ${filter})
+      `).run(...params);
+      this.db.prepare(`DELETE FROM memories WHERE ${filter}`).run(...params);
     })();
     return countBefore;
   }

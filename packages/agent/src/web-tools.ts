@@ -958,12 +958,29 @@ interface PageEntry {
   url: string;
   /** Optional human-friendly title. */
   title: string;
+  /**
+   * Owner session (unifiedMsgOrigin) that opened the page. Pages are only
+   * visible/operable to their owning session — a global registry shared
+   * across concurrent chat sessions would otherwise let one session
+   * drive another session's pages. Empty string = anonymous context
+   * (tests, tooling) which only ever sees its own pages.
+   */
+  owner: string;
 }
 
 const pageRegistry = new Map<string, PageEntry>();
 
 /** Maximum concurrent pages to prevent unbounded memory growth. */
 const MAX_BROWSER_PAGES = 10;
+
+/**
+ * Owner session of the current tool call. Used to scope the page registry:
+ * a session can only list and operate pages it opened itself.
+ */
+function getPageOwner(_ctx: unknown): string {
+  const webCtx = (_ctx as { context?: WebToolContext } | undefined)?.context;
+  return webCtx?.event?.unifiedMsgOrigin ?? "";
+}
 
 /**
  * Generate a short, unique page id. Uses crypto.randomUUID() truncated to
@@ -984,11 +1001,15 @@ function getSandboxPolicy(_ctx: unknown): SandboxPolicy | undefined {
 }
 
 /**
- * Resolve a page from the registry. Returns null if not found, and includes
- * the page id in the error message when missing so the agent can recover.
+ * Resolve a page from the registry for the given owner session. Returns null
+ * if not found, foreign-owned, or the id is stale; the caller reports the
+ * page id in the error so the agent can recover.
  */
-function getPage(pageId: string): PageEntry | null {
-  return pageRegistry.get(pageId) ?? null;
+function getPage(pageId: string, owner: string): PageEntry | null {
+  const entry = pageRegistry.get(pageId);
+  if (!entry) return null;
+  if (entry.owner !== owner) return null;
+  return entry;
 }
 
 // ── Browser Navigate Tool ──
@@ -1053,6 +1074,7 @@ export function createBrowserNavigateTool(): FunctionTool<WebToolContext> {
           openedAt: new Date().toISOString(),
           url,
           title,
+          owner: getPageOwner(_ctx),
         });
 
         // Auto-remove from registry when the page is closed externally.
@@ -1096,7 +1118,7 @@ export function createBrowserClickTool(): FunctionTool<WebToolContext> {
       const pageId = String(args[0] ?? "");
       const selector = String(args[1] ?? "");
       const timeout = args[2] != null ? Number(args[2]) : 10;
-      const entry = getPage(pageId);
+      const entry = getPage(pageId, getPageOwner(_ctx));
       if (!entry) {
         return { content: [{ type: "text", text: `error: Page not found: ${pageId}. Use browser_list_pages to see open pages, or browser_navigate to open a new one.` }], isError: true };
       }
@@ -1141,7 +1163,7 @@ export function createBrowserTypeTool(): FunctionTool<WebToolContext> {
       const clear = args[3] !== false;
       const delay = args[4] != null ? Number(args[4]) : 0;
       const pressEnter = args[5] === true;
-      const entry = getPage(pageId);
+      const entry = getPage(pageId, getPageOwner(_ctx));
       if (!entry) {
         return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
       }
@@ -1187,7 +1209,7 @@ export function createBrowserScreenshotTool(): FunctionTool<WebToolContext> {
       const pageId = String(args[0] ?? "");
       const fullPage = args[1] === true;
       const selector = args[2] != null ? String(args[2]) : undefined;
-      const entry = getPage(pageId);
+      const entry = getPage(pageId, getPageOwner(_ctx));
       if (!entry) {
         return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
       }
@@ -1236,7 +1258,7 @@ export function createBrowserSnapshotTool(): FunctionTool<WebToolContext> {
       const pageId = String(args[0] ?? "");
       const format = (args[1] as "text" | "html" | "accessibility") ?? "text";
       const maxLength = args[2] != null ? Number(args[2]) : 20000;
-      const entry = getPage(pageId);
+      const entry = getPage(pageId, getPageOwner(_ctx));
       if (!entry) {
         return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
       }
@@ -1298,7 +1320,7 @@ export function createBrowserGetTextTool(): FunctionTool<WebToolContext> {
       const selector = String(args[1] ?? "");
       const attribute = args[2] != null ? String(args[2]) : undefined;
       const maxResults = args[3] != null ? Number(args[3]) : 50;
-      const entry = getPage(pageId);
+      const entry = getPage(pageId, getPageOwner(_ctx));
       if (!entry) {
         return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
       }
@@ -1351,7 +1373,7 @@ export function createBrowserExecuteScriptTool(): FunctionTool<WebToolContext> {
     handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
       const pageId = String(args[0] ?? "");
       const script = String(args[1] ?? "");
-      const entry = getPage(pageId);
+      const entry = getPage(pageId, getPageOwner(_ctx));
       if (!entry) {
         return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
       }
@@ -1392,7 +1414,7 @@ export function createBrowserPressKeyTool(): FunctionTool<WebToolContext> {
     handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
       const pageId = String(args[0] ?? "");
       const key = String(args[1] ?? "");
-      const entry = getPage(pageId);
+      const entry = getPage(pageId, getPageOwner(_ctx));
       if (!entry) {
         return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
       }
@@ -1433,7 +1455,7 @@ export function createBrowserWaitForTool(): FunctionTool<WebToolContext> {
       const selector = args[1] != null ? String(args[1]) : undefined;
       const timeout = args[2] != null ? Number(args[2]) : 10;
       const state = (args[3] as "attached" | "visible" | "hidden") ?? "visible";
-      const entry = getPage(pageId);
+      const entry = getPage(pageId, getPageOwner(_ctx));
       if (!entry) {
         return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
       }
@@ -1469,11 +1491,10 @@ export function createBrowserListPagesTool(): FunctionTool<WebToolContext> {
       required: [],
     },
     active: true,
-    handler: async (): Promise<CallToolResult> => {
-      if (pageRegistry.size === 0) {
-        return { content: [{ type: "text", text: "No open browser pages. Use browser_navigate to open one." }] };
-      }
-      // Clean up closed pages before listing.
+    handler: async (_ctx: unknown): Promise<CallToolResult> => {
+      const owner = getPageOwner(_ctx);
+      // Clean up closed pages before listing (any owner — reclaiming dead
+      // entries is safe and keeps the global cap from filling up).
       const closed: string[] = [];
       for (const [id, entry] of pageRegistry) {
         if (entry.page.isClosed()) {
@@ -1483,11 +1504,15 @@ export function createBrowserListPagesTool(): FunctionTool<WebToolContext> {
       }
       for (const id of closed) pageRegistry.delete(id);
 
-      if (pageRegistry.size === 0) {
-        return { content: [{ type: "text", text: "No open browser pages (all were closed). Use browser_navigate to open one." }] };
+      // Only this session's pages are visible — other sessions' pages are
+      // neither listed nor operable.
+      const owned = [...pageRegistry.entries()].filter(([, entry]) => entry.owner === owner);
+
+      if (owned.length === 0) {
+        return { content: [{ type: "text", text: "No open browser pages. Use browser_navigate to open one." }] };
       }
 
-      const lines: string[] = [`Open browser pages (${pageRegistry.size}/${MAX_BROWSER_PAGES}):`];
+      const lines: string[] = [`Open browser pages (${owned.length}/${MAX_BROWSER_PAGES}):`];
       for (const [id, entry] of pageRegistry) {
         const title = entry.title || "(untitled)";
         const url = entry.url || "(no url)";
@@ -1516,19 +1541,20 @@ export function createBrowserClosePageTool(): FunctionTool<WebToolContext> {
       const pageId = args[0] != null ? String(args[0]) : undefined;
 
       if (!pageId) {
-        // Close all pages.
-        const count = pageRegistry.size;
-        if (count === 0) {
+        // Close this session's pages only — never touch other sessions'.
+        const owner = getPageOwner(_ctx);
+        const owned = [...pageRegistry.entries()].filter(([, entry]) => entry.owner === owner);
+        if (owned.length === 0) {
           return { content: [{ type: "text", text: "No open browser pages to close." }] };
         }
-        for (const [id, entry] of pageRegistry) {
+        for (const [id, entry] of owned) {
           try { await entry.context.close(); } catch { /* ignore */ }
           pageRegistry.delete(id);
         }
-        return { content: [{ type: "text", text: `Closed all ${count} browser page(s).` }] };
+        return { content: [{ type: "text", text: `Closed all ${owned.length} browser page(s).` }] };
       }
 
-      const entry = getPage(pageId);
+      const entry = getPage(pageId, getPageOwner(_ctx));
       if (!entry) {
         return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
       }
@@ -1598,7 +1624,7 @@ export function createBrowserSelectTool(): FunctionTool<WebToolContext> {
       const index = args[4] != null ? Number(args[4]) : undefined;
       const timeout = args[5] != null ? Number(args[5]) : 10;
 
-      const entry = getPage(pageId);
+      const entry = getPage(pageId, getPageOwner(_ctx));
       if (!entry) {
         return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
       }
@@ -1683,7 +1709,7 @@ export function createBrowserUploadTool(): FunctionTool<WebToolContext> {
       const files = args[2];
       const timeout = args[3] != null ? Number(args[3]) : 10;
 
-      const entry = getPage(pageId);
+      const entry = getPage(pageId, getPageOwner(_ctx));
       if (!entry) {
         return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
       }
@@ -1738,7 +1764,7 @@ export function createBrowserHoverTool(): FunctionTool<WebToolContext> {
       const selector = String(args[1] ?? "");
       const timeout = args[2] != null ? Number(args[2]) : 10;
 
-      const entry = getPage(pageId);
+      const entry = getPage(pageId, getPageOwner(_ctx));
       if (!entry) {
         return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
       }
@@ -1786,7 +1812,7 @@ export function createBrowserDragAndDropTool(): FunctionTool<WebToolContext> {
       const targetSelector = String(args[2] ?? "");
       const timeout = args[3] != null ? Number(args[3]) : 10;
 
-      const entry = getPage(pageId);
+      const entry = getPage(pageId, getPageOwner(_ctx));
       if (!entry) {
         return { content: [{ type: "text", text: `error: Page not found: ${pageId}.` }], isError: true };
       }

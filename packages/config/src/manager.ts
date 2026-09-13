@@ -86,6 +86,8 @@ export interface AgentConfig {
   sessionWhitelistEnabled: boolean;
   // Platform tools: expose sensitive group admin write operations (ban/kick/notice...) to the agent
   platformAdminToolsEnabled: boolean;
+  // Proxy management: let the agent redirect all outbound traffic at runtime
+  proxyManageToolEnabled: boolean;
 }
 
 export interface ConfigInfo {
@@ -287,6 +289,8 @@ export class ConfigManager {
       sessionWhitelistEnabled: false,
       // Platform tools
       platformAdminToolsEnabled: true,
+      // Proxy management
+      proxyManageToolEnabled: true,
     };
   }
 }

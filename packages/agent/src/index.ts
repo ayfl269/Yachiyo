@@ -370,15 +370,13 @@ export {
 // Sandbox
 export {
   applySandboxPolicyToToolSet,
+  intersectSandboxPolicies,
   isPathAllowed,
   isDomainAllowed,
   DEFAULT_DYNAMIC_SUBAGENT_POLICY,
   DEFAULT_PRECONFIGURED_SUBAGENT_POLICY,
-  buildLinuxSandboxCommand,
-  setupLinuxCgroup,
-  teardownLinuxCgroup,
 } from "./sandbox.js";
-export type { SandboxPolicy, ProcessSandboxConfig } from "./sandbox.js";
+export type { SandboxPolicy } from "./sandbox.js";
 
 // Coordination
 export {

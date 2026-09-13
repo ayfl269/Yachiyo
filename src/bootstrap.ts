@@ -273,17 +273,17 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
 
   // 注册 Web 工具 (web_fetch, web_search, http_request)
   for (const tool of getWebTools()) {
-    toolManager.funcList.push(tool);
+    toolManager.addToolInstance(tool);
   }
 
   // 注册计算机工具 (file_read/write/edit, list_dir, delete, move, grep, shell, python, node)
   for (const tool of getRuntimeComputerTools("local", workspaceRoot)) {
-    toolManager.funcList.push(tool);
+    toolManager.addToolInstance(tool);
   }
 
   // 注册交互式终端工具 (interactive_shell_start/send/read/list/close)
   for (const tool of getInteractiveShellTools(workspaceRoot)) {
-    toolManager.funcList.push(tool);
+    toolManager.addToolInstance(tool);
   }
 
   // 注册 Memory 工具 + 记忆整理器
@@ -318,7 +318,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
   });
 
   const memoryTool = createMemoryTool({ workspaceRoot, sqliteStore: sqliteMemoryStore, consolidator: memoryConsolidator, ltmConsolidator: ltmConsolidationJob });
-  toolManager.funcList.push(memoryTool);
+  toolManager.addToolInstance(memoryTool);
 
   // 配置变更时同步 ProviderManager 和 MemoryConsolidator
   configManager.onChange((_configId: string, changeType: string) => {
@@ -379,37 +379,40 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
 
   // 注册代码搜索工具
   const codeSearchTool = createCodeSearchTool(workspaceRoot);
-  toolManager.funcList.push(codeSearchTool);
+  toolManager.addToolInstance(codeSearchTool);
 
   // 注册会话搜索工具 (搜索历史会话标题和消息内容，以及高层次记忆索引)
   const conversationSearchTool = createConversationSearchTool({
     store: sqliteConversationStore,
     memoryStore: sqliteMemoryStore,
   });
-  toolManager.funcList.push(conversationSearchTool);
+  toolManager.addToolInstance(conversationSearchTool);
 
   // 注册向用户提问工具 (澄清需求、提供选项)
   const askUserTool = createAskUserTool();
-  toolManager.funcList.push(askUserTool);
+  toolManager.addToolInstance(askUserTool);
 
-  // 注册代理管理工具 (运行时启用/停用/修改代理)
-  const proxyTool = createProxyTool();
-  toolManager.funcList.push(proxyTool);
+  // 注册代理管理工具 (运行时启用/停用/修改代理)。
+  // proxy_manage 会重定向整个进程的出站流量，受配置开关控制并支持热增删。
+  let proxyToolEnabled = activeConfig.proxyManageToolEnabled ?? true;
+  if (proxyToolEnabled) {
+    toolManager.addToolInstance(createProxyTool());
+  }
 
   // 注册子代理管理工具 (create/list/delete_subagent)
   for (const tool of getSubAgentManagementTools(workspaceRoot)) {
-    toolManager.funcList.push(tool);
+    toolManager.addToolInstance(tool);
   }
 
   // 注册定时任务工具 + 任务调度服务
   const sqliteSchedulerTaskStore = new SqliteSchedulerTaskStore(dbManager.getDb("scheduler"));
   const schedulerTool = createSchedulerTool({ sqliteStore: sqliteSchedulerTaskStore });
-  toolManager.funcList.push(schedulerTool);
+  toolManager.addToolInstance(schedulerTool);
   const taskScheduler = new TaskScheduler(sqliteSchedulerTaskStore);
 
   // 注册跨平台消息发送工具
   const crossPlatformSendTool = createCrossPlatformSendTool({ adapterLookup: adapterRegistry });
-  toolManager.funcList.push(crossPlatformSendTool);
+  toolManager.addToolInstance(crossPlatformSendTool);
 
   // 注册 QQ (OneBot11) 平台互动工具（戳一戳/表情回应/点赞/撤回/转发/群信息/群管理）
   const qqAdapterLookup: QQAdapterLookup = {
@@ -424,24 +427,38 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
     adapterLookup: qqAdapterLookup,
     adminEnabled: qqAdminToolEnabled,
   })) {
-    toolManager.funcList.push(tool);
+    toolManager.addToolInstance(tool);
   }
 
   // 配置变更时热增删敏感的群管理工具（关闭时从工具列表移除，模型不可见）
   configManager.onChange((_configId: string, changeType: string) => {
     if (changeType !== "update") return;
     const cfg = configManager.getActiveConfig();
-    const enabled = cfg?.platformAdminToolsEnabled ?? true;
-    if (enabled === qqAdminToolEnabled) return;
-    qqAdminToolEnabled = enabled;
-    if (enabled) {
-      toolManager.funcList.push(
-        createQQGroupAdminTool({ adapterLookup: qqAdapterLookup, adminEnabled: true }),
-      );
-      console.log("[Bootstrap] qq_group_admin tool registered (platformAdminToolsEnabled=true).");
-    } else {
-      toolManager.removeFunc(QQ_GROUP_ADMIN_TOOL_NAME);
-      console.log("[Bootstrap] qq_group_admin tool removed (platformAdminToolsEnabled=false).");
+
+    const adminEnabled = cfg?.platformAdminToolsEnabled ?? true;
+    if (adminEnabled !== qqAdminToolEnabled) {
+      qqAdminToolEnabled = adminEnabled;
+      if (adminEnabled) {
+        toolManager.addToolInstance(
+          createQQGroupAdminTool({ adapterLookup: qqAdapterLookup, adminEnabled: true }),
+        );
+        console.log("[Bootstrap] qq_group_admin tool registered (platformAdminToolsEnabled=true).");
+      } else {
+        toolManager.removeFunc(QQ_GROUP_ADMIN_TOOL_NAME);
+        console.log("[Bootstrap] qq_group_admin tool removed (platformAdminToolsEnabled=false).");
+      }
+    }
+
+    const proxyEnabled = cfg?.proxyManageToolEnabled ?? true;
+    if (proxyEnabled !== proxyToolEnabled) {
+      proxyToolEnabled = proxyEnabled;
+      if (proxyEnabled) {
+        toolManager.addToolInstance(createProxyTool());
+        console.log("[Bootstrap] proxy_manage tool registered (proxyManageToolEnabled=true).");
+      } else {
+        toolManager.removeFunc("proxy_manage");
+        console.log("[Bootstrap] proxy_manage tool removed (proxyManageToolEnabled=false).");
+      }
     }
   });
 
@@ -449,7 +466,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
   const savePlatformFileTool = createSavePlatformFileTool({
     filesRoot: join(dataDir, "received_files"),
   });
-  toolManager.funcList.push(savePlatformFileTool);
+  toolManager.addToolInstance(savePlatformFileTool);
 
   // 6. 创建管线调度器
   const pipelineContext: PipelineContext = {

@@ -365,6 +365,23 @@ export class SqliteConversationStore extends ConversationStore {
     return row ? this.rowToConversation(row) : null;
   }
 
+  override async getConversationsByIds(ids: string[]): Promise<Map<string, ConversationRecord>> {
+    const map = new Map<string, ConversationRecord>();
+    if (ids.length === 0) return map;
+    // Single query per chunk (SQLite binds max 999 parameters by default).
+    const CHUNK = 500;
+    const sql = "SELECT id, unified_msg_origin, persona_id, history, platform_id, title, token_usage, last_indexed_at, created_at, updated_at FROM conversations WHERE id IN";
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const chunk = ids.slice(i, i + CHUNK);
+      const placeholders = chunk.map(() => "?").join(",");
+      const rows = this.db.prepare(`${sql} (${placeholders})`).all(...chunk) as ConversationRow[];
+      for (const row of rows) {
+        map.set(row.id, this.rowToConversation(row));
+      }
+    }
+    return map;
+  }
+
   async getAllConversations(): Promise<ConversationRecord[]> {
     const rows = this.db.prepare("SELECT id, unified_msg_origin, persona_id, history, platform_id, title, token_usage, last_indexed_at, created_at, updated_at FROM conversations ORDER BY updated_at DESC").all() as ConversationRow[];
     return rows.map((r) => this.rowToConversation(r));

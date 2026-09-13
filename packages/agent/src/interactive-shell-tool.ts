@@ -147,16 +147,14 @@ export function interactiveShellStart(
   const args = isWindows ? ["/Q"] : []; // /Q disables echo on cmd; sh needs no flags for piped input
 
   // If a specific command is provided, we still launch the shell and let the
-  // caller send it via stdin. This keeps the session interactive. However, if
-  // a command is given we pass it with -c so non-interactive one-shots work too.
+  // caller send more input via stdin. Windows uses `/K` (cmd stays alive
+  // after the command). On Unix we spawn a bare sh and feed the command via
+  // stdin below — sh executes it and keeps reading further input, matching
+  // the tool's "stays alive" contract (`sh -c` would exit after the command).
   let finalExe = exe;
   let finalArgs = args;
-  if (command && command.trim()) {
-    if (isWindows) {
-      finalArgs = ["/Q", "/K", command];
-    } else {
-      finalArgs = ["-c", command];
-    }
+  if (command && command.trim() && isWindows) {
+    finalArgs = ["/Q", "/K", command];
   }
 
   const child = spawn(finalExe, finalArgs, {
@@ -166,7 +164,12 @@ export function interactiveShellStart(
     windowsHide: false,
   });
 
-  const id = randomUUID().slice(0, 8);
+  // Collision-proof id: re-draw if the 8-char prefix is already live so a
+  // collision cannot silently orphan the previous session's child process.
+  let id = randomUUID().slice(0, 8);
+  while (sessions.has(id)) {
+    id = randomUUID().slice(0, 8);
+  }
   const session: InteractiveSession = {
     id,
     child,
@@ -210,14 +213,23 @@ export function interactiveShellStart(
   });
 
   sessions.set(id, session);
+  // Unix: feed the initial command through stdin so the bare sh executes it
+  // and stays alive for subsequent input (see comment above).
+  if (command && command.trim() && !isWindows) {
+    child.stdin?.write(command + "\n");
+  }
   return id;
 }
 
 /**
  * Send input to an interactive session's stdin.
  *
- * Returns true if the input was written, false if the session was not found
- * or its stdin is no longer writable (process exited).
+ * Returns true if the input was accepted, false if the session was not found
+ * or its stdin is no longer writable (process exited). A `false` return from
+ * `stdin.write()` itself only signals kernel-buffer backpressure (the data is
+ * buffered internally and will be flushed) — that is NOT a failure, so we
+ * don't propagate it; a genuine write error marks the session closed via the
+ * stream's 'error' event.
  */
 export function interactiveShellSend(
   id: string,
@@ -229,11 +241,17 @@ export function interactiveShellSend(
   if (session.closed || session.exitCode !== null) return false;
 
   const stdin = session.child.stdin;
-  if (!stdin || stdin.destroyed) return false;
+  if (!stdin || stdin.destroyed || !stdin.writable) return false;
 
   const text = options.addNewline === false ? input : input + "\n";
   session.lastActivityAt = Date.now();
-  return stdin.write(text);
+  // A stdin write failure (EPIPE etc.) means the child is gone — record it
+  // instead of letting the unhandled 'error' event crash the process.
+  stdin.once("error", () => {
+    session.closed = true;
+  });
+  stdin.write(text);
+  return true;
 }
 
 /**
@@ -257,14 +275,15 @@ export async function interactiveShellRead(
   const clear = options.clear !== false; // default true
 
   // If there's nothing to read yet, wait a bit for output to arrive.
-  if (session.stdoutSinceRead.length === 0 && session.stderrSinceRead.length === 0 && session.exitCode === null) {
+  if (session.stdoutSinceRead.length === 0 && session.stderrSinceRead.length === 0 && session.exitCode === null && session.signalCode === null) {
     const deadline = Date.now() + waitMs;
     // Poll every 20ms — simple and dependency-free.
     while (
       Date.now() < deadline &&
       session.stdoutSinceRead.length === 0 &&
       session.stderrSinceRead.length === 0 &&
-      session.exitCode === null
+      session.exitCode === null &&
+      session.signalCode === null
     ) {
       await new Promise((r) => setTimeout(r, 20));
     }
@@ -273,7 +292,9 @@ export async function interactiveShellRead(
   const result = {
     stdout: session.stdoutSinceRead,
     stderr: session.stderrSinceRead,
-    closed: session.closed || session.exitCode !== null,
+    // A signal-terminated child exits with code=null + signal set (e.g.
+    // SIGTERM from interactiveShellClose) — that IS a closed session.
+    closed: session.closed || session.exitCode !== null || session.signalCode !== null,
     exitCode: session.exitCode,
   };
 
@@ -545,7 +566,6 @@ export function createInteractiveShellStartTool(
       if (!isSandbox && cwd) {
         try {
           finalCwd = normalizeRwPath(cwd, {
-            localEnv: !isSandbox,
             workspaceRoot: root,
             sandboxPolicy: context.sandboxPolicy,
           });

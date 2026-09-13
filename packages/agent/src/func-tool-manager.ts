@@ -100,6 +100,20 @@ export class FunctionToolManager {
     }
   }
 
+  /**
+   * Register an already-built FunctionTool instance (dedupes by name).
+   *
+   * Native tools and dynamically created handoff tools arrive as complete
+   * FunctionTool objects, so they cannot go through addFunc() (which builds
+   * a tool from primitives). Always use this method instead of pushing to
+   * funcList directly — direct pushes bypass toolIndex and break getFunc().
+   */
+  addToolInstance(tool: FunctionTool): void {
+    this.removeFunc(tool.name);
+    this.funcList.push(tool);
+    this.indexAdd(tool);
+  }
+
   getFunc(name: string): FunctionTool | undefined {
     // O(1) average lookup via the name index. Falls back to a full scan only
     // if the index is somehow out of sync (defensive — shouldn't happen).
@@ -112,7 +126,8 @@ export class FunctionToolManager {
       // Fallback: return last matching tool regardless of active state
       return tools[tools.length - 1];
     }
-    return undefined;
+    return this.funcList.find((f) => f.name === name && (f.active ?? true))
+      ?? this.funcList.find((f) => f.name === name);
   }
 
   // ---- Index maintenance ----
@@ -241,8 +256,15 @@ export class FunctionToolManager {
       const mcpClient = new MCPClient();
       mcpClient.name = name;
 
-      await mcpClient.connectToServer(cfg, name);
-      const toolsRes = await mcpClient.listToolsAndSave();
+      try {
+        await mcpClient.connectToServer(cfg, name);
+        await mcpClient.listToolsAndSave();
+      } catch (e) {
+        // Don't leak the transport if listing tools fails after a successful
+        // connect — close the client before propagating.
+        try { await mcpClient.close(); } catch { /* ignore */ }
+        throw e;
+      }
 
       // Remove previous tools from this MCP server. Use in-place splice
       // (rather than reassigning funcList) so the toolIndex stays in sync
@@ -262,7 +284,7 @@ export class FunctionToolManager {
         this.indexAdd(funcTool);
       }
 
-      const toolNames = toolsRes.tools.map((t) => t.name);
+      const toolNames = mcpClient.tools.map((t) => t.name);
       console.info(`Connected to MCP server ${name}, Tools: ${toolNames}`);
 
       this.mcpServerRuntime.set(name, {

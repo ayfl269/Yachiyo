@@ -149,7 +149,13 @@ export function createAskUserTool(): FunctionTool<AskUserToolContext> {
 
       // Return a result for the LLM — it should stop and wait for the user's reply
       const resultLines: string[] = [];
-      resultLines.push("Question sent to user successfully.");
+      if (ctx?.send) {
+        resultLines.push("Question sent to user successfully.");
+      } else {
+        // No send channel available (e.g. tests, headless runs): say so
+        // instead of falsely reporting success.
+        resultLines.push("NOTE: No message channel was available — the question could NOT be delivered to the user. Ask again in a context with a message channel.");
+      }
       resultLines.push(`Question: ${question}`);
       if (options && options.length >= 2) {
         resultLines.push(`Options: ${options.map((o, i) => `${i + 1}. ${o}`).join(", ")}`);

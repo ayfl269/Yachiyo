@@ -28,7 +28,10 @@ const MIME_TO_EXT: Record<string, string> = {
   "image/gif": ".gif",
   "image/webp": ".webp",
   "image/bmp": ".bmp",
-  "image/svg+xml": ".svg",
+  // "image/svg+xml" deliberately NOT mapped: SVG can embed scripts, so
+  // caching it under a name that could later be served inline is a stored-XSS
+  // risk. SVG content falls back to the ".png" extension (harmless: it simply
+  // won't render as an image).
 };
 
 const CACHE_EXPIRY_MS = 3600 * 1000; // 1 hour
@@ -122,7 +125,11 @@ export class ToolImageCache {
     await this.ensureDir();
 
     const ext = this.getFileExtension(mimeType);
-    const fileName = `${toolCallId}_${index}${ext}`;
+    // Sanitize the toolCallId: it normally comes from the provider
+    // ("call_xxx"), but strip path separators / dots anyway so a hostile id
+    // cannot escape the cache directory.
+    const safeToolCallId = toolCallId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || "call";
+    const fileName = `${safeToolCallId}_${index}${ext}`;
     const filePath = path.join(this.cacheDir, fileName);
 
     const imageBuffer = Buffer.from(base64Data, "base64");
@@ -278,13 +285,15 @@ export class ToolImageCache {
       // being actively read.
       if (totalSize > this.maxTotalSizeBytes || survivors.length > this.maxFileCount) {
         survivors.sort((a, b) => Math.max(a.atime, a.mtime) - Math.max(b.atime, b.mtime));
+        let remaining = survivors.length;
         for (const entry of survivors) {
-          if (totalSize <= this.maxTotalSizeBytes && survivors.length <= this.maxFileCount) break;
+          if (totalSize <= this.maxTotalSizeBytes && remaining <= this.maxFileCount) break;
           const accessTime = Math.max(entry.atime, entry.mtime);
           if (accessTime > graceCutoff) continue; // grace period
           try {
             await fs.unlink(path.join(this.cacheDir, entry.name));
             totalSize -= entry.size;
+            remaining--; // stop once the count is back under the cap
             this.evictedCount++;
           } catch {
             // ignore — best-effort

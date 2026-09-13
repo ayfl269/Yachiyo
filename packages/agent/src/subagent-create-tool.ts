@@ -164,13 +164,13 @@ export function createSubAgentCreateTool(_workspaceRoot?: string): FunctionTool<
       // `handoff` is an already-built FunctionTool instance; addFunc() is
       // for building a new tool from (name, args, desc, handler) primitives
       // and would create an invalid tool (handler=undefined) when passed an
-      // instance. Push directly, deduping by name first so re-creating a
-      // same-named sub-agent replaces the old handoff instead of stacking.
+      // instance. addToolInstance() dedupes by name (so re-creating a
+      // same-named sub-agent replaces the old handoff) and keeps toolIndex
+      // in sync — pushing to funcList directly would break getFunc().
       const wrapper = _ctx as ContextWrapper<SubAgentCreateToolContext> | undefined;
       const toolMgr = wrapper?._toolMgr;
       if (toolMgr) {
-        toolMgr.removeFunc(handoff.name);
-        toolMgr.funcList.push(handoff);
+        toolMgr.addToolInstance(handoff);
       }
       const funcToolSet = wrapper?._funcToolSet;
       if (funcToolSet) {

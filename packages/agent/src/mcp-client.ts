@@ -318,13 +318,11 @@ export class MCPClient {
 
   private mcpServerConfig: Record<string, unknown> | null = null;
   private serverName: string | null = null;
-  private reconnectLock = false;
-  private reconnecting = false;
   /**
    * Promise of the in-flight reconnection. Concurrent callers await this
-   * single promise instead of polling `reconnecting` on a timer, which
-   * eliminates the 50ms setTimeout race and wakes up immediately when
-   * reconnection completes (or fails).
+   * single promise instead of polling on a timer, which eliminates the
+   * 50ms setTimeout race and wakes up immediately when reconnection
+   * completes (or fails).
    */
   private reconnectPromise: Promise<void> | null = null;
 
@@ -504,8 +502,6 @@ export class MCPClient {
     }
 
     this.reconnectPromise = (async () => {
-      this.reconnectLock = true;
-      this.reconnecting = true;
       try {
         // Save old session for later cleanup
         if (this.session) {
@@ -521,8 +517,6 @@ export class MCPClient {
           await this.listToolsAndSave();
         }
       } finally {
-        this.reconnectLock = false;
-        this.reconnecting = false;
         this.reconnectPromise = null;
       }
     })();

@@ -211,41 +211,46 @@ async function handleSend(
     return formatError("Missing required parameter: message (must be non-empty)");
   }
 
-  // Resolve the target adapter
-  const platformId = params.platform_id ?? ctx.event?.platformId;
+  // Resolve the target adapter. Priority:
+  //   1. explicit platform_id
+  //   2. UMO prefix match (the documented "auto-detected from the UMO prefix"
+  //      behaviour — the current session's platform must not win here, or a
+  //      cross-platform send would go out through the wrong adapter)
+  //   3. current session's adapter (legacy fallback, only when the UMO
+  //      prefix matches no adapter)
   let adapter: ReturnType<AdapterLookup["getAdapter"]>;
 
-  if (platformId) {
-    // Use specified platform_id
-    adapter = lookup.getAdapter(platformId);
+  if (params.platform_id) {
+    adapter = lookup.getAdapter(params.platform_id);
     if (!adapter) {
-      return formatError(`Adapter not found: platform_id "${platformId}"`);
+      return formatError(`Adapter not found: platform_id "${params.platform_id}"`);
     }
   } else {
-    // Auto-detect from UMO prefix
     const platformType = targetUmo.split(":")[0];
-    if (!platformType) {
-      return formatError(
-        `Cannot determine platform type from UMO: "${targetUmo}". ` +
-          `Please provide platform_id explicitly.`,
-      );
-    }
+    const candidates = platformType
+      ? lookup.getAllAdapters().filter((a) => a.meta().name === platformType)
+      : [];
 
-    const candidates = lookup.getAllAdapters().filter((a) => a.meta().name === platformType);
-    if (candidates.length === 0) {
-      return formatError(
-        `No adapter found for platform type "${platformType}" (from UMO prefix). ` +
-          `Use 'list_platforms' to see available adapters.`,
-      );
-    }
-    if (candidates.length > 1) {
+    if (candidates.length === 1) {
+      adapter = candidates[0];
+    } else if (candidates.length > 1) {
       const ids = candidates.map((a) => a.meta().id).join(", ");
       return formatError(
         `Multiple adapters found for platform "${platformType}" (IDs: ${ids}). ` +
           `Please specify platform_id to disambiguate.`,
       );
+    } else {
+      // No UMO-prefix match (or unparseable prefix): fall back to the current
+      // session's adapter, then error out if that's unavailable too.
+      const fallbackId = ctx.event?.platformId;
+      adapter = fallbackId ? lookup.getAdapter(fallbackId) : undefined;
+      if (!adapter) {
+        return formatError(
+          `Cannot determine platform type from UMO: "${targetUmo}". ` +
+            `Please provide platform_id explicitly.`,
+        );
+      }
     }
-    adapter = candidates[0];
   }
 
   if (!adapter.isRunning) {

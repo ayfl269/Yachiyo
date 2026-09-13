@@ -87,6 +87,20 @@ export interface ContextWrapper<TContext = unknown> {
    * usage). `recordTrace` helpers must no-op when this is undefined.
    */
   _traceSpan?: import("@yachiyo/common/trace.js").TraceSpan;
+  /**
+   * Handoff chain depth of the current run. The main agent runs at depth 0;
+   * each `transfer_to_*` increments it. The tool executor refuses handoffs
+   * beyond {@link MAX_HANDOFF_DEPTH} to bound recursion.
+   */
+  _handoffDepth?: number;
+  /**
+   * Effective sandbox policy governing the current run. Set by the tool
+   * executor when a handoff creates a sub-agent context. When the current
+   * agent performs another handoff, the executor intersects this policy
+   * with the target agent's policy so a restricted sub-agent cannot
+   * escalate privileges by transferring to an unrestricted one.
+   */
+  _sandboxPolicy?: import("./sandbox.js").SandboxPolicy;
 }
 
 /**

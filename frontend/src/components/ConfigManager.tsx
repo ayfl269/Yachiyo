@@ -81,6 +81,8 @@ interface AgentConfig {
   sessionWhitelistEnabled: boolean
   // Platform tools: sensitive group admin write operations (ban/kick/notice...)
   platformAdminToolsEnabled: boolean
+  // Proxy management: let the agent redirect all outbound traffic at runtime
+  proxyManageToolEnabled: boolean
 }
 
 interface Provider {
@@ -160,6 +162,7 @@ export default function ConfigManager() {
           }
           // 旧配置缺失平台管理工具开关时补默认值
           if (data.platformAdminToolsEnabled === undefined) data.platformAdminToolsEnabled = true
+          if (data.proxyManageToolEnabled === undefined) data.proxyManageToolEnabled = true
         }
         setConfig(data)
         setSafetyKeywordsStr(data?.safetyKeywords?.join(', ') || '')
@@ -789,6 +792,15 @@ export default function ConfigManager() {
                   id="platformAdminToolsEnabled"
                 />
                 <label htmlFor="platformAdminToolsEnabled">允许 Agent 执行群管理写操作 (禁言/踢人/群公告/精华等敏感操作)</label>
+              </div>
+              <div className="form-group row-checkbox">
+                <input
+                  type="checkbox"
+                  checked={config.proxyManageToolEnabled ?? true}
+                  onChange={(e) => updateField('proxyManageToolEnabled', e.target.checked)}
+                  id="proxyManageToolEnabled"
+                />
+                <label htmlFor="proxyManageToolEnabled">允许 Agent 管理代理 (proxy_manage 可将全部出站流量重定向到指定代理)</label>
               </div>
               {config.sessionWhitelistEnabled && (
                 <>

@@ -138,33 +138,42 @@ async function searchSymbols(
               if (trimmed.startsWith("//") || trimmed.startsWith("#") || trimmed.startsWith("*") || trimmed.startsWith("/*")) continue;
 
               pattern.regex.lastIndex = 0;
-              const match = pattern.regex.exec(line);
-              if (!match) continue;
+              // Match every occurrence on the line, not just the first —
+              // multiple definitions can share a line (e.g. `const a = ...; const b = ...`).
+              let match: RegExpExecArray | null;
+              while ((match = pattern.regex.exec(line)) !== null) {
+                pattern.regex.lastIndex = match.index + match[0].length > pattern.regex.lastIndex
+                  ? match.index + match[0].length
+                  : pattern.regex.lastIndex + 1;
 
-              const name = pattern.extractName(match);
-              if (!name) continue;
+                const name = pattern.extractName(match);
+                if (!name) continue;
 
-              // Filter out control-flow keywords that the method regex
-              // would otherwise match (e.g. `if (x) {`, `while (true) {`).
-              if (pattern.type === "method" && CONTROL_FLOW_KEYWORDS.has(name)) continue;
+                // Filter out control-flow keywords that the method regex
+                // would otherwise match (e.g. `if (x) {`, `while (true) {`).
+                if (pattern.type === "method" && CONTROL_FLOW_KEYWORDS.has(name)) continue;
 
-              // Filter by symbol name if specified
-              if (options.symbolName && !name.toLowerCase().includes(options.symbolName.toLowerCase())) continue;
+                // Filter by symbol name if specified
+                if (options.symbolName && !name.toLowerCase().includes(options.symbolName.toLowerCase())) continue;
 
-              // Get context (2 lines before and after)
-              const start = Math.max(0, i - 2);
-              const end = Math.min(lines.length, i + 3);
-              const ctx = lines.slice(start, end)
-                .map((l, idx) => `${start + idx + 1}→${l}`)
-                .join("\n");
+                // Get context (2 lines before and after)
+                const start = Math.max(0, i - 2);
+                const end = Math.min(lines.length, i + 3);
+                const ctx = lines.slice(start, end)
+                  .map((l, idx) => `${start + idx + 1}→${l}`)
+                  .join("\n");
 
-              results.push({
-                file: fullPath,
-                line: i + 1,
-                symbolType: pattern.type,
-                symbolName: name,
-                context: ctx,
-              });
+                results.push({
+                  file: fullPath,
+                  line: i + 1,
+                  symbolType: pattern.type,
+                  symbolName: name,
+                  context: ctx,
+                });
+
+                if (results.length >= options.resultLimit) return;
+              }
+              if (results.length >= options.resultLimit) return;
             }
           }
         } catch (e) { console.debug(`[code-search] skipping unreadable file:`, e); }
@@ -211,7 +220,10 @@ export function createCodeSearchTool(workspaceRoot?: string): FunctionTool<CodeS
       const language = args[2] != null ? String(args[2]) : undefined;
       const searchPath = args[3] != null ? String(args[3]) : undefined;
       const glob = args[4] != null ? String(args[4]) : undefined;
-      const resultLimit = args[5] != null ? Number(args[5]) : 20;
+      const resultLimitRaw = args[5] != null ? Number(args[5]) : NaN;
+      const resultLimit = Number.isFinite(resultLimitRaw)
+        ? Math.min(100, Math.max(1, Math.trunc(resultLimitRaw)))
+        : 20;
 
       if (!symbolName && !symbolType) {
         return { content: [{ type: "text", text: "error: At least one of 'symbol_name' or 'symbol_type' must be provided." }], isError: true };
@@ -221,7 +233,7 @@ export function createCodeSearchTool(workspaceRoot?: string): FunctionTool<CodeS
       let normalizedPath: string;
       try {
         normalizedPath = searchPath
-          ? normalizeRwPath(searchPath, { localEnv: true, workspaceRoot: root })
+          ? normalizeRwPath(searchPath, { workspaceRoot: root })
           : root;
       } catch (e) {
         return { content: [{ type: "text", text: `error: ${e}` }], isError: true };

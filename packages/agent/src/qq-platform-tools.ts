@@ -112,6 +112,22 @@ function toNum(v: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
+/**
+ * Parse a message id without losing int64 precision. OneBot11 message ids
+ * are int64 and commonly arrive as decimal strings (NapCat etc.); values
+ * beyond Number.MAX_SAFE_INTEGER must stay strings — `Number()` would return
+ * a finite but precision-corrupted double and the API call would target the
+ * wrong message.
+ */
+function toMessageId(v: unknown): number | string | undefined {
+  if (v == null) return undefined;
+  if (typeof v === "number") return Number.isSafeInteger(v) ? v : String(v);
+  const s = String(v).trim();
+  if (!/^-?\d+$/.test(s)) return undefined;
+  const n = Number(s);
+  return Number.isSafeInteger(n) ? n : s;
+}
+
 function getQQToolContext(_ctx: unknown): QQToolContext {
   const wrapper = _ctx as ContextWrapper<QQToolContext> | undefined;
   const ctx = wrapper?.context;
@@ -248,8 +264,8 @@ export function createQQInteractTool(
           description: "Target QQ user. Defaults to the current message sender.",
         },
         message_id: {
-          type: "integer",
-          description: "Target message id (for emoji_like). Defaults to the current message.",
+          type: ["integer", "string"],
+          description: "Target message id (for emoji_like). Defaults to the current message. Pass it as a string if it exceeds 2^53.",
         },
         emoji_id: {
           type: "string",
@@ -268,7 +284,7 @@ export function createQQInteractTool(
       const ctx = getQQToolContext(_ctx);
       const action = String(args[0] ?? "");
       const userId = toNum(args[1]);
-      const messageId = toNum(args[2]) ?? (typeof args[2] === "string" ? String(args[2]) : undefined);
+      const messageId = toMessageId(args[2]);
       const emojiId = args[3] != null ? String(args[3]) : undefined;
       const times = toNum(args[4]);
 
@@ -369,8 +385,8 @@ export function createQQMessageTool(
           enum: ["recall", "get_msg", "get_forward_msg", "get_group_history", "send_forward"],
         },
         message_id: {
-          type: "integer",
-          description: "Message id (for recall / get_msg). recall defaults to the bot's own last reply in this session.",
+          type: ["integer", "string"],
+          description: "Message id (for recall / get_msg). Pass it as a string if it exceeds 2^53. recall defaults to the bot's own last reply in this session.",
         },
         res_id: {
           type: "string",
@@ -406,7 +422,7 @@ export function createQQMessageTool(
     handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
       const ctx = getQQToolContext(_ctx);
       const action = String(args[0] ?? "");
-      const messageId = toNum(args[1]) ?? (typeof args[1] === "string" ? String(args[1]) : undefined);
+      const messageId = toMessageId(args[1]);
       const resId = args[2] != null ? String(args[2]) : undefined;
       const count = toNum(args[3]);
       const messageSeq = toNum(args[4]);
@@ -489,12 +505,12 @@ export function createQQMessageTool(
             if (ctx.groupId != null) {
               const result = await adapter.sendGroupForwardMsg(ctx.groupId, nodes);
               recordAction(adapter, ctx, note);
-              return formatText(`Sent merged-forward message (${nodes.length} nodes) to group ${ctx.groupId}. ${JSON.stringify(result ?? {})}`);
+              return formatText(truncate(`Sent merged-forward message (${nodes.length} nodes) to group ${ctx.groupId}. ${JSON.stringify(result ?? {})}`));
             }
             if (ctx.userId != null) {
               const result = await adapter.sendPrivateForwardMsg(ctx.userId, nodes);
               recordAction(adapter, ctx, note);
-              return formatText(`Sent merged-forward message (${nodes.length} nodes) to user ${ctx.userId}. ${JSON.stringify(result ?? {})}`);
+              return formatText(truncate(`Sent merged-forward message (${nodes.length} nodes) to user ${ctx.userId}. ${JSON.stringify(result ?? {})}`));
             }
             return formatError("send_forward: no current group/user session context.");
           }
@@ -673,7 +689,7 @@ export function createQQGroupAdminTool(
         },
         group_id: { type: "integer", description: "Target group id. Defaults to the current group session." },
         user_id: { type: "integer", description: "Target user id (ban / kick / set_card / set_admin / set_special_title)." },
-        message_id: { type: "integer", description: "Target message id (essence / cancel_essence)." },
+        message_id: { type: ["integer", "string"], description: "Target message id (essence / cancel_essence). Pass it as a string if it exceeds 2^53." },
         duration: {
           type: "integer",
           description: "Mute duration in seconds (for ban), 0 = unmute. Default: 1800.",
@@ -695,7 +711,7 @@ export function createQQGroupAdminTool(
       const action = String(args[0] ?? "");
       const groupId = toNum(args[1]);
       const userId = toNum(args[2]);
-      const messageId = toNum(args[3]) ?? (typeof args[3] === "string" ? String(args[3]) : undefined);
+      const messageId = toMessageId(args[3]);
       const duration = toNum(args[4]);
       const enable = typeof args[5] === "boolean" ? args[5] : undefined;
       const content = args[6] != null ? String(args[6]) : undefined;

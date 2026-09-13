@@ -294,8 +294,13 @@ function handleCreate(store: SqliteSchedulerTaskStore, p: CreateParams): CallToo
     return { content: [{ type: "text", text: `error: Invalid status '${p.status}'. Valid: ${VALID_STATUSES.join(", ")}.` }], isError: true };
   }
 
-  // Validate scheduled_at for one-shot tasks
-  if ((taskType === "reminder" || taskType === "scheduled") && p.scheduledAt) {
+  // Validate scheduled_at for one-shot tasks. It is mandatory: a reminder
+  // created without one gets next_fire_at = null and would never fire,
+  // silently breaking the user's request.
+  if (taskType === "reminder" || taskType === "scheduled") {
+    if (!p.scheduledAt) {
+      return { content: [{ type: "text", text: `error: 'scheduled_at' is required for ${taskType} tasks (ISO 8601 UTC timestamp, e.g. '2026-07-13T15:35:00Z'). Without it the task would never fire.` }], isError: true };
+    }
     const d = new Date(p.scheduledAt);
     if (isNaN(d.getTime())) {
       return { content: [{ type: "text", text: `error: Invalid scheduled_at timestamp: '${p.scheduledAt}'.` }], isError: true };
@@ -379,6 +384,14 @@ function handleUpdate(store: SqliteSchedulerTaskStore, id: string | undefined, u
   }
   if (updates.status && !VALID_STATUSES.includes(updates.status)) {
     return { content: [{ type: "text", text: `error: Invalid status '${updates.status}'.` }], isError: true };
+  }
+  // Validate scheduled_at format on update too (create validates it; update
+  // used to pass malformed timestamps through to the store).
+  if (updates.scheduledAt) {
+    const d = new Date(updates.scheduledAt);
+    if (isNaN(d.getTime())) {
+      return { content: [{ type: "text", text: `error: Invalid scheduled_at timestamp: '${updates.scheduledAt}'.` }], isError: true };
+    }
   }
 
   // Recompute next_fire_at if scheduling fields change

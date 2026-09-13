@@ -101,6 +101,19 @@ export abstract class ConversationStore {
   // === Conversation ===
   abstract createConversation(conversation: ConversationRecord): Promise<void>;
   abstract getConversationById(id: string): Promise<ConversationRecord | null>;
+  /**
+   * Batch fetch conversations by id. Backends override this with a single
+   * query; the default falls back to per-id lookups. Missing ids are simply
+   * absent from the returned map.
+   */
+  async getConversationsByIds(ids: string[]): Promise<Map<string, ConversationRecord>> {
+    const map = new Map<string, ConversationRecord>();
+    for (const id of ids) {
+      const conv = await this.getConversationById(id);
+      if (conv) map.set(id, conv);
+    }
+    return map;
+  }
   abstract getAllConversations(): Promise<ConversationRecord[]>;
   /** Like getAllConversations but omits the heavy history JSON field. */
   abstract getAllConversationMetadata(): Promise<ConversationMetadata[]>;

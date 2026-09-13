@@ -14,10 +14,15 @@ import {
   applySandboxPolicyToToolSet,
   DEFAULT_DYNAMIC_SUBAGENT_POLICY,
   DEFAULT_PRECONFIGURED_SUBAGENT_POLICY,
+  intersectSandboxPolicies,
   type SandboxPolicy,
 } from "./sandbox.js";
 import { fileLockManager } from "./coordination.js";
 import { EventEmitter } from "events";
+import { randomUUID } from "crypto";
+
+/** Maximum handoff chain depth (main agent = 0). Bounds transfer_to_* recursion. */
+export const MAX_HANDOFF_DEPTH = 5;
 
 // ── Model-Specific Tool Call Prompts for Sub-Agents ──
 
@@ -459,7 +464,7 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
 
     // Check for background task
     if (tool.isBackgroundTask) {
-      const taskId = crypto.randomUUID();
+      const taskId = randomUUID();
       console.debug(`[ToolExecutor] ${tool.name} -> Background task (taskId=${taskId})`);
       this.executeBackground(tool, runContext, taskId, toolArgs).catch(console.error);
       yield {
@@ -491,9 +496,31 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
     toolArgs.image_urls = imageUrls;
 
     // ── Determine sandbox policy ──
+    // Intersect the target agent's policy with the current run's effective
+    // policy (if any). Without this, a restricted dynamic sub-agent could
+    // escape its sandbox (e.g. allowShell=false) by transferring to an
+    // unrestricted pre-configured agent, whose default policy has no denials.
     const isDynamic = Boolean(tool.agent?.dynamic);
-    const sandboxPolicy: SandboxPolicy = tool.agent?.sandboxPolicy
+    const targetPolicy: SandboxPolicy = tool.agent?.sandboxPolicy
       ?? (isDynamic ? DEFAULT_DYNAMIC_SUBAGENT_POLICY : DEFAULT_PRECONFIGURED_SUBAGENT_POLICY);
+    const parentPolicy = runContext._sandboxPolicy;
+    const sandboxPolicy: SandboxPolicy = parentPolicy
+      ? intersectSandboxPolicies(parentPolicy, targetPolicy)
+      : targetPolicy;
+
+    // ── Handoff depth limit ──
+    const currentDepth = runContext._handoffDepth ?? 0;
+    if (currentDepth >= MAX_HANDOFF_DEPTH) {
+      yield {
+        content: [{
+          type: "text" as const,
+          text: `error: Handoff chain too deep (depth ${currentDepth}, max ${MAX_HANDOFF_DEPTH}). ` +
+            `Resolve the task directly instead of transferring to another sub-agent.`,
+        }],
+        isError: true,
+      };
+      return;
+    }
 
     // Build toolset for sub-agent with sandbox filtering
     const agentTools = tool.agent?.tools;
@@ -570,6 +597,11 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
     // recorded onto the same parent trace. No-op when the parent context
     // has no span attached (e.g. tests, standalone usage).
     subContext._traceSpan = runContext._traceSpan;
+    // Track handoff depth and propagate the effective sandbox policy so
+    // further handoffs from this sub-agent are depth-bounded and cannot
+    // escalate above the intersection computed above.
+    subContext._handoffDepth = currentDepth + 1;
+    subContext._sandboxPolicy = sandboxPolicy;
 
     // Inject model-specific tool call prompt for sub-agent
     let subSystemPrompt = tool.agent?.instructions ?? "";
@@ -742,7 +774,7 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
     runContext: ContextWrapper<TContext>,
     toolArgs: Record<string, unknown>
   ): AsyncGenerator<CallToolResult, void, unknown> {
-    const taskId = crypto.randomUUID();
+    const taskId = randomUUID();
 
     // Run handoff in background and wake main agent when done
     this.runHandoffBackground(tool, runContext, toolArgs, taskId).catch((e) => {
@@ -897,11 +929,38 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
     let resultText = "";
     try {
       const iter = this.executeLocal(tool, backgroundContext, toolArgs);
-      let iterResult;
-      while (!(iterResult = await iter.next()).done) {
+      // Enforce the background timeout here: this path bypasses the runner's
+      // iterToolExecutorResults timeout, so without this race a hung tool
+      // would run forever. On timeout we abort the task's AbortController
+      // (so signal-aware handlers stop) and close the generator (running its
+      // finally blocks) before reporting the failure.
+      const timeoutMs = BACKGROUND_TASK_TIMEOUT_SECONDS * 1000;
+      const deadline = Date.now() + timeoutMs;
+      let timedOut = false;
+
+      while (true) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) {
+          timedOut = true;
+          break;
+        }
+        const step = await Promise.race([
+          iter.next(),
+          new Promise<"timeout">((resolve) => {
+            const timer = setTimeout(() => resolve("timeout"), remaining);
+            // Don't keep the process alive just for the timeout race.
+            if (typeof timer === "object" && timer && "unref" in timer) {
+              (timer as { unref(): void }).unref();
+            }
+          }),
+        ]);
+        if (step === "timeout") {
+          timedOut = true;
+          break;
+        }
         // Collect text content from the tool's yielded results so the main
         // agent receives the output when the background task finishes.
-        const yielded = iterResult.value;
+        const yielded = step.value;
         if (yielded && yielded.content) {
           for (const c of yielded.content) {
             if (c.type === "text") {
@@ -909,6 +968,13 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
             }
           }
         }
+      }
+
+      if (timedOut) {
+        backgroundAbort.abort(new Error(`background task timeout (${BACKGROUND_TASK_TIMEOUT_SECONDS}s)`));
+        try { await iter.return(undefined as never); } catch { /* ignore */ }
+        resultText = `error: Background task '${tool.name}' timed out after ${BACKGROUND_TASK_TIMEOUT_SECONDS}s and was stopped.`;
+        console.error(`Background task ${taskId} timed out after ${BACKGROUND_TASK_TIMEOUT_SECONDS}s`);
       }
     } catch (e) {
       const abortReason = backgroundAbort.signal.reason;

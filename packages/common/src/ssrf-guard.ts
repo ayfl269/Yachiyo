@@ -17,10 +17,24 @@ export const ALLOWED_SCHEMES = new Set(["http:", "https:"]);
 /** Default per-fetch response size cap (bytes) to mitigate DoS. */
 export const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024; // 10 MB
 
+/**
+ * Hosts that must never be fetched even though LAN access is allowed by
+ * business requirements: cloud instance-metadata endpoints are reachable
+ * from any VM and leaking their response would hand out credentials.
+ */
+const BLOCKED_METADATA_HOSTS = new Set([
+  "169.254.169.254", // AWS/GCP/Azure/... instance metadata
+  "metadata.google.internal", // GCP metadata
+  "100.100.100.200", // Alibaba Cloud ECS metadata
+]);
+
 export async function assertSafeUrl(rawUrl: string): Promise<void> {
   const parsed = new URL(rawUrl);
   if (!ALLOWED_SCHEMES.has(parsed.protocol)) {
     throw new Error(`Disallowed URL scheme: ${parsed.protocol}`);
+  }
+  if (BLOCKED_METADATA_HOSTS.has(parsed.hostname.toLowerCase())) {
+    throw new Error(`Blocked metadata host: ${parsed.hostname}`);
   }
 }
 

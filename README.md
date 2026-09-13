@@ -188,7 +188,6 @@ pnpm test
 
 | 脚本 | 测试文件 | 测试内容 |
 |------|----------|---------|
-| `pnpm test:windows` | `tests/windows-sandbox-test.ts` | Windows 沙箱限制验证（非 Windows 自动跳过） |
 | `pnpm test:browser` | `tests/browser-automation-test.ts` | 浏览器自动化测试 |
 | `pnpm test:interactive-shell` | `tests/interactive-shell-test.ts` | 交互式 Shell 工具测试 |
 | `pnpm test:conversation` | `tests/conversation-test.ts` | 对话管理测试 |

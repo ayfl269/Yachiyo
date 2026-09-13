@@ -7,9 +7,9 @@
 import { createFunctionTool, type FunctionTool } from "./tool.js";
 import type { ContextWrapper, CallToolResult } from "./types.js";
 import { readFile, writeFile, mkdir, readdir, stat, unlink, rename } from "fs/promises";
-import { createWriteStream, existsSync } from "fs";
-import { join, resolve, normalize, dirname, sep } from "path";
-import { execFile, type ChildProcess } from "child_process";
+import { createWriteStream, existsSync, realpathSync } from "fs";
+import { join, resolve, normalize, dirname, basename, sep } from "path";
+import { execFile, type ChildProcess, type ExecFileOptionsWithStringEncoding } from "child_process";
 import { randomUUID } from "crypto";
 import { isPathAllowed, type SandboxPolicy } from "./sandbox.js";
 
@@ -24,11 +24,6 @@ export interface ComputerToolContext {
   };
   /** Optional sandbox policy. When present, path/domain restrictions are enforced. */
   sandboxPolicy?: SandboxPolicy;
-}
-
-function isLocalRuntime(context: ComputerToolContext): boolean {
-  const runtime = context.providerSettings?.computer_use_runtime ?? "local";
-  return runtime === "local";
 }
 
 function getToolContext(_ctx: unknown): ComputerToolContext {
@@ -69,7 +64,7 @@ export function getAbortSignal(_ctx: unknown): AbortSignal | undefined {
  */
 export function normalizeRwPath(
   rawPath: string,
-  options: { localEnv: boolean; workspaceRoot?: string; sandboxPolicy?: SandboxPolicy }
+  options: { workspaceRoot?: string; sandboxPolicy?: SandboxPolicy }
 ): string {
   let p = normalize(rawPath);
   const root = resolve(options.workspaceRoot ?? process.cwd());
@@ -97,6 +92,34 @@ export function normalizeRwPath(
     if (!isPathAllowed(p, options.sandboxPolicy)) {
       throw new Error(`Path '${p}' is denied by sandbox policy`);
     }
+  }
+
+  // Resolve symlinks so a link inside the workspace cannot point outside of
+  // it (e.g. a symlink created by execute_shell or file_move_tool). For a
+  // not-yet-existing path (new file), resolve the nearest existing ancestor
+  // and keep the remaining non-existent suffix appended verbatim.
+  try {
+    const realRoot = realpathSync(root);
+    let probe = p;
+    let suffix = "";
+    while (!existsSync(probe)) {
+      const parent = dirname(probe);
+      if (parent === probe) break;
+      suffix = join(basename(probe), suffix);
+      probe = parent;
+    }
+    const realPath = suffix ? join(realpathSync(probe), suffix) : realpathSync(probe);
+    const realCmp = process.platform === "win32" ? realPath.toLowerCase() : realPath;
+    const realRootCmp = process.platform === "win32" ? realRoot.toLowerCase() : realRoot;
+    if (realCmp !== realRootCmp && !realCmp.startsWith(realRootCmp + sep)) {
+      throw new Error(`Path '${p}' resolves outside the workspace root '${root}' via symlinks`);
+    }
+  } catch (e) {
+    // Propagate our own containment violation; skip the realpath check when
+    // the path disappeared or never existed (lexical check already passed);
+    // anything else is an unexpected FS error worth surfacing.
+    if (e instanceof Error && e.message.includes("outside the workspace root")) throw e;
+    if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") throw e;
   }
 
   return p;
@@ -143,8 +166,7 @@ export function createFileReadTool(workspaceRoot?: string): FunctionTool<Compute
       const offset = args[1] != null ? Number(args[1]) : undefined;
       const limit = args[2] != null ? Number(args[2]) : undefined;
       const context = getToolContext(_ctx);
-      const localEnv = isLocalRuntime(context);
-      const normalizedPath = normalizeRwPath(path, { localEnv, workspaceRoot, sandboxPolicy: context.sandboxPolicy });
+      const normalizedPath = normalizeRwPath(path, { workspaceRoot, sandboxPolicy: context.sandboxPolicy });
 
       try {
         if (!existsSync(normalizedPath)) {
@@ -189,8 +211,7 @@ export function createFileWriteTool(workspaceRoot?: string): FunctionTool<Comput
       const content = String(args[1] ?? "");
       const context = getToolContext(_ctx);
 
-      const localEnv = isLocalRuntime(context);
-      const normalizedPath = normalizeRwPath(path, { localEnv, workspaceRoot, sandboxPolicy: context.sandboxPolicy });
+      const normalizedPath = normalizeRwPath(path, { workspaceRoot, sandboxPolicy: context.sandboxPolicy });
 
       try {
         await mkdir(dirname(normalizedPath), { recursive: true });
@@ -227,8 +248,7 @@ export function createFileEditTool(workspaceRoot?: string): FunctionTool<Compute
       const replaceAll = args[3] === true;
       const context = getToolContext(_ctx);
 
-      const localEnv = isLocalRuntime(context);
-      const normalizedPath = normalizeRwPath(path, { localEnv, workspaceRoot, sandboxPolicy: context.sandboxPolicy });
+      const normalizedPath = normalizeRwPath(path, { workspaceRoot, sandboxPolicy: context.sandboxPolicy });
 
       try {
         if (!existsSync(normalizedPath)) {
@@ -290,9 +310,8 @@ export function createGrepTool(workspaceRoot?: string): FunctionTool<ComputerToo
       const resultLimit = args[4] != null ? Number(args[4]) : undefined;
       const context = getToolContext(_ctx);
       const abortSignal = getAbortSignal(_ctx);
-      const localEnv = isLocalRuntime(context);
       const root = workspaceRoot ?? process.cwd();
-      const normalizedPath = searchPath ? normalizeRwPath(searchPath, { localEnv, workspaceRoot: root, sandboxPolicy: context.sandboxPolicy }) : root;
+      const normalizedPath = searchPath ? normalizeRwPath(searchPath, { workspaceRoot: root, sandboxPolicy: context.sandboxPolicy }) : root;
 
       try {
         const results = await grepSearch(pattern, normalizedPath, {
@@ -350,6 +369,17 @@ export function isDestructiveCommand(command: string): boolean {
     /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/,
     // system shutdown / reboot
     /\b(?:shutdown|reboot|halt|poweroff|init\s+0)\b/,
+    // Windows: recursive directory removal targeting a drive root / wildcard
+    /\brd\s+(?:\/s|\/q|\/s\s+\/q)\s+(?:"?[a-z]:[\\/]?|\*|%systemroot%)/i,
+    /\brmdir\s+(?:\/s|\/q|\/s\s+\/q)\s+(?:"?[a-z]:[\\/]?|\*)/i,
+    // Windows: recursive delete with wildcards (e.g. `del /f /s /q C:\*`)
+    /\bdel\s+(?:[a-z]\s+)*\/s\s+(?:[a-z]\s+)*"?(?:[a-z]+:[\\/]*|\*)/i,
+    // PowerShell: recursive force removal of a drive root or wildcard
+    /\bremove-item\b[^|;&]*(?:-recurse|-force)[^|;&]*(?:"?[a-z]:[\\/]?\*?|\*)/i,
+    // Windows: filesystem format / partition tools
+    /\b(?:format|diskpart|bcdedit)\b\s/i,
+    // Windows: registry hive deletion (whole keys, not single values)
+    /\breg\s+delete\b[^|;&]*\/f\b/i,
   ];
 
   return patterns.some((p) => p.test(c));
@@ -407,13 +437,59 @@ export function listBackgroundProcesses(): { id: string; pid: number | undefined
  * and signalled, false otherwise. The caller may follow up with a SIGKILL if
  * the process does not exit within a grace period.
  */
+/**
+ * Kill a child process together with its whole process tree.
+ *
+ * On Windows, `child.kill()` only terminates the spawned shell (cmd.exe);
+ * its children (e.g. `cmd /c node server.js` → node) survive as orphans, so
+ * we use `taskkill /T /F` which walks the tree. On POSIX we spawn the shell
+ * with `detached: true` so it leads its own process group, then signal the
+ * whole group with `-pid` (falling back to the direct child kill).
+ */
+function killProcessTree(child: ChildProcess, signal: NodeJS.Signals = "SIGTERM"): void {
+  if (child.pid == null || child.exitCode !== null || child.signalCode !== null) return;
+  try {
+    if (process.platform === "win32") {
+      // Fire-and-forget: taskkill is async, but the close handler cleans up
+      // the registry entry whenever the processes actually die.
+      // (Options cast: `detached`/`stdio` pass through to the underlying
+      // spawn at runtime but are not part of execFile's public option type.)
+      const opts = { stdio: "ignore", windowsHide: true } as unknown as ExecFileOptionsWithStringEncoding;
+      execFile("taskkill", ["/pid", String(child.pid), "/T", "/F"], opts)
+        .on("error", () => { try { child.kill(signal); } catch { /* ignore */ } });
+    } else {
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        child.kill(signal);
+      }
+    }
+  } catch {
+    try { child.kill(signal); } catch { /* ignore */ }
+  }
+}
+
+/** Grace period before a SIGTERM'd process is force-killed. */
+const KILL_ESCALATION_MS = 3000;
+
+/**
+ * Kill a background shell process by id. Returns true if a process was found
+ * and signalled, false otherwise. Escalates to SIGKILL / `taskkill /F` if the
+ * process is still alive after {@link KILL_ESCALATION_MS}, so "signal sent"
+ * actually means the process is (being) terminated.
+ */
 export function killBackgroundShell(id: string): boolean {
   const child = backgroundProcesses.get(id);
   if (!child) return false;
-  try {
-    child.kill("SIGTERM");
-  } catch {
-    /* ignore — process may have already exited */
+  killProcessTree(child, "SIGTERM");
+  // Escalate to force-kill if the tree survived the graceful signal.
+  const escalation = setTimeout(() => {
+    if (child.exitCode === null && child.signalCode === null) {
+      killProcessTree(child, "SIGKILL");
+    }
+  }, KILL_ESCALATION_MS);
+  if (typeof escalation === "object" && escalation && "unref" in escalation) {
+    escalation.unref();
   }
   return true;
 }
@@ -475,7 +551,11 @@ export function createShellTool(workspaceRoot?: string): FunctionTool<ComputerTo
               };
             }
           }
-          const id = crypto.randomUUID().slice(0, 8);
+          // Collision-proof id: re-draw if the 8-char prefix is already live.
+          let id = randomUUID().slice(0, 8);
+          while (backgroundProcesses.has(id)) {
+            id = randomUUID().slice(0, 8);
+          }
           // Write logs inside the workspace so file_read_tool can access them
           // (normalizeRwPath rejects paths outside workspaceRoot).
           const logDir = join(workspaceRoot ?? process.cwd(), ".logs");
@@ -485,13 +565,33 @@ export function createShellTool(workspaceRoot?: string): FunctionTool<ComputerTo
           // implementation computed logPath but never wired up the streams,
           // so the returned message was a lie and the output was lost.
           const logStream = createWriteStream(logPath, { flags: "w" });
+          // A write failure (disk full, file deleted/locked externally) emits
+          // an unhandled 'error' event which would crash the whole process.
+          logStream.on("error", (err) => {
+            console.error(`[execute_shell] background log stream error for ${logPath}:`, err);
+          });
           // Keep the ChildProcess reference so it can be tracked and killed
           // via killBackgroundShell(id); the previous implementation discarded
           // it immediately, causing unbounded process leaks.
+          //
+          // NO execFile timeout here: background tasks are meant to be
+          // long-running ("use background=true for long-running commands"),
+          // and Node's timeout option would silently SIGTERM them after
+          // timeoutMs. Lifecycle is managed explicitly via background_shell_kill
+          // and the process-exit hook in killAllBackgroundShells().
           const child = execFile(
             process.platform === "win32" ? "cmd" : "/bin/sh",
             process.platform === "win32" ? ["/c", command] : ["-c", command],
-            { cwd, env: { ...process.env, ...env }, timeout: timeoutMs }
+            // Options cast: `detached` passes through to the underlying spawn
+            // at runtime (needed for POSIX process-group kills) but is not
+            // part of execFile's public option type.
+            {
+              cwd,
+              env: { ...process.env, ...env },
+              // POSIX: new process group so killProcessTree can signal the
+              // whole tree; Windows uses taskkill /T instead.
+              detached: process.platform !== "win32",
+            } as unknown as ExecFileOptionsWithStringEncoding
           );
           // Cap total bytes written to the log file: a high-output process
           // would otherwise grow the file without bound. Once the cap is hit
@@ -525,19 +625,50 @@ export function createShellTool(workspaceRoot?: string): FunctionTool<ComputerTo
           return { content: [{ type: "text", text: `Background command started (id=${id}). Output is being written to ${logPath}. Use background_shell_kill with id="${id}" to terminate it.` }] };
         }
 
-        const result = await new Promise<{ stdout: string; stderr: string; code: number; aborted: boolean }>((resolvePromise) => {
+        // Manage the timeout ourselves instead of execFile's `timeout`
+        // option: Node's built-in timeout only SIGTERMs the shell, leaving
+        // the actual workload (cmd's children) running, and the resulting
+        // close event looks like a normal exit. Our own timer kills the
+        // whole tree and lets us report the timeout explicitly.
+        const result = await new Promise<{ stdout: string; stderr: string; code: number | null; signal: NodeJS.Signals | null; timedOut: boolean; aborted: boolean }>((resolvePromise) => {
           const child = execFile(
             process.platform === "win32" ? "cmd" : "/bin/sh",
             process.platform === "win32" ? ["/c", command] : ["-c", command],
-            { cwd, env: { ...process.env, ...env }, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }
+            // Options cast: see the background-branch note on `detached`.
+            {
+              cwd, env: { ...process.env, ...env }, maxBuffer: 10 * 1024 * 1024,
+              // POSIX: own process group so killProcessTree reaches children.
+              detached: process.platform !== "win32",
+            } as unknown as ExecFileOptionsWithStringEncoding
           );
+
+          let timedOut = false;
+          const killAndFlag = (why: "timeout" | "abort"): void => {
+            timedOut = why === "timeout";
+            killProcessTree(child, "SIGTERM");
+            // Force-kill escalation if the tree ignores SIGTERM.
+            const escalation = setTimeout(() => {
+              if (child.exitCode === null && child.signalCode === null) {
+                killProcessTree(child, "SIGKILL");
+              }
+            }, KILL_ESCALATION_MS);
+            if (typeof escalation === "object" && escalation && "unref" in escalation) {
+              escalation.unref();
+            }
+          };
+
+          if (timeoutMs > 0) {
+            const timer = setTimeout(() => killAndFlag("timeout"), timeoutMs);
+            if (typeof timer === "object" && timer && "unref" in timer) timer.unref();
+            child.once("close", () => clearTimeout(timer));
+          }
 
           // Kill child process when abort signal fires (e.g. tool timeout).
           if (abortSignal) {
             if (abortSignal.aborted) {
-              child.kill("SIGTERM");
+              killAndFlag("abort");
             } else {
-              abortSignal.addEventListener("abort", () => child.kill("SIGTERM"), { once: true });
+              abortSignal.addEventListener("abort", () => killAndFlag("abort"), { once: true });
             }
           }
 
@@ -545,11 +676,11 @@ export function createShellTool(workspaceRoot?: string): FunctionTool<ComputerTo
           let stderr = "";
           child.stdout?.on("data", (data: Buffer) => { stdout += data.toString(); });
           child.stderr?.on("data", (data: Buffer) => { stderr += data.toString(); });
-          child.on("close", (code) => {
-            resolvePromise({ stdout, stderr, code: code ?? 0, aborted: abortSignal?.aborted ?? false });
+          child.on("close", (code, signal) => {
+            resolvePromise({ stdout, stderr, code, signal, timedOut, aborted: abortSignal?.aborted ?? false });
           });
           child.on("error", (_err) => {
-            resolvePromise({ stdout, stderr, code: -1, aborted: abortSignal?.aborted ?? false });
+            resolvePromise({ stdout, stderr, code: -1, signal: null, timedOut, aborted: abortSignal?.aborted ?? false });
           });
         });
 
@@ -560,14 +691,21 @@ export function createShellTool(workspaceRoot?: string): FunctionTool<ComputerTo
         let output = "";
         if (result.stdout) output += result.stdout;
         if (result.stderr) output += (output ? "\n" : "") + `[stderr]\n${result.stderr}`;
+        if (result.timedOut) {
+          output += `\n[command timed out after ${Math.round(timeoutMs / 1000)} seconds and was terminated]`;
+          return { content: [{ type: "text", text: output || "(no output)" }], isError: true };
+        }
+        // Signal-terminated (not by us): e.g. OOM killer or external kill —
+        // report faithfully instead of pretending exit code 0.
+        if (result.signal) {
+          output += `\n[command terminated by signal ${result.signal}]`;
+          return { content: [{ type: "text", text: output || "(no output)" }], isError: true };
+        }
         if (result.code !== 0) output += `\n[exit code: ${result.code}]`;
 
         return { content: [{ type: "text", text: output || "(no output)" }] };
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
-        if (msg.includes("timed out")) {
-          return { content: [{ type: "text", text: `error: Command timed out after ${timeout ?? 300} seconds.` }], isError: true };
-        }
         return { content: [{ type: "text", text: `error: Shell execution failed: ${msg}` }], isError: true };
       }
     },
@@ -643,19 +781,26 @@ export function createLocalPythonTool(workspaceRoot?: string): FunctionTool<Comp
     active: true,
     handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
       const code = String(args[0] ?? "");
-        const silent = args[1] === true;
-        const timeout = args[2] != null ? Number(args[2]) : undefined;
-        const timeoutMs = clampTimeoutSeconds(timeout, 30) * 1000;
-        const cwd = workspaceRoot ?? process.cwd();
+      const silent = args[1] === true;
+      const timeout = args[2] != null ? Number(args[2]) : undefined;
+      const timeoutMs = clampTimeoutSeconds(timeout, 30) * 1000;
+      const cwd = workspaceRoot ?? process.cwd();
+      const abortSignal = getAbortSignal(_ctx);
 
-        try {
-          const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolvePromise) => {
-            // Guard against double-resolution: when `python3` fails to spawn on
-            // Windows, Node may still emit a `close` event on the failed child
-            // even after we've already started the `python` fallback. Without
-            // this flag, the first `close` would resolve with empty output and
-            // silently drop the real output from `child2`.
-            let resolved = false;
+      const killOnAbort = (child: ChildProcess): void => {
+        if (!abortSignal) return;
+        if (abortSignal.aborted) killProcessTree(child);
+        else abortSignal.addEventListener("abort", () => killProcessTree(child), { once: true });
+      };
+
+      try {
+        const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolvePromise) => {
+          // Guard against double-resolution: when `python3` fails to spawn on
+          // Windows, Node may still emit a `close` event on the failed child
+          // even after we've already started the `python` fallback. Without
+          // this flag, the first `close` would resolve with empty output and
+          // silently drop the real output from `child2`.
+          let resolved = false;
           const resolveOnce = (value: { stdout: string; stderr: string; code: number }): void => {
             if (resolved) return;
             resolved = true;
@@ -667,6 +812,7 @@ export function createLocalPythonTool(workspaceRoot?: string): FunctionTool<Comp
             ["-c", code],
             { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }
           );
+          killOnAbort(child);
 
           let stdout = "";
           let stderr = "";
@@ -681,6 +827,7 @@ export function createLocalPythonTool(workspaceRoot?: string): FunctionTool<Comp
             child.removeAllListeners("close");
             if (process.platform === "win32" && err.message.includes("python3")) {
               const child2 = execFile("python", ["-c", code], { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 });
+              killOnAbort(child2);
               let stdout2 = "";
               let stderr2 = "";
               child2.stdout?.on("data", (data: Buffer) => { stdout2 += data.toString(); });
@@ -731,9 +878,8 @@ export function createListDirTool(workspaceRoot?: string): FunctionTool<Computer
       const recursive = args[1] === true;
       const maxDepth = args[2] != null ? Number(args[2]) : undefined;
       const context = getToolContext(_ctx);
-      const localEnv = isLocalRuntime(context);
       const root = workspaceRoot ?? process.cwd();
-      const normalizedPath = dirPath ? normalizeRwPath(dirPath, { localEnv, workspaceRoot: root, sandboxPolicy: context.sandboxPolicy }) : root;
+      const normalizedPath = dirPath ? normalizeRwPath(dirPath, { workspaceRoot: root, sandboxPolicy: context.sandboxPolicy }) : root;
 
       try {
         if (!existsSync(normalizedPath)) {
@@ -820,8 +966,7 @@ export function createFileDeleteTool(workspaceRoot?: string): FunctionTool<Compu
       const path = String(args[0] ?? "");
       const context = getToolContext(_ctx);
 
-      const localEnv = isLocalRuntime(context);
-      const normalizedPath = normalizeRwPath(path, { localEnv, workspaceRoot, sandboxPolicy: context.sandboxPolicy });
+      const normalizedPath = normalizeRwPath(path, { workspaceRoot, sandboxPolicy: context.sandboxPolicy });
 
       try {
         if (!existsSync(normalizedPath)) {
@@ -862,9 +1007,8 @@ export function createFileMoveTool(workspaceRoot?: string): FunctionTool<Compute
       const destination = String(args[1] ?? "");
       const context = getToolContext(_ctx);
 
-      const localEnv = isLocalRuntime(context);
-      const normalizedSource = normalizeRwPath(source, { localEnv, workspaceRoot, sandboxPolicy: context.sandboxPolicy });
-      const normalizedDest = normalizeRwPath(destination, { localEnv, workspaceRoot, sandboxPolicy: context.sandboxPolicy });
+      const normalizedSource = normalizeRwPath(source, { workspaceRoot, sandboxPolicy: context.sandboxPolicy });
+      const normalizedDest = normalizeRwPath(destination, { workspaceRoot, sandboxPolicy: context.sandboxPolicy });
 
       try {
         if (!existsSync(normalizedSource)) {
@@ -909,6 +1053,7 @@ export function createLocalNodeTool(workspaceRoot?: string): FunctionTool<Comput
       const timeout = args[2] != null ? Number(args[2]) : undefined;
       const timeoutMs = clampTimeoutSeconds(timeout, 30) * 1000;
       const cwd = workspaceRoot ?? process.cwd();
+      const abortSignal = getAbortSignal(_ctx);
 
       try {
         const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolvePromise) => {
@@ -917,6 +1062,10 @@ export function createLocalNodeTool(workspaceRoot?: string): FunctionTool<Comput
             ["-e", code],
             { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }
           );
+          if (abortSignal) {
+            if (abortSignal.aborted) killProcessTree(child);
+            else abortSignal.addEventListener("abort", () => killProcessTree(child), { once: true });
+          }
 
           let stdout = "";
           let stderr = "";
@@ -1037,8 +1186,10 @@ async function grepWithRipgrep(
       const results: string[] = [];
       for (const line of stdout.split("\n")) {
         if (!line || line === "--") continue;
-        // Format: path:line:content (match) or path-line-content (context)
-        const m = line.match(/^(.+)([:-])(\d+)\2(.*)$/);
+        // Format: path:line:content (match) or path-line-content (context).
+        // Lazy `.+?` so a content line like `foo:bar:12:baz` keeps the
+        // line number correctly anchored to the last `:` separator.
+        const m = line.match(/^(.+?)([:-])(\d+)\2(.*)$/);
         if (m) results.push(`${m[1]}:${m[3]}: ${m[4]}`);
       }
       resolve(results);

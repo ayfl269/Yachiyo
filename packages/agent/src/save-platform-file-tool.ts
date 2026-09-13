@@ -121,8 +121,8 @@ function resolveSafeFilePath(
 }
 
 /**
- * Sanitize a filename: strip path separators, null bytes, and reserved
- * Windows names. Preserves the file extension.
+ * Sanitize a filename: strip path separators, null bytes, reserved Windows
+ * names, and trailing dots/spaces. Preserves the file extension.
  */
 function sanitizeFilename(name: string): string {
   // Take the basename only
@@ -131,6 +131,14 @@ function sanitizeFilename(name: string): string {
   let cleaned = base.replace(/[\x00-\x1f]/g, "");
   // Remove leading dots (hidden files / relative path tricks)
   cleaned = cleaned.replace(/^\.+/, "");
+  // Windows reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
+  const stem = cleaned.includes(".") ? cleaned.slice(0, cleaned.indexOf(".")) : cleaned;
+  if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i.test(stem)) {
+    cleaned = `_${cleaned}`;
+  }
+  // Windows strips trailing dots/spaces at the FS layer, which desyncs the
+  // recorded path from the real file — remove them explicitly instead.
+  cleaned = cleaned.replace(/[. ]+$/, "");
   // Limit length
   if (cleaned.length > 200) {
     const ext = extname(cleaned);
@@ -344,13 +352,16 @@ async function handleSave(
     );
   }
 
-  // Get file info
+  // Get file info. A stat failure means the file was not actually written
+  // where we think it is — surface it instead of reporting "0 B".
   let size: number;
   try {
     const s = await stat(targetPath);
     size = s.size;
   } catch {
-    size = 0;
+    return formatError(
+      `File was downloaded but could not be found at the expected path: ${targetPath}`,
+    );
   }
 
   const mimeType = guessMimeType(targetPath);

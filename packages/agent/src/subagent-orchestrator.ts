@@ -86,15 +86,6 @@ export class SubAgentOrchestrator {
         if (personaData.tools !== undefined) {
           tools = personaData.tools;
         }
-
-        // Auto-generate public description from prompt if missing
-        if (!publicDescription && prompt) {
-          // Use first 120 chars of prompt as description
-          const desc = prompt.slice(0, 120).trim();
-          if (desc) {
-            // Will be used below
-          }
-        }
       }
 
       // Normalize tools

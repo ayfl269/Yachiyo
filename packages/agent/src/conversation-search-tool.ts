@@ -36,6 +36,11 @@ export interface ConversationSearchStore {
     searchQuery?: string;
   }): Promise<[ConversationRecord[], number]>;
   getConversationById(id: string): Promise<ConversationRecord | null>;
+  /**
+   * Optional batch fetch. When present, content matches are resolved in a
+   * single query instead of one roundtrip per hit (N+1 elimination).
+   */
+  getConversationsByIds?(ids: string[]): Promise<Map<string, ConversationRecord>>;
   searchConversationsByContent(
     query: string,
     options: { platformIds?: string[]; limit?: number; offset?: number },
@@ -149,12 +154,14 @@ export function createConversationSearchTool(
       required: ["query"],
     },
     active: true,
-    handler: async (...args: unknown[]): Promise<CallToolResult> => {
-      // Arguments are positional: (query, platform_id?, limit?, include_excerpts?)
+    handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
+      // Arguments are positional: (_ctx, query, platform_id?, limit?, include_excerpts?)
+      // The ContextWrapper is bound to _ctx; tool parameters start at args[0].
       const query = String(args[0] ?? "").trim();
       const platformId = args[1] != null && args[1] !== "" ? String(args[1]) : undefined;
-      const limit = args[2] != null ? Math.min(50, Math.max(1, Number(args[2]))) : 10;
-      const includeExcerpts = args[3] != null ? Boolean(args[3]) : true;
+      const limitRaw = args[2] != null ? Number(args[2]) : NaN;
+      const limit = Number.isFinite(limitRaw) ? Math.min(50, Math.max(1, Math.trunc(limitRaw))) : 10;
+      const includeExcerpts = args[3] == null ? true : !(args[3] === false || args[3] === "false");
 
       if (!query) {
         return {
@@ -210,9 +217,16 @@ export function createConversationSearchTool(
         // Section B: Message Content Matches
         if (ftsResults.length > 0) {
           lines.push(`=== 💬 对话原文匹配 (Message Matches: ${ftsResults.length}) ===`);
+          // Batch-fetch matched conversations when the store supports it,
+          // avoiding a serial roundtrip per hit.
+          const convMap = store.getConversationsByIds
+            ? await store.getConversationsByIds(ftsResults.map((r) => r.conversationId))
+            : null;
           for (let i = 0; i < ftsResults.length; i++) {
             const result = ftsResults[i];
-            const conv = await store.getConversationById(result.conversationId);
+            const conv = convMap
+              ? convMap.get(result.conversationId) ?? null
+              : await store.getConversationById(result.conversationId);
             if (!conv) continue;
 
             const matchTypes: string[] = [];

@@ -968,10 +968,16 @@ async function testMemoryTool(): Promise<void> {
   const deleteText = deleteResult.content[0] && "text" in deleteResult.content[0] ? deleteResult.content[0].text : "";
   assert(deleteText.includes("deleted"), "delete 结果");
 
-  // clear
-  const clearResult = await memoryTool.handler!(adminCtx, "clear") as CallToolResult;
+  // clear (clear 现在要求显式 confirm=true 防止误清空)
+  const clearResult = await memoryTool.handler!(adminCtx, "clear", undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true) as CallToolResult;
   const clearText = clearResult.content[0] && "text" in clearResult.content[0] ? clearResult.content[0].text : "";
+  console.log("  clear 输出:", JSON.stringify(clearText));
   assert(clearText.includes("Cleared"), "clear 结果");
+
+  // 未带 confirm 的 clear 必须被拒绝
+  const clearNoConfirm = await memoryTool.handler!(adminCtx, "clear") as CallToolResult;
+  const clearNoConfirmText = clearNoConfirm.content[0] && "text" in clearNoConfirm.content[0] ? clearNoConfirm.content[0].text : "";
+  assert(clearNoConfirmText.includes("confirm=true"), "clear 未确认时返回错误");
 
   // 清理
   await rm(testDir, { recursive: true });
