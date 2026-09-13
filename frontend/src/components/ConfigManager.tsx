@@ -166,6 +166,8 @@ export default function ConfigManager() {
         }
         setConfig(data)
         setSafetyKeywordsStr(data?.safetyKeywords?.join(', ') || '')
+      } else {
+        setFetchError(`加载配置失败 (HTTP ${cfgRes.status})`)
       }
       if (provRes.ok) {
         const data = await provRes.json()
@@ -270,6 +272,7 @@ export default function ConfigManager() {
       }
     } catch (error) {
       console.error('Error saving config:', error)
+      showMessage('保存失败: 无法连接到服务器', 'error')
     } finally {
       setSaving(false)
     }

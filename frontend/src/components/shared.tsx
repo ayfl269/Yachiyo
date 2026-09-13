@@ -41,9 +41,14 @@ export function useAsyncEffect(
     const controller = new AbortController()
     const promise = effect(controller.signal)
     if (promise) {
-      promise.catch(() => {
-        // AbortError is expected when the component unmounts; swallow it
-        // so it doesn't surface as an unhandled rejection.
+      promise.catch((err: unknown) => {
+        // 只吞掉组件卸载/依赖变更导致的 AbortError（预期内的取消），
+        // 其余错误照常输出，避免真实故障被静默吞掉。
+        const isAbortError =
+          (err instanceof Error && err.name === 'AbortError') || controller.signal.aborted
+        if (!isAbortError) {
+          console.error('useAsyncEffect error:', err)
+        }
       })
     }
     return () => controller.abort()

@@ -108,7 +108,11 @@ export default function SkillManager() {
   const [viewerContent, setViewerContent] = useState('')
   const [viewerLoading, setViewerLoading] = useState(false)
   const [viewerSaving, setViewerSaving] = useState(false)
-  const viewerIsReadonly = false
+  // 只读技能（readonly 标记来自 /api/skills 返回的 Skill 数据）的文件不可编辑保存
+  const viewerIsReadonly = useMemo(
+    () => skills.find(s => s.name === browserSkillName)?.readonly ?? false,
+    [skills, browserSkillName]
+  )
 
   // ===== Computed =====
   const activeCount = useMemo(() => skills.filter(s => s.active).length, [skills])
@@ -889,7 +893,7 @@ export default function SkillManager() {
         footer={
           <>
             <button className="btn" onClick={closeFileViewer}>关闭</button>
-            <button className="btn primary" disabled={viewerSaving} onClick={saveFileContent}>
+            <button className="btn primary" disabled={viewerSaving || viewerIsReadonly} onClick={saveFileContent}>
               {viewerSaving
                 ? <><RefreshCw size={14} className="animate-spin" /> 保存中...</>
                 : <><Save size={14} /> 保存</>}

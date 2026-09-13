@@ -34,9 +34,10 @@ export default function AccountSettings({ onSuccess }: AccountSettingsProps) {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     const u = newUsername.trim()
-    const p = newPassword.trim()
-    const cp = currentPassword.trim()
-    const cf = confirmPassword.trim()
+    // 密码不做 trim：首尾含空格的密码是合法密码
+    const p = newPassword
+    const cp = currentPassword
+    const cf = confirmPassword
 
     if (!cp || !u || !p || !cf) {
       showMessage('所有字段均为必填项', 'error')

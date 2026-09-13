@@ -60,6 +60,23 @@ function getTransportType(config: Record<string, any>): 'stdio' | 'http' {
   return 'url' in config ? 'http' : 'stdio'
 }
 
+/**
+ * 将 args 数组回填为命令行文本：含空白、引号或反斜杠的参数重新加双引号
+ * （内部的双引号与反斜杠转义），保证 shellSplitArgs 能无损还原原参数
+ * （round-trip），避免含空格的参数在回填后被拆坏。
+ */
+function joinArgsForDisplay(args: string[]): string {
+  return args
+    .map((arg) => {
+      if (arg === '') return '""'
+      if (/[\\'"\s]/.test(arg)) {
+        return `"${arg.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+      }
+      return arg
+    })
+    .join(' ')
+}
+
 function configToForm(name: string, config: Record<string, any>): EditForm {
   const transportType = getTransportType(config)
   const envArray: Array<{ key: string; value: string; id: string }> = []
@@ -74,7 +91,7 @@ function configToForm(name: string, config: Record<string, any>): EditForm {
       headersArray.push({ key, value: String(value), id: genRowId() })
     }
   }
-  const argsString = Array.isArray(config.args) ? config.args.join(' ') : ''
+  const argsString = Array.isArray(config.args) ? joinArgsForDisplay(config.args) : ''
   return {
     serverName: name,
     transportType,
@@ -287,7 +304,7 @@ export default function McpManager() {
             ...prev,
             transportType: 'stdio' as const,
             command: parsed.command || '',
-            argsStr: Array.isArray(parsed.args) ? parsed.args.join(' ') : '',
+            argsStr: Array.isArray(parsed.args) ? joinArgsForDisplay(parsed.args) : '',
             env
           }
         }

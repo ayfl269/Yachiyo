@@ -263,7 +263,7 @@ export default function PersonaManager() {
   const executeDelete = async () => {
     if (!deleteTarget) return
     try {
-      const res = await apiFetch(`/api/personas/${deleteTarget.id}`, { method: 'DELETE' })
+      const res = await apiFetch(`/api/personas/${encodeURIComponent(deleteTarget.id)}`, { method: 'DELETE' })
       if (res.ok) {
         showMessage(`角色 "${deleteTarget.name}" 已删除`)
         setShowDeleteModal(false)

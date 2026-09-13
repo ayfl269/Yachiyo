@@ -82,7 +82,23 @@ function getPlatformLogoUrl(adapter: Adapter): string {
   return '/platform_logos/onebot.png'
 }
 
+// 二维码轮询次数上限（60 * 3s = 3 分钟），对手动刷新后重建的轮询同样生效
+const WX_QR_MAX_POLLS = 60
+
 // ===== Component =====
+/**
+ * 非 ok 响应时安全解析错误体：错误体不是 JSON（如网关 HTML/纯文本）时
+ * 回退为「fallback + 状态码」文本，避免把 JSON 解析异常当错误提示给用户。
+ */
+async function readErrorMessage(res: Response, fallback: string): Promise<string> {
+  try {
+    const data = await res.json()
+    return data.error || data.message || `${fallback} (HTTP ${res.status})`
+  } catch {
+    return `${fallback} (HTTP ${res.status})`
+  }
+}
+
 export default function MessagePlatformManager() {
   const [adapters, setAdapters] = useState<Adapter[]>([])
   const [isLoading, setIsLoading] = useState(false)
@@ -119,6 +135,9 @@ export default function MessagePlatformManager() {
   const [wxPostCreateError, setWxPostCreateError] = useState('')
   const wxPostCreatePollTimer = useRef<ReturnType<typeof setInterval> | null>(null)
   const wxPostCreateDelayTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 二维码轮询已用次数（跨手动刷新共享：重建轮询时继承已用次数，
+  // 保证总轮询时长仍有上限）。与 WX_QR_MAX_POLLS 配合使用。
+  const wxPostCreatePollCountRef = useRef(0)
 
   const [wxScanningAdapterId, setWxScanningAdapterId] = useState('')
 
@@ -175,11 +194,12 @@ export default function MessagePlatformManager() {
     setWxPostCreateStatus('')
     setWxPostCreateAccountId('')
     setWxPostCreateError('')
-    let pollCount = 0
-    const MAX_POLLS = 60 // 60 * 3s = 3 minutes max
+    wxPostCreatePollCountRef.current = 0
+    const MAX_POLLS = WX_QR_MAX_POLLS
 
     const poll = async () => {
-      pollCount++
+      wxPostCreatePollCountRef.current++
+      const pollCount = wxPostCreatePollCountRef.current
       try {
         const res = await apiFetch(`/api/adapters/${encodeURIComponent(adapterId)}/qrcode`)
         if (!res.ok) {
@@ -232,7 +252,7 @@ export default function MessagePlatformManager() {
     })
     await poll()
     wxPostCreatePollTimer.current = setInterval(() => {
-      if (pollCount >= MAX_POLLS) {
+      if (wxPostCreatePollCountRef.current >= MAX_POLLS) {
         stopWxPostCreatePolling()
         setWxPostCreateError('超时，请刷新重试或重新添加适配器')
         return
@@ -262,6 +282,12 @@ export default function MessagePlatformManager() {
             }
           } catch { /* ignore */ }
           wxPostCreatePollTimer.current = setInterval(async () => {
+            // 手动刷新重建轮询时继承已用次数，保证总轮询时长仍有上限
+            if (wxPostCreatePollCountRef.current >= WX_QR_MAX_POLLS) {
+              stopWxPostCreatePolling()
+              setWxPostCreateError('超时，请刷新重试或重新添加适配器')
+              return
+            }
             try {
               const res = await apiFetch(`/api/adapters/${encodeURIComponent(scanningId)}/qrcode`)
               if (res.ok) {
@@ -393,8 +419,7 @@ export default function MessagePlatformManager() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ type: modalAdapterType, config })
         })
-        const result = await res.json()
-        if (!res.ok) throw new Error(result.error || '更新适配器失败')
+        if (!res.ok) throw new Error(await readErrorMessage(res, '更新适配器失败'))
 
         setShowModal(false)
         resetForm()
@@ -409,8 +434,7 @@ export default function MessagePlatformManager() {
             config
           })
         })
-        const result = await res.json()
-        if (!res.ok) throw new Error(result.error || '添加适配器失败')
+        if (!res.ok) throw new Error(await readErrorMessage(res, '添加适配器失败'))
 
         if (modalAdapterType === 'weixin_oc' || (modalAdapterType === 'qqofficial' && qqLoginMethod === 'qr')) {
           setWxScanningAdapterId(modalAdapterId.trim())
@@ -443,8 +467,7 @@ export default function MessagePlatformManager() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ type: modalAdapterType, config })
       })
-      const result = await res.json()
-      if (!res.ok) throw new Error(result.error || '重置登录状态失败')
+      if (!res.ok) throw new Error(await readErrorMessage(res, '重置登录状态失败'))
 
       setIsEditMode(false)
       if (modalAdapterType === 'weixin_oc' || modalAdapterType === 'qqofficial') {
@@ -469,8 +492,7 @@ export default function MessagePlatformManager() {
         method: 'DELETE'
       })
       if (!res.ok) {
-        const result = await res.json()
-        throw new Error(result.error || '移除失败')
+        throw new Error(await readErrorMessage(res, '移除失败'))
       }
       await fetchAdapters()
     } catch (err: any) {

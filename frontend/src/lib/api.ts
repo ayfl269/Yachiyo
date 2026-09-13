@@ -112,5 +112,23 @@ export async function apiFetch(
     }
   }
 
-  return fetch(input, init)
+  const response = await fetch(input, init)
+
+  // 会话过期统一处理：同源 /api/ 请求返回 401 时清除本地 token 并通知
+  // App 重新探测认证态（避免循环依赖，不用 import App）。
+  // 登录/改密等认证接口本身的 401 属于正常业务响应，不触发登出流程。
+  if (isSameOriginApi && response.status === 401 && !isAuthEndpoint(url)) {
+    authStore.clearToken()
+    window.dispatchEvent(new CustomEvent('auth:expired'))
+  }
+
+  return response
+}
+
+/** 认证接口本身返回的 401 是业务结果（如密码错误），不应触发登出。 */
+function isAuthEndpoint(url: string): boolean {
+  const path = url.startsWith(window.location.origin)
+    ? url.slice(window.location.origin.length)
+    : url
+  return path.startsWith('/api/auth/')
 }

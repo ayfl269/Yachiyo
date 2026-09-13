@@ -254,8 +254,21 @@ export default function ChatDataManager() {
   }
 
   // Combined onMounted + watch(searchQuery): fires on mount and when searchQuery changes
+  // 搜索输入 300ms 防抖：避免每次击键都触发请求；挂载时立即加载一次
+  const isFirstSearchEffect = useRef(true)
   useEffect(() => {
     fetchConversations(1)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  useEffect(() => {
+    if (isFirstSearchEffect.current) {
+      isFirstSearchEffect.current = false
+      return
+    }
+    const timer = setTimeout(() => {
+      fetchConversations(1)
+    }, 300)
+    return () => clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchQuery])
 

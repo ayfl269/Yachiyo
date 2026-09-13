@@ -296,6 +296,9 @@ export default function ProviderManager() {
   const [savingProviders, setSavingProviders] = useState<string[]>([])
   const [detectingDims, setDetectingDims] = useState<string[]>([])
   const [isSourceModified, setIsSourceModified] = useState(false)
+  // 高级配置 JSON textarea 中尚未成功解析的原始文本（key -> raw text）。
+  // 解析失败时不回滚结构化 state，保留用户输入的中间态；保存时以解析结果为准。
+  const [rawJsonText, setRawJsonText] = useState<Record<string, string>>({})
   const [modelSearch, setModelSearch] = useState('')
 
   // Dialog states
@@ -479,6 +482,7 @@ export default function ProviderManager() {
     setAvailableModels([])
     setModelMetadata({})
     setIsSourceModified(false)
+    setRawJsonText({})
   }
 
   function addProviderSource(templateKey: string) {
@@ -580,6 +584,15 @@ export default function ProviderManager() {
 
   async function saveProviderSource(): Promise<boolean> {
     if (!editableProviderSource) return false
+    // 存在尚未成功解析的原始 JSON 文本时以解析为准，失败则阻止保存
+    for (const [key, raw] of Object.entries(rawJsonText)) {
+      try {
+        JSON.parse(raw)
+      } catch {
+        showMessage(`高级配置 "${key}" 不是合法的 JSON，请修正后再保存`, 'error')
+        return false
+      }
+    }
     setSavingSource(true)
     const originalId = selectedProviderSourceOriginalId || editableProviderSource.id
     try {
@@ -913,12 +926,21 @@ export default function ProviderManager() {
   }
 
   function tryParseJson(e: ChangeEvent<HTMLTextAreaElement>, key: string) {
+    const raw = e.target.value
     try {
-      const parsed = JSON.parse(e.target.value)
+      const parsed = JSON.parse(raw)
+      // 解析成功：更新结构化 state，并清除该字段的原始文本快照
+      setRawJsonText(prev => {
+        if (!(key in prev)) return prev
+        const next = { ...prev }
+        delete next[key]
+        return next
+      })
       setEditableProviderSource(prev => prev ? { ...prev, [key]: parsed } : prev)
       setIsSourceModified(true)
     } catch {
-      // ignore parse errors, keep the raw text
+      // 解析失败：保留用户的原始文本（允许非法中间态），不回滚旧值
+      setRawJsonText(prev => ({ ...prev, [key]: raw }))
     }
   }
 
@@ -1154,7 +1176,7 @@ export default function ProviderManager() {
                               </label>
                             ) : (
                               <textarea
-                                value={JSON.stringify(value, null, 2)}
+                                value={rawJsonText[key] ?? JSON.stringify(value, null, 2)}
                                 onChange={e => tryParseJson(e, key)}
                                 className="form-control font-mono textarea-sm"
                                 rows={2}

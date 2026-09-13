@@ -107,6 +107,15 @@ function App() {
     probeAuth()
   }, [])
 
+  // 会话过期（apiFetch 统一拦截到 401）时重新探测认证态，回到登录界面。
+  useEffect(() => {
+    const handleAuthExpired = (): void => {
+      probeAuth()
+    }
+    window.addEventListener('auth:expired', handleAuthExpired)
+    return () => window.removeEventListener('auth:expired', handleAuthExpired)
+  }, [])
+
   // Close user dropdown on outside click.
   useEffect(() => {
     if (!showUserMenu) return
@@ -124,7 +133,8 @@ function App() {
     setAuthError('')
 
     const username = usernameInput.trim()
-    const password = passwordInput.trim()
+    // 密码不做 trim：首尾含空格的密码是合法密码，trim 会导致其无法登录
+    const password = passwordInput
     if (!username || !password) return
     try {
       const res = await apiFetch('/api/auth/login', {
@@ -154,8 +164,9 @@ function App() {
     e.preventDefault()
     setAuthError('')
     const newUsername = newUsernameInput.trim()
-    const newPassword = newPasswordInput.trim()
-    const confirmPassword = confirmPasswordInput.trim()
+    // 密码不做 trim：首尾含空格的密码是合法密码
+    const newPassword = newPasswordInput
+    const confirmPassword = confirmPasswordInput
 
     if (!newUsername || !newPassword || !confirmPassword) {
       setAuthError('所有字段均为必填项。')
@@ -324,7 +335,7 @@ function App() {
                   type={showNewPassword ? 'text' : 'password'}
                   value={newPasswordInput}
                   onChange={(e) => setNewPasswordInput(e.target.value)}
-                  placeholder="至少5个字符"
+                  placeholder="至少8个字符"
                   style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', paddingRight: '2.4rem', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 14 }}
                 />
                 <button

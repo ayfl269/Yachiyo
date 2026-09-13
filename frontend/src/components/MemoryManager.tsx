@@ -142,6 +142,12 @@ export default function MemoryManager() {
 
   const { toast, showMessage } = useToast()
 
+  // 全库记忆总数：清空接口（POST /api/memories/clear）删除的是全部记忆，
+  // 与当前搜索/类型筛选无关，因此禁用条件与确认文案都用全量计数。
+  // stats.total 来自 /api/memories/stats（无筛选全量统计）；stats 缺失时
+  // 退回列表接口的 total（仅在无筛选时等于全量）。
+  const globalMemoryTotal = stats?.total ?? total
+
   // ===== API =====
   const fetchMemories = async (opts?: { search?: string; type?: MemoryType | '' }) => {
     const search = opts?.search !== undefined ? opts.search : searchQuery
@@ -397,7 +403,7 @@ export default function MemoryManager() {
             <Workflow size={16} />
             {consolidatingLtm ? <span>合并中...</span> : <span>合并长期记忆</span>}
           </button>
-          <button className="btn danger" onClick={confirmClear} disabled={memories.length === 0}>
+          <button className="btn danger" onClick={confirmClear} disabled={globalMemoryTotal === 0}>
             <Trash2 size={16} /> 清空全部
           </button>
           <button className="btn primary" onClick={handleCreate}>
@@ -798,8 +804,8 @@ export default function MemoryManager() {
       >
         <div className="confirm-content">
           <AlertCircle size={32} className="confirm-icon danger" />
-          <p>确定要清空所有 <strong>{total} 条</strong> 记忆吗？</p>
-          <p className="confirm-warn">此操作将不可逆地删除所有记忆数据！</p>
+          <p>确定要清空所有 <strong>{globalMemoryTotal} 条</strong> 记忆吗？</p>
+          <p className="confirm-warn">此操作将不可逆地删除全部记忆数据（包括当前筛选未显示的记忆）！</p>
         </div>
       </Modal>
 

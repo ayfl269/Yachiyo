@@ -27,6 +27,24 @@ interface Plugin {
   supportPlatforms: string[]
 }
 
+/**
+ * 仅允许 http(s) 绝对链接渲染为 <a href>，其他协议（如 javascript:）
+ * 降级为纯文本，防止插件元数据中的恶意 URI 成为 XSS 入口。
+ */
+function isSafeHttpUrl(url: string): boolean {
+  return /^https?:\/\//i.test(url)
+}
+
+/**
+ * logo 仅允许相对路径（无协议前缀）或 http(s) 外链作为 img src，
+ * 拦截 javascript:/data: 等协议。
+ */
+function isSafeLogoSrc(src: string): boolean {
+  const schemeMatch = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.exec(src)
+  if (!schemeMatch) return true
+  return /^https?:$/i.test(schemeMatch[0])
+}
+
 export default function PluginManager() {
   const [plugins, setPlugins] = useState<Plugin[]>([])
   const [isLoading, setIsLoading] = useState(false)
@@ -125,7 +143,7 @@ export default function PluginManager() {
               <div className="card-top">
                 <div className="plugin-brand">
                   <div className="brand-icon-wrapper">
-                    {plugin.logoPath ? (
+                    {plugin.logoPath && isSafeLogoSrc(plugin.logoPath) ? (
                       <img src={plugin.logoPath} className="plugin-logo" alt="logo" />
                     ) : (
                       <Puzzle className="brand-icon text-indigo" />
@@ -195,9 +213,9 @@ export default function PluginManager() {
                 </div>
               </div>
 
-              {plugin.repo && (
+              {plugin.repo && isSafeHttpUrl(plugin.repo) && (
                 <div className="card-footer-actions">
-                  <a href={plugin.repo} target="_blank" className="repo-link">
+                  <a href={plugin.repo} target="_blank" rel="noopener noreferrer" className="repo-link">
                     <Github className="github-icon" />
                     开源仓库地址
                   </a>
