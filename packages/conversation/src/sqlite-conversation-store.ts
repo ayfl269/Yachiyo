@@ -188,6 +188,27 @@ export const CHAT_MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_conversations_last_indexed ON conversations(last_indexed_at);
     `,
   },
+  {
+    // 增量回填：v2 快照之后，未经 SqliteConversationStore 写入通道落库的对话
+    // （例如手工导入、外部工具写入）不会进入 FTS 索引。此迁移只补插"尚无
+    // FTS 行"的对话，不触碰已有索引行，因此可安全地重复执行（每次应用一次）。
+    // 注意这仍无法覆盖"两次迁移之间绕过通道写入"的行——根治需要触发器或
+    // 外部内容表，见 syncConversationFts 处的注释。
+    version: 5,
+    name: "conversations_fts_backfill",
+    up: `
+      INSERT INTO conversations_fts (conversation_id, title, content)
+      SELECT
+        c.id,
+        c.title,
+        COALESCE((
+          SELECT group_concat(json_extract(v.value, '$.content'), ' ')
+          FROM json_each(c.history) v
+        ), '')
+      FROM conversations c
+      WHERE c.id NOT IN (SELECT conversation_id FROM conversations_fts);
+    `,
+  },
 ];
 
 // ── Row Types ──
@@ -316,6 +337,8 @@ interface FtsSearchRow {
   conversation_id: string;
   title: string;
   snippet: string;
+  title_matched: number;
+  content_matched: number;
 }
 
 // ── SqliteConversationStore ──
@@ -547,14 +570,18 @@ export class SqliteConversationStore extends ConversationStore {
   }
 
   async getMessageCount(options?: { since?: Date }): Promise<number> {
+    // 统计口径说明：conversations.history 中的消息没有逐条时间戳（只有
+    // role/content），无法按消息时间过滤；因此"时段内消息数"与 JSON 文件存储
+    // 保持一致，统一从带 created_at 的 platform_message_history 表统计，
+    // 而不是统计活跃对话（updated_at >= since）里的全部历史 user 消息。
     if (options?.since) {
       const row = this.db.prepare(
-        `SELECT COUNT(*) as cnt FROM conversations, json_each(history) WHERE json_extract(value, '$.role') = 'user' AND updated_at >= ?`
+        `SELECT COUNT(*) as cnt FROM platform_message_history WHERE created_at >= ?`
       ).get(options.since.toISOString()) as CountRow;
       return row?.cnt ?? 0;
     }
     const row = this.db.prepare(
-      `SELECT COUNT(*) as cnt FROM conversations, json_each(history) WHERE json_extract(value, '$.role') = 'user'`
+      `SELECT COUNT(*) as cnt FROM platform_message_history`
     ).get() as CountRow;
     return row?.cnt ?? 0;
   }
@@ -783,6 +810,13 @@ export class SqliteConversationStore extends ConversationStore {
    * Parses the history JSON, concatenates all message contents into plain text,
    * then replaces the FTS row for this conversation_id.
    * Must be called within a transaction.
+   *
+   * 已知限制：FTS 索引只在经由本 store 的写入通道（createConversation /
+   * updateConversation 带 title/history 变更）时同步。绕过该通道写入
+   * conversations 表的行（例如手工 SQL、外部工具、或迁移 v2 快照之前
+   * 已存在且此后再未更新的对话）不会进入 FTS 索引，内容搜索会漏结果。
+   * 迁移 v5（conversations_fts_backfill）在启动时对"尚无 FTS 行"的对话做
+   * 一次增量回填，缓解该问题；但每次回填之间绕过通道写入的行仍会漏索引。
    */
   private syncConversationFts(id: string, title: string, historyJson: string): void {
     let content = "";
@@ -815,7 +849,12 @@ export class SqliteConversationStore extends ConversationStore {
     const limit = options.limit ?? 10;
     const offset = options.offset ?? 0;
     const ftsQuery = escapeFtsQuery(query);
-    const lowerQuery = query.toLowerCase();
+    // Column-filtered MATCH queries (FTS5 `{column} : phrase` syntax) used to
+    // decide which column actually matched. We no longer infer contentMatched
+    // from `snippet.includes(">>>")`: the snippet markers collide with literal
+    // ">>>" in Markdown quotes, producing false positives.
+    const titleColumnFilter = `{title} : ${ftsQuery}`;
+    const contentColumnFilter = `{content} : ${ftsQuery}`;
 
     const conditions: string[] = ["conversations_fts MATCH ?"];
     const params: unknown[] = [ftsQuery];
@@ -832,17 +871,19 @@ export class SqliteConversationStore extends ConversationStore {
       `SELECT
          f.conversation_id as conversation_id,
          c.title as title,
-         snippet(conversations_fts, 2, '>>>', '<<<', '...', 20) as snippet
+         snippet(conversations_fts, 2, '>>>', '<<<', '...', 20) as snippet,
+         (SELECT COUNT(*) FROM conversations_fts WHERE conversations_fts MATCH ? AND rowid = f.rowid) as title_matched,
+         (SELECT COUNT(*) FROM conversations_fts WHERE conversations_fts MATCH ? AND rowid = f.rowid) as content_matched
        FROM conversations_fts f
        JOIN conversations c ON c.id = f.conversation_id
        WHERE ${where}
        ORDER BY c.updated_at DESC
        LIMIT ? OFFSET ?`
-    ).all(...params, limit, offset) as FtsSearchRow[];
+    ).all(titleColumnFilter, contentColumnFilter, ...params, limit, offset) as FtsSearchRow[];
 
     return rows.map((r) => {
-      const titleMatched = r.title.toLowerCase().includes(lowerQuery);
-      const contentMatched = r.snippet.includes(">>>");
+      const titleMatched = r.title_matched > 0;
+      const contentMatched = r.content_matched > 0;
       return {
         conversationId: r.conversation_id,
         titleMatched,

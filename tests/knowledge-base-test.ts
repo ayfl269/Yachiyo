@@ -275,14 +275,23 @@ async function testInMemoryVectorStore(): Promise<void> {
   assert(kb1Results.length === 2, "kbId=kb1 过滤后仅返回 2 个");
   assert(kb1Results.every((r) => r.chunkId !== "c3"), "不包含 kb2 的 c3");
 
-  // 2.4 维度不匹配抛错
-  let dimError = false;
+  // 2.4 维度不匹配：跳过并告警（与 SqliteVectorStore 行为一致，#117）
+  // 旧行为是抛 "Dimension mismatch"——换 embedding 模型后整个 KB 永久失败，
+  // 现改为跳过维度不一致的向量并 console.warn。使用独立 store 以免影响 2.8 的计数断言。
+  const dimStore = new InMemoryVectorStore();
+  await dimStore.initialize();
+  await dimStore.upsert("c1", [1, 0, 0], "chunk one", "d1", "doc1", 0, "kb1");
+  await dimStore.upsert("c4", [1, 0, 0, 0], "chunk four-dim", "d1", "doc1", 0, "kb1");
+  let dimSearchThrew = false;
+  let dimSearchResults: Awaited<ReturnType<typeof store.search>> = [];
   try {
-    await store.search([1, 0], 10);
-  } catch (e) {
-    dimError = (e as Error).message.includes("Dimension mismatch");
+    dimSearchResults = await dimStore.search([1, 0, 0], 10, "kb1");
+  } catch {
+    dimSearchThrew = true;
   }
-  assert(dimError, "维度不匹配抛出 Dimension mismatch 错误");
+  assert(!dimSearchThrew, "维度不匹配不抛错（跳过并告警）");
+  assert(dimSearchResults.every((r) => r.chunkId !== "c4"), "维度不匹配的向量被跳过");
+  assert(dimSearchResults.some((r) => r.chunkId === "c1"), "维度匹配的向量正常返回");
 
   // 2.5 queryNorm=0 返回空
   const zeroResults = await store.search([0, 0, 0], 10);

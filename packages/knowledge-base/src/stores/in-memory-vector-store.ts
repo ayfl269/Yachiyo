@@ -69,6 +69,12 @@ export class InMemoryVectorStore extends VectorStore {
 
     const len = queryEmbedding.length;
 
+    // Skip rows whose embedding dimension doesn't match the query (e.g. after
+    // a provider model change) instead of failing the entire search. This
+    // mirrors SqliteVectorStore.search — a dimension throw here would
+    // permanently break the whole KB after switching embedding models.
+    let dimensionMismatchCount = 0;
+
     for (const [chunkId, vector] of this.store) {
       // Filter by kbId if provided
       if (kbId && vector.kbId !== kbId) {
@@ -77,9 +83,8 @@ export class InMemoryVectorStore extends VectorStore {
 
       const emb = vector.embedding;
       if (emb.length !== len) {
-        throw new Error(
-          `Dimension mismatch: query vector has length ${len}, but stored vector ${chunkId} has length ${emb.length}`
-        );
+        dimensionMismatchCount++;
+        continue;
       }
 
       let dot = 0;
@@ -93,6 +98,12 @@ export class InMemoryVectorStore extends VectorStore {
       const score = normB === 0 ? 0 : dot / (queryNorm * normB);
 
       results.push({ chunkId, score, vector });
+    }
+
+    if (dimensionMismatchCount > 0) {
+      console.warn(
+        `[InMemoryVectorStore] Skipped ${dimensionMismatchCount} vector(s) with mismatched dimensions during search.`,
+      );
     }
 
     results.sort((a, b) => b.score - a.score);

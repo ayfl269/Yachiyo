@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse, type Server } 
 import { join, extname, resolve, relative, isAbsolute } from "path";
 import { readFile, stat, writeFile, mkdir, unlink, readdir } from "fs/promises";
 import { cpus, tmpdir, totalmem } from "os";
-import { timingSafeEqual, randomBytes, scryptSync } from "crypto";
+import { timingSafeEqual, randomBytes, scryptSync, createHash } from "crypto";
 
 /**
  * Helper to generate an scrypt password hash.
@@ -111,6 +111,8 @@ interface ProviderRuntimeConfig {
 interface ZipEntry {
   name: string;
   entryName: string;
+  /** Uncompressed size in bytes (adm-zip `header.size`); best-effort. */
+  header?: { size?: number };
 }
 
 /** Minimal zip reader shape used by skill-parsing helpers. */
@@ -123,6 +125,27 @@ export function isPathSafe(basePath: string, targetPath: string): boolean {
   const resolvedTarget = resolve(resolvedBase, targetPath);
   const rel = relative(resolvedBase, resolvedTarget);
   return !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+/**
+ * Sanitize a skill name / path segment derived from attacker-controlled ZIP
+ * entry names or archive file content (SKILL.md frontmatter, manifest.json):
+ *
+ *  - take the basename (strip any directory components),
+ *  - reject `.` / `..` traversal segments outright,
+ *  - slug-ify to `[a-zA-Z0-9._-]`.
+ *
+ * Returns an empty string when nothing safe remains, so callers can reject
+ * the entry. Without this, a ZIP entry named `../../x` or a manifest with
+ * `name: "../"` produced a registered skill whose `path` escaped the skills
+ * root and defeated the isPathSafe base in /api/skills/file routes.
+ */
+export function sanitizeSkillPathSegment(raw: string): string {
+  const base = raw.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? "";
+  if (!base || base === "." || base === "..") return "";
+  const slug = base.replace(/[^a-zA-Z0-9._-]/g, "_");
+  if (!slug || slug === "." || slug === "..") return "";
+  return slug;
 }
 
 /**
@@ -187,6 +210,18 @@ export function parseJsonObject(
 }
 
 /**
+ * Parse an integer query parameter. Returns `fallback` when the parameter is
+ * absent, empty, or not numeric (`parseInt("abc")` → NaN would otherwise be
+ * bound into SQLite queries and throw). Partially numeric values like "12abc"
+ * keep their parseInt prefix.
+ */
+function parseQueryInt(raw: string | null, fallback: number): number {
+  if (raw === null || raw.trim() === "") return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isNaN(n) ? fallback : n;
+}
+
+/**
  * Sentinel value returned in place of a real secret in API responses.
  * The frontend treats this as "key unchanged": when the user saves a form
  * without editing the key field, this value is sent back and the backend
@@ -247,17 +282,30 @@ export class DashboardServer {
 
   // ── Session persistence (SQLite-backed) ──
 
+  /**
+   * Session tokens are stored only as SHA-256 hashes — a stolen sessions.db
+   * must not yield usable bearer tokens. `getSession` transparently migrates
+   * legacy plaintext rows on first lookup so upgrades are seamless.
+   */
+  private hashToken(token: string): string {
+    return createHash("sha256").update(token).digest("hex");
+  }
+
   private saveSession(token: string, username: string, mustChange: boolean, expiresAt: number): void {
     const db = this.ctx.dbManager.getDb("config");
+    // Store the SHA-256(token) — never the raw token.
     db.prepare(`
       INSERT OR REPLACE INTO dashboard_sessions (token, username, must_change, expires_at)
       VALUES (?, ?, ?, ?)
-    `).run(token, username, mustChange ? 1 : 0, expiresAt);
+    `).run(this.hashToken(token), username, mustChange ? 1 : 0, expiresAt);
   }
 
   private deleteSession(token: string): void {
     const db = this.ctx.dbManager.getDb("config");
-    db.prepare("DELETE FROM dashboard_sessions WHERE token = ?").run(token);
+    // Delete both the hashed form and the raw form: the raw match is only
+    // relevant for legacy plaintext rows that were never looked up (and thus
+    // never migrated by getSession), e.g. logout right after upgrade.
+    db.prepare("DELETE FROM dashboard_sessions WHERE token = ? OR token = ?").run(this.hashToken(token), token);
   }
 
   /**
@@ -267,8 +315,13 @@ export class DashboardServer {
    */
   private revokeOtherSessions(username: string, keepToken: string): void {
     const db = this.ctx.dbManager.getDb("config");
+    // The stored token column holds SHA-256 hashes, so the keepToken must be
+    // hashed too — otherwise the current session's own row also matches the
+    // DELETE and gets revoked. Callers always resolved `keepToken` through
+    // getSession() beforehand, which migrates legacy plaintext rows to hashed
+    // storage, so the hash comparison is valid here.
     const result = db.prepare("DELETE FROM dashboard_sessions WHERE username = ? AND token != ?")
-      .run(username, keepToken);
+      .run(username, this.hashToken(keepToken));
     if (result.changes > 0) {
       console.info(`[DashboardServer] Revoked ${result.changes} other session(s) for user "${username}" after credential change.`);
     }
@@ -276,9 +329,25 @@ export class DashboardServer {
 
   private getSession(token: string): { username: string; mustChange: boolean; expiresAt: number } | null {
     const db = this.ctx.dbManager.getDb("config");
-    const row = db.prepare("SELECT username, must_change, expires_at FROM dashboard_sessions WHERE token = ?").get(token) as
+    const select = "SELECT username, must_change, expires_at FROM dashboard_sessions WHERE token = ?";
+    // Primary lookup: hashed token (all sessions written by saveSession).
+    let row = db.prepare(select).get(this.hashToken(token)) as
       | { username: string; must_change: number; expires_at: number } | undefined;
-    if (!row) return null;
+    if (!row) {
+      // Legacy plaintext row (written before token hashing existed): migrate
+      // it in place so the upgrade is seamless and the plaintext token is
+      // removed from storage immediately.
+      row = db.prepare(select).get(token) as
+        | { username: string; must_change: number; expires_at: number } | undefined;
+      if (!row) return null;
+      db.transaction(() => {
+        db.prepare("DELETE FROM dashboard_sessions WHERE token = ?").run(token);
+        db.prepare(`
+          INSERT OR REPLACE INTO dashboard_sessions (token, username, must_change, expires_at)
+          VALUES (?, ?, ?, ?)
+        `).run(this.hashToken(token), row!.username, row!.must_change, row!.expires_at);
+      })();
+    }
     return {
       username: row.username,
       mustChange: row.must_change === 1,
@@ -305,7 +374,7 @@ export class DashboardServer {
    */
   private static readonly AUTO_PASSWORD_BYTES = 24;
 
-  private ensureDefaultUser(): void {
+  private async ensureDefaultUser(): Promise<void> {
     try {
       const db = this.ctx.dbManager.getDb("config");
       const countRow = db.prepare("SELECT COUNT(*) as count FROM dashboard_users").get() as { count: number } | undefined;
@@ -315,7 +384,8 @@ export class DashboardServer {
         // Reject the historical "admin/admin" weak-default.
         // Operator must either:
         //   (a) set DASHBOARD_DEFAULT_PASSWORD to a value ≥ MIN_PASSWORD_LENGTH, or
-        //   (b) let us autogenerate a strong one-time password (logged once below).
+        //   (b) let us autogenerate a strong one-time password (written to a
+        //       file with restricted permissions, logged once below).
         const envPass = process.env.DASHBOARD_DEFAULT_PASSWORD;
         let defaultPass: string;
         let autogenerated = false;
@@ -334,14 +404,34 @@ export class DashboardServer {
 
         if (autogenerated) {
           // Do NOT log the generated password (even partially) to prevent
-          // clear-text leakage in shared log streams. The operator must
-          // set DASHBOARD_DEFAULT_PASSWORD explicitly or read the value from
-          // a secure channel. Only the fact that a password was generated
-          // is logged here.
+          // clear-text leakage in shared log streams. Instead, persist it to
+          // a local file with owner-only permissions (mode 0600 — on Windows
+          // Node maps this to a minimal ACL for the current user, best-effort)
+          // and point the operator at the file path plus `pnpm reset-admin`.
+          let passwordFilePath: string | null = null;
+          try {
+            const dataDir = join(process.cwd(), "data");
+            await mkdir(dataDir, { recursive: true });
+            passwordFilePath = join(dataDir, "dashboard-initial-password.txt");
+            await writeFile(
+              passwordFilePath,
+              `用户名: ${defaultUser}\n` +
+              `初始密码: ${defaultPass}\n` +
+              `说明: 这是自动生成的一次性初始密码，首次登录会强制修改。\n` +
+              `完成首次登录（或用 pnpm reset-admin 重置后）即可删除本文件。\n`,
+              { encoding: "utf-8", mode: 0o600 },
+            );
+          } catch (writeErr) {
+            console.error("[DashboardServer] Failed to write initial password file:", writeErr);
+          }
           console.warn(
             `[DashboardServer] No strong DASHBOARD_DEFAULT_PASSWORD provided; ` +
             `a random one-time password was generated for user "${defaultUser}". ` +
+            (passwordFilePath
+              ? `It has been written to "${passwordFilePath}" (restricted permissions). `
+              : `Failed to persist it to data/dashboard-initial-password.txt; use pnpm reset-admin to set a new one. `) +
             `It will not be shown in logs for security. ` +
+            `Credentials can be reset with \`pnpm reset-admin\`. ` +
             `Set DASHBOARD_DEFAULT_PASSWORD (≥ ${DashboardServer.MIN_PASSWORD_LENGTH} chars) ` +
             `to specify your own password and suppress this message.`
           );
@@ -531,7 +621,7 @@ export class DashboardServer {
   }
 
   async start(): Promise<void> {
-    this.ensureDefaultUser();
+    await this.ensureDefaultUser();
     this.startTime = Date.now();
     this.server = createServer((req, res) => this.handleRequest(req, res));
 
@@ -665,6 +755,14 @@ export class DashboardServer {
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // CORS (allowlist-based; no longer reflects "*")
     this.applyCorsHeaders(req, res);
+
+    // Security headers applied to every response (dashboard SPA + API JSON
+    // alike — they are harmless for API consumers and prevent the SPA from
+    // being framed/clickjacked or MIME-sniffed).
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Content-Security-Policy", "frame-ancestors 'none'");
+    res.setHeader("Referrer-Policy", "no-referrer");
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);
@@ -1236,8 +1334,9 @@ export class DashboardServer {
 
     // 8. POST /api/providers/default
     if (pathname === "/api/providers/default" && req.method === "POST") {
-      const body = await this.readBody(req);
-      const { id } = JSON.parse(body);
+      const parsed = await this.readJsonObjectOr400(req, res);
+      if (!parsed) return;
+      const { id } = parsed as { id?: string };
       if (id === undefined) {
         res.writeHead(400);
         res.end(JSON.stringify({ error: "Missing default provider id" }));
@@ -1251,8 +1350,9 @@ export class DashboardServer {
 
     // 9. POST /api/providers/fallback
     if (pathname === "/api/providers/fallback" && req.method === "POST") {
-      const body = await this.readBody(req);
-      const { ids } = JSON.parse(body);
+      const parsed = await this.readJsonObjectOr400(req, res);
+      if (!parsed) return;
+      const { ids } = parsed as { ids?: unknown };
       if (!Array.isArray(ids)) {
         res.writeHead(400);
         res.end(JSON.stringify({ error: "ids must be an array of strings" }));
@@ -1268,8 +1368,9 @@ export class DashboardServer {
     if (pathname.startsWith("/api/providers/") && pathname.endsWith("/toggle") && req.method === "PATCH") {
       const id = decodeURIComponent(pathname.substring("/api/providers/".length, pathname.length - "/toggle".length));
       try {
-        const body = await this.readBody(req);
-        const { enabled } = JSON.parse(body);
+        const parsed = await this.readJsonObjectOr400(req, res);
+        if (!parsed) return;
+        const { enabled } = parsed as { enabled?: boolean };
         if (enabled) {
           this.ctx.providerManager.setEnabled(id);
         } else {
@@ -1295,9 +1396,9 @@ export class DashboardServer {
 
     // 11. POST /api/mcp
     if (pathname === "/api/mcp" && req.method === "POST") {
-      const body = await this.readBody(req);
-      const payload = JSON.parse(body);
-      const { serverName, config } = payload;
+      const payload = await this.readJsonObjectOr400(req, res);
+      if (!payload) return;
+      const { serverName, config } = payload as { serverName?: string; config?: Record<string, unknown> };
       if (!serverName || !config) {
         res.writeHead(400);
         res.end(JSON.stringify({ error: "Missing serverName or config" }));
@@ -1356,11 +1457,35 @@ export class DashboardServer {
       const { dynamicSubAgentRegistry } = await import("@yachiyo/agent/subagent-create-tool.js");
       const { createAgent } = await import("@yachiyo/agent/agent.js");
       const { createHandoffTool } = await import("@yachiyo/agent/handoff.js");
-      const body = await this.readBody(req);
-      const { name, instructions, description, tools } = JSON.parse(body);
-      const agent = createAgent({ name, instructions, tools });
+      const parsed = await this.readJsonObjectOr400(req, res);
+      if (!parsed) return;
+      const { name, instructions, description, tools } = parsed as {
+        name?: unknown; instructions?: unknown; description?: unknown; tools?: unknown;
+      };
+      // Input validation: previously a missing name/instructions caused a
+      // TypeError (e.g. instructions.slice) inside createHandoffTool → 500.
+      if (typeof name !== "string" || !name.trim()) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Bad Request", message: "name 必须为非空字符串" }));
+        return;
+      }
+      if (typeof instructions !== "string" || !instructions.trim()) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Bad Request", message: "instructions 必须为非空字符串" }));
+        return;
+      }
+      if (tools !== undefined && (!Array.isArray(tools) || !tools.every((t) => typeof t === "string"))) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Bad Request", message: "tools 必须为字符串数组（可选）" }));
+        return;
+      }
+      const agent = createAgent({
+        name,
+        instructions,
+        tools: tools === undefined ? undefined : (tools as string[]),
+      });
       agent.dynamic = true;
-      const handoff = createHandoffTool(agent, description || instructions.slice(0, 120).trim());
+      const handoff = createHandoffTool(agent, (description as string | undefined) || instructions.slice(0, 120).trim());
       dynamicSubAgentRegistry.register(agent, handoff);
       res.writeHead(200);
       res.end(JSON.stringify({ success: true }));
@@ -1385,9 +1510,9 @@ export class DashboardServer {
     }
 
     if (pathname === "/api/skills" && req.method === "POST") {
-      const body = await this.readBody(req);
-      const skill = JSON.parse(body);
-      this.ctx.skillManager.registerSkill(skill);
+      const parsed = await this.readJsonObjectOr400(req, res);
+      if (!parsed) return;
+      this.ctx.skillManager.registerSkill(parsed as unknown as Parameters<typeof this.ctx.skillManager.registerSkill>[0]);
       res.writeHead(200);
       res.end(JSON.stringify({ success: true }));
       return;
@@ -1395,9 +1520,10 @@ export class DashboardServer {
 
     if (pathname.startsWith("/api/skills/") && pathname.endsWith("/toggle") && req.method === "POST") {
       const name = pathname.substring("/api/skills/".length, pathname.lastIndexOf("/toggle"));
-      const body = await this.readBody(req);
-      const { active } = JSON.parse(body);
-      this.ctx.skillManager.setSkillActive(decodeURIComponent(name), active);
+      const parsed = await this.readJsonObjectOr400(req, res);
+      if (!parsed) return;
+      const { active } = parsed as { active?: boolean };
+      this.ctx.skillManager.setSkillActive(decodeURIComponent(name), active === true);
       res.writeHead(200);
       res.end(JSON.stringify({ success: true }));
       return;
@@ -1446,9 +1572,9 @@ export class DashboardServer {
     }
 
     if (pathname === "/api/kbs" && req.method === "POST") {
-      const body = await this.readBody(req);
-      const options = JSON.parse(body);
-      const kb = await this.ctx.knowledgeBaseManager.createKb(options);
+      const options = await this.readJsonObjectOr400(req, res);
+      if (!options) return;
+      const kb = await this.ctx.knowledgeBaseManager.createKb(options as unknown as Parameters<typeof this.ctx.knowledgeBaseManager.createKb>[0]);
       res.writeHead(200);
       res.end(JSON.stringify(kb));
       return;
@@ -1464,24 +1590,50 @@ export class DashboardServer {
 
     if (pathname.startsWith("/api/kbs/") && pathname.endsWith("/documents") && req.method === "POST") {
       const kbId = pathname.substring("/api/kbs/".length, pathname.lastIndexOf("/documents"));
-      const body = await this.readBody(req);
-      const { text, docName } = JSON.parse(body);
+      const parsed = await this.readJsonObjectOr400(req, res);
+      if (!parsed) return;
+      const { text, docName } = parsed as { text?: string; docName?: string };
+      if (typeof text !== "string" || typeof docName !== "string") {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Bad Request", message: "text 和 docName 必须为字符串" }));
+        return;
+      }
       await this.ctx.knowledgeBaseManager.uploadText(kbId, text, docName);
       res.writeHead(200);
       res.end(JSON.stringify({ success: true }));
       return;
     }
 
+    // DELETE /api/kbs/:kbId/documents/:docId — delete a single document.
+    // The docId must actually belong to :kbId (previously the kbId segment was
+    // ignored entirely, so DELETE /api/kbs/anyKb/documents/otherKbDoc worked).
     if (pathname.startsWith("/api/kbs/") && pathname.includes("/documents/") && req.method === "DELETE") {
-      const parts = pathname.split("/");
-      const docId = parts[parts.length - 1];
+      const rest = pathname.substring("/api/kbs/".length);
+      const docMarker = "/documents/";
+      const markerIdx = rest.indexOf(docMarker);
+      const kbId = rest.substring(0, markerIdx);
+      const docId = rest.substring(markerIdx + docMarker.length);
+      if (!kbId || !docId) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Invalid kbId or docId" }));
+        return;
+      }
+      const docs = this.ctx.knowledgeBaseManager.getDocuments(kbId);
+      if (!docs.some((d) => d.id === docId)) {
+        res.writeHead(404);
+        res.end(JSON.stringify({ error: "Document not found in this knowledge base" }));
+        return;
+      }
       await this.ctx.knowledgeBaseManager.deleteDocument(docId);
       res.writeHead(200);
       res.end(JSON.stringify({ success: true }));
       return;
     }
 
-    if (pathname.startsWith("/api/kbs/") && req.method === "DELETE") {
+    // DELETE /api/kbs/:kbId — delete a whole KB. Must NOT match document
+    // paths: the previous unguarded startsWith() branch turned
+    // DELETE /api/kbs/xxx/documents (no trailing slash) into a full KB delete.
+    if (pathname.startsWith("/api/kbs/") && req.method === "DELETE" && !pathname.includes("/documents")) {
       const id = pathname.substring("/api/kbs/".length);
       await this.ctx.knowledgeBaseManager.deleteKb(id);
       res.writeHead(200);
@@ -1543,9 +1695,13 @@ export class DashboardServer {
     // 16.5 POST /api/personas/update — Update persona
     if (pathname === "/api/personas/update" && req.method === "POST") {
       try {
-        const body = await this.readBody(req);
-        const payload = JSON.parse(body);
-        const { id, name, prompt, beginDialogs, moodImitationDialogs, tools, skills, customErrorMessage } = payload;
+        const payload = await this.readJsonObjectOr400(req, res);
+        if (!payload) return;
+        const { id, name, prompt, beginDialogs, moodImitationDialogs, tools, skills, customErrorMessage } = payload as {
+          id?: string; name?: string; prompt?: string;
+          beginDialogs?: unknown[]; moodImitationDialogs?: unknown[];
+          tools?: unknown; skills?: unknown; customErrorMessage?: string;
+        };
         if (!id) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "Missing persona id" }));
@@ -1559,7 +1715,7 @@ export class DashboardServer {
           tools: tools ?? null,
           skills: skills ?? null,
           customErrorMessage: customErrorMessage || null,
-        });
+        } as Parameters<typeof this.ctx.personaManager.updatePersona>[1]);
         res.writeHead(200);
         res.end(JSON.stringify({ success: true }));
       } catch (err: unknown) {
@@ -1600,14 +1756,14 @@ export class DashboardServer {
     // 16.8 KB new-style API: POST /api/kb/create
     if (pathname === "/api/kb/create" && req.method === "POST") {
       try {
-        const body = await this.readBody(req);
-        const options = JSON.parse(body);
+        const options = await this.readJsonObjectOr400(req, res);
+        if (!options) return;
         if (options.chunkSize !== undefined && (!Number.isFinite(Number(options.chunkSize)) || Number(options.chunkSize) < 1)) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: `Invalid chunkSize: ${options.chunkSize}. Must be a positive number.` }));
           return;
         }
-        const kb = await this.ctx.knowledgeBaseManager.createKb(options);
+        const kb = await this.ctx.knowledgeBaseManager.createKb(options as unknown as Parameters<typeof this.ctx.knowledgeBaseManager.createKb>[0]);
         res.writeHead(200);
         res.end(JSON.stringify(kb));
       } catch (err: unknown) {
@@ -1618,30 +1774,25 @@ export class DashboardServer {
     }
 
     // 16.9 KB new-style API: POST /api/kb/update
+    // Not implemented: KnowledgeBaseManager has no update API yet. This route
+    // previously returned a fake `success: true` while doing nothing — it now
+    // reports 501 so callers get an honest signal.
     if (pathname === "/api/kb/update" && req.method === "POST") {
-      try {
-        const body = await this.readBody(req);
-        const { kb_id, ..._updates } = JSON.parse(body);
-        if (!kb_id) {
-          res.writeHead(400);
-          res.end(JSON.stringify({ error: "Missing kb_id" }));
-          return;
-        }
-        // KB update is limited - just return success for now
-        res.writeHead(200);
-        res.end(JSON.stringify({ success: true }));
-      } catch (err: unknown) {
-        res.writeHead(200);
-        res.end(JSON.stringify({ success: false, message: safeClientMessage(err) }));
-      }
+      res.writeHead(501, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        success: false,
+        error: "Not Implemented",
+        message: "KB 更新接口尚未实现（此前为假实现，现明确返回 501）。请删除后重建知识库。",
+      }));
       return;
     }
 
     // 16.10 KB new-style API: POST /api/kb/delete
     if (pathname === "/api/kb/delete" && req.method === "POST") {
       try {
-        const body = await this.readBody(req);
-        const { kb_id } = JSON.parse(body);
+        const parsed = await this.readJsonObjectOr400(req, res);
+        if (!parsed) return;
+        const { kb_id } = parsed as { kb_id?: string };
         if (!kb_id) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "Missing kb_id" }));
@@ -1674,8 +1825,9 @@ export class DashboardServer {
     // 16.12 KB new-style API: POST /api/kb/document/upload — Upload text to KB
     if (pathname === "/api/kb/document/upload" && req.method === "POST") {
       try {
-        const body = await this.readBody(req);
-        const { kb_id, text, doc_name } = JSON.parse(body);
+        const parsed = await this.readJsonObjectOr400(req, res);
+        if (!parsed) return;
+        const { kb_id, text, doc_name } = parsed as { kb_id?: string; text?: string; doc_name?: string };
         if (!kb_id || !text || !doc_name) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "Missing kb_id, text or doc_name" }));
@@ -1694,8 +1846,9 @@ export class DashboardServer {
     // 16.13 KB new-style API: POST /api/kb/document/delete
     if (pathname === "/api/kb/document/delete" && req.method === "POST") {
       try {
-        const body = await this.readBody(req);
-        const { doc_id } = JSON.parse(body);
+        const parsed = await this.readJsonObjectOr400(req, res);
+        if (!parsed) return;
+        const { doc_id } = parsed as { doc_id?: string };
         if (!doc_id) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "Missing doc_id" }));
@@ -1714,8 +1867,9 @@ export class DashboardServer {
     // 16.14 KB new-style API: POST /api/kb/retrieve
     if (pathname === "/api/kb/retrieve" && req.method === "POST") {
       try {
-        const body = await this.readBody(req);
-        const { query, kb_names, top_k } = JSON.parse(body);
+        const parsed = await this.readJsonObjectOr400(req, res);
+        if (!parsed) return;
+        const { query, kb_names, top_k } = parsed as { query?: string; kb_names?: string[]; top_k?: number };
         if (!query || !kb_names) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "Missing query or kb_names" }));
@@ -1828,8 +1982,9 @@ export class DashboardServer {
     }
 
     if (pathname === "/api/adapters" && req.method === "POST") {
-      const body = await this.readBody(req);
-      const { type, id, config } = JSON.parse(body);
+      const parsed = await this.readJsonObjectOr400(req, res);
+      if (!parsed) return;
+      const { type, id, config } = parsed as { type?: string; id?: string; config?: Record<string, unknown> };
       if (!type || !id) {
         res.writeHead(400);
         res.end(JSON.stringify({ error: "Missing type or id" }));
@@ -1878,8 +2033,9 @@ export class DashboardServer {
     if (pathname.startsWith("/api/adapters/") && req.method === "PUT") {
       const id = decodeURIComponent(pathname.substring("/api/adapters/".length));
       try {
-        const body = await this.readBody(req);
-        const { type, config } = JSON.parse(body);
+        const parsed = await this.readJsonObjectOr400(req, res);
+        if (!parsed) return;
+        const { type, config } = parsed as { type?: string; config?: Record<string, unknown> };
         if (!type) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "Missing adapter type" }));
@@ -1997,8 +2153,8 @@ export class DashboardServer {
         res.end(JSON.stringify({ list: [], total: 0 }));
         return;
       }
-      const page = parseInt(url.searchParams.get("page") || "1");
-      const pageSize = parseInt(url.searchParams.get("pageSize") || "20");
+      const page = parseQueryInt(url.searchParams.get("page"), 1);
+      const pageSize = parseQueryInt(url.searchParams.get("pageSize"), 20);
       const searchQuery = url.searchParams.get("searchQuery") || "";
       const [list, total] = await store.getFilteredConversations({ page, pageSize, searchQuery });
       res.writeHead(200);
@@ -2036,8 +2192,9 @@ export class DashboardServer {
           return;
         }
 
-        const body = await this.readBody(req);
-        const { history } = JSON.parse(body);
+        const parsed = await this.readJsonObjectOr400(req, res);
+        if (!parsed) return;
+        const { history } = parsed as { history?: unknown };
 
         if (!Array.isArray(history)) {
           res.writeHead(400, { "Content-Type": "application/json" });
@@ -2110,8 +2267,9 @@ export class DashboardServer {
     }
 
     if (pathname === "/api/plugins/toggle" && req.method === "POST") {
-      const body = await this.readBody(req);
-      const { modulePath, activated } = JSON.parse(body);
+      const parsed = await this.readJsonObjectOr400(req, res);
+      if (!parsed) return;
+      const { modulePath, activated } = parsed as { modulePath?: string; activated?: boolean };
       if (!modulePath) {
         res.writeHead(400);
         res.end(JSON.stringify({ error: "Missing modulePath" }));
@@ -2231,6 +2389,11 @@ export class DashboardServer {
         if (sqliteStore) {
           try {
             providerSources = sqliteStore.getAllProviderSources().map((s: { id: string; type: string; provider_type: string; provider: string; key: string; api_base: string; enable: boolean; extra_config: Record<string, unknown> }) => ({
+              // Spread extra_config FIRST, then set the base fields — the
+              // masked key must be applied after the spread, otherwise a
+              // crafted extra_config entry named "key" would overwrite the
+              // mask and leak the stored secret in list responses.
+              ...s.extra_config,
               id: s.id,
               type: s.type,
               provider_type: s.provider_type,
@@ -2240,7 +2403,6 @@ export class DashboardServer {
               key: maskSecret(s.key),
               api_base: s.api_base,
               enable: s.enable,
-              ...s.extra_config,
             }));
           } catch {
             // provider_sources 表可能尚未创建（首次使用），返回空数组
@@ -2367,9 +2529,21 @@ export class DashboardServer {
     // 22. POST /api/config/provider_sources/update — 创建或更新提供商源
     if (pathname === "/api/config/provider_sources/update" && req.method === "POST") {
       try {
-        const body = await this.readBody(req);
-        const payload = JSON.parse(body);
-        const { config, original_id } = payload;
+        const payload = await this.readJsonObjectOr400(req, res);
+        if (!payload) return;
+        const { config, original_id } = payload as {
+          config?: {
+            id?: string;
+            type?: string;
+            provider_type?: string;
+            provider?: string;
+            key?: string;
+            api_base?: string;
+            enable?: boolean;
+            [key: string]: unknown;
+          };
+          original_id?: string;
+        };
         if (!config || !config.id) {
           res.writeHead(400);
           res.end(JSON.stringify({ status: "error", message: "缺少配置或 ID" }));
@@ -2444,9 +2618,9 @@ export class DashboardServer {
     // 23. POST /api/config/provider_sources/delete — 删除提供商源
     if (pathname === "/api/config/provider_sources/delete" && req.method === "POST") {
       try {
-        const body = await this.readBody(req);
-        const payload = JSON.parse(body);
-        const { id } = payload;
+        const payload = await this.readJsonObjectOr400(req, res);
+        if (!payload) return;
+        const { id } = payload as { id?: string };
         if (!id) {
           res.writeHead(400);
           res.end(JSON.stringify({ status: "error", message: "缺少 ID" }));
@@ -2487,8 +2661,23 @@ export class DashboardServer {
     // 24. POST /api/config/provider/new — 新建提供商（模型实例）
     if (pathname === "/api/config/provider/new" && req.method === "POST") {
       try {
-        const body = await this.readBody(req);
-        const providerConfig = JSON.parse(body);
+        const parsed = await this.readJsonObjectOr400(req, res);
+        if (!parsed) return;
+        const providerConfig = parsed as {
+          id?: string;
+          type?: string;
+          model?: string;
+          key?: string;
+          api_base?: string;
+          provider_source_id?: string;
+          provider_type?: string;
+          modalities?: string[];
+          custom_extra_body?: Record<string, unknown>;
+          max_context_tokens?: number;
+          reasoning?: boolean;
+          enable?: boolean;
+          [key: string]: unknown;
+        };
         if (!providerConfig.id) {
           res.writeHead(400);
           res.end(JSON.stringify({ status: "error", message: "缺少提供商 ID" }));
@@ -2580,9 +2769,9 @@ export class DashboardServer {
     // 25. POST /api/config/provider/delete — 删除提供商
     if (pathname === "/api/config/provider/delete" && req.method === "POST") {
       try {
-        const body = await this.readBody(req);
-        const payload = JSON.parse(body);
-        const { id } = payload;
+        const payload = await this.readJsonObjectOr400(req, res);
+        if (!payload) return;
+        const { id } = payload as { id?: string };
         if (!id) {
           res.writeHead(400);
           res.end(JSON.stringify({ status: "error", message: "缺少提供商 ID" }));
@@ -2602,9 +2791,20 @@ export class DashboardServer {
     // 26. POST /api/config/provider/update — 更新提供商
     if (pathname === "/api/config/provider/update" && req.method === "POST") {
       try {
-        const body = await this.readBody(req);
-        const payload = JSON.parse(body);
-        const { id, config } = payload;
+        const payload = await this.readJsonObjectOr400(req, res);
+        if (!payload) return;
+        const { id, config } = payload as {
+          id?: string;
+          config?: {
+            id?: string;
+            type?: string;
+            key?: string;
+            api_base?: string;
+            provider_source_id?: string;
+            enable?: boolean;
+            [key: string]: unknown;
+          };
+        };
         if (!id || !config) {
           res.writeHead(400);
           res.end(JSON.stringify({ status: "error", message: "缺少 ID 或配置" }));
@@ -2822,7 +3022,7 @@ export class DashboardServer {
 
     // 28. GET /api/stat/get — 获取基础统计数据
     if (pathname === "/api/stat/get" && req.method === "GET") {
-      const _offsetSec = parseInt(url.searchParams.get("offset_sec") || "86400", 10);
+      const _offsetSec = parseQueryInt(url.searchParams.get("offset_sec"), 86400);
       try {
         const now = Date.now();
         const memUsage = process.memoryUsage();
@@ -2855,7 +3055,7 @@ export class DashboardServer {
 
     // 29. GET /api/stat/provider-tokens — 获取提供商 Token 统计（真实数据）
     if (pathname === "/api/stat/provider-tokens" && req.method === "GET") {
-      const days = parseInt(url.searchParams.get("days") || "1", 10);
+      const days = parseQueryInt(url.searchParams.get("days"), 1);
       try {
         const since = new Date(Date.now() - days * 86400000);
         const stats = await this.ctx.conversationManager.getProviderStats({ since, limit: 10000 });
@@ -2986,10 +3186,11 @@ export class DashboardServer {
     // 31. POST /api/tools/mcp/test — Test MCP server connection
     if (pathname === "/api/tools/mcp/test" && req.method === "POST") {
       try {
-        const body = await this.readBody(req);
-        const { config } = JSON.parse(body);
+        const parsed = await this.readJsonObjectOr400(req, res);
+        if (!parsed) return;
+        const { config } = parsed as { config?: Record<string, unknown> };
         const { quickTestMcpConnection } = await import("@yachiyo/agent/mcp-client.js");
-        const [success, error] = await quickTestMcpConnection(config);
+        const [success, error] = await quickTestMcpConnection(config ?? {});
         if (success) {
           res.writeHead(200);
           res.end(JSON.stringify({ success: true, tools: [], message: "连接成功" }));
@@ -3007,15 +3208,18 @@ export class DashboardServer {
     // 32. POST /api/tools/mcp/update — Update MCP server (including toggle active)
     if (pathname === "/api/tools/mcp/update" && req.method === "POST") {
       try {
-        const body = await this.readBody(req);
-        const { serverName, config, active, oldName } = JSON.parse(body);
+        const parsed = await this.readJsonObjectOr400(req, res);
+        if (!parsed) return;
+        const { serverName, config, active, oldName } = parsed as {
+          serverName?: string; config?: Record<string, unknown>; active?: boolean; oldName?: string;
+        };
         const sqliteStore = this.ctx.providerManager.getStore();
 
         if (oldName && oldName !== serverName && sqliteStore) {
           sqliteStore.deleteMcpServerConfig(oldName);
         }
 
-        if (sqliteStore) {
+        if (sqliteStore && serverName) {
           sqliteStore.saveMcpServerConfig({
             serverName,
             config: config || {},
@@ -3025,7 +3229,7 @@ export class DashboardServer {
         }
 
         // Handle active/inactive toggle
-        if (typeof active === "boolean") {
+        if (typeof active === "boolean" && serverName) {
           const toolMgr = this.ctx.toolManager;
           if (active) {
             await toolMgr?.enableMcpServer?.(serverName, config || {});
@@ -3046,12 +3250,13 @@ export class DashboardServer {
     // 33. POST /api/tools/mcp/delete — Delete MCP server
     if (pathname === "/api/tools/mcp/delete" && req.method === "POST") {
       try {
-        const body = await this.readBody(req);
-        const { serverName } = JSON.parse(body);
+        const parsed = await this.readJsonObjectOr400(req, res);
+        if (!parsed) return;
+        const { serverName } = parsed as { serverName?: string };
         const sqliteStore = this.ctx.providerManager.getStore();
-        if (sqliteStore) sqliteStore.deleteMcpServerConfig(serverName);
+        if (sqliteStore && serverName) sqliteStore.deleteMcpServerConfig(serverName);
         const toolMgr = this.ctx.toolManager;
-        await toolMgr?.terminateMcpClient?.(serverName);
+        if (serverName) await toolMgr?.terminateMcpClient?.(serverName);
         res.writeHead(200);
         res.end(JSON.stringify({ success: true }));
       } catch (err: unknown) {
@@ -3160,7 +3365,7 @@ export class DashboardServer {
           res.end(JSON.stringify({ memories: [], total: 0 }));
           return;
         }
-        const limit = parseInt(url.searchParams.get("limit") || "50");
+        const limit = parseQueryInt(url.searchParams.get("limit"), 50);
         const query = url.searchParams.get("search") || "";
         const memoryType = url.searchParams.get("memory_type") || undefined;
         const scope = url.searchParams.get("scope") || undefined;
@@ -3239,7 +3444,7 @@ export class DashboardServer {
           return;
         }
         const query = url.searchParams.get("q") || "";
-        const limit = parseInt(url.searchParams.get("limit") || "20");
+        const limit = parseQueryInt(url.searchParams.get("limit"), 20);
         const memoryType = url.searchParams.get("memory_type") || undefined;
         const scope = url.searchParams.get("scope") || undefined;
         const scopeId = url.searchParams.get("scope_id") || undefined;
@@ -3392,8 +3597,9 @@ export class DashboardServer {
           res.end(JSON.stringify({ error: "Memory consolidator not initialized" }));
           return;
         }
-        const body = await this.readBody(req);
-        const updates = JSON.parse(body);
+        const parsed = await this.readJsonObjectOr400(req, res);
+        if (!parsed) return;
+        const updates = parsed as unknown as Parameters<typeof consolidator.updateConfig>[0];
         consolidator.updateConfig(updates);
         // Apply the new interval / enabled state to the running periodic timer
         // so config changes take effect immediately (mirrors bootstrap.ts).
@@ -3417,7 +3623,7 @@ export class DashboardServer {
           res.end(JSON.stringify({ indices: [], total: 0 }));
           return;
         }
-        const limit = parseInt(url.searchParams.get("limit") || "50");
+        const limit = parseQueryInt(url.searchParams.get("limit"), 50);
         const query = url.searchParams.get("search") || "";
         let indices: ConversationIndexEntry[];
         if (query) {
@@ -3520,8 +3726,9 @@ export class DashboardServer {
     // 37. POST /api/skills/file — Save skill file content
     if (pathname === "/api/skills/file" && req.method === "POST") {
       try {
-        const body = await this.readBody(req);
-        const { name, path: filePath, content } = JSON.parse(body);
+        const parsed = await this.readJsonObjectOr400(req, res);
+        if (!parsed) return;
+        const { name, path: filePath, content } = parsed as { name?: string; path?: string; content?: string };
         if (!name || !filePath || content === undefined) {
           res.writeHead(400);
           res.end(JSON.stringify({ error: "Missing name, path or content" }));
@@ -3560,7 +3767,7 @@ export class DashboardServer {
           res.end(JSON.stringify({ tasks: [], total: 0 }));
           return;
         }
-        const limit = parseInt(url.searchParams.get("limit") || "50");
+        const limit = parseQueryInt(url.searchParams.get("limit"), 50);
         const type = url.searchParams.get("type") || undefined;
         const status = url.searchParams.get("status") || undefined;
         const umo = url.searchParams.get("umo") || undefined;
@@ -3813,8 +4020,9 @@ export class DashboardServer {
         res.end(JSON.stringify({ error: "Debug chat endpoint is disabled." }));
         return;
       }
-      const body = await this.readBody(req);
-      const { message, session_id } = JSON.parse(body);
+      const parsed = await this.readJsonObjectOr400(req, res);
+      if (!parsed) return;
+      const { message, session_id } = parsed as { message?: string; session_id?: string };
       if (!message) {
         res.writeHead(400);
         res.end(JSON.stringify({ error: "Missing 'message' field" }));
@@ -4107,6 +4315,31 @@ export class DashboardServer {
       return { ok: false, error: "读取请求体失败" };
     }
     return parseJsonObject(body);
+  }
+
+  /**
+   * Read the request body as a JSON object, responding 400 and returning
+   * `null` on any failure (read error, malformed JSON, non-object payload).
+   * Use at every POST/PUT/PATCH/DELETE route boundary:
+   *
+   *   const parsed = await this.readJsonObjectOr400(req, res);
+   *   if (!parsed) return;
+   *
+   * This replaces bare `JSON.parse(await this.readBody(req))`, which threw on
+   * malformed input and surfaced as a 500 from the outer handler instead of a
+   * structured 400.
+   */
+  private async readJsonObjectOr400(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<Record<string, unknown> | null> {
+    const result = await this.readJsonObject(req);
+    if (!result.ok) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Bad Request", message: result.error }));
+      return null;
+    }
+    return result.value;
   }
 
   /**
@@ -4490,7 +4723,12 @@ export class DashboardServer {
         pos = nextBoundary;
         continue;
       }
-      const originalName = decodeURIComponent(filenameMatch[1]);
+      // Malformed percent-sequences (e.g. "100%.zip") make decodeURIComponent
+      // throw URIError — keep the raw name instead of failing the request.
+      let originalName = filenameMatch[1];
+      try {
+        originalName = decodeURIComponent(originalName);
+      } catch { /* keep raw filename */ }
 
       if (dataBuffer.length === 0) {
         files.push({ originalName, tempPath: "", size: 0 });
@@ -4550,10 +4788,47 @@ export class DashboardServer {
         const zip = new AdmZip(file.tempPath);
         const entries = zip.getEntries();
 
+        // Decompression-bomb guard: check per-entry and total uncompressed
+        // sizes (from the ZIP central directory) BEFORE any entry is
+        // decompressed. A small .zip can otherwise expand to gigabytes.
+        const MAX_ZIP_ENTRY_BYTES = 20 * 1024 * 1024; // 20 MB per entry
+        const MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES = 100 * 1024 * 1024; // 100 MB total
+        let totalUncompressed = 0;
+        let oversizedEntry: string | null = null;
+        for (const entry of entries) {
+          const size = entry.header?.size ?? 0;
+          totalUncompressed += size;
+          if (size > MAX_ZIP_ENTRY_BYTES && !oversizedEntry) {
+            oversizedEntry = entry.entryName;
+          }
+        }
+        if (oversizedEntry) {
+          zipResult.skills.push({
+            name: file.originalName,
+            status: "error",
+            message: `ZIP 条目 "${oversizedEntry}" 解压后超过 ${MAX_ZIP_ENTRY_BYTES / 1024 / 1024}MB 上限，已拒绝`,
+          });
+          results.push(zipResult);
+          continue;
+        }
+        if (totalUncompressed > MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES) {
+          zipResult.skills.push({
+            name: file.originalName,
+            status: "error",
+            message: `ZIP 总解压大小超过 ${MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES / 1024 / 1024}MB 上限，已拒绝`,
+          });
+          results.push(zipResult);
+          continue;
+        }
+
         const skillDirs = new Set<string>();
         for (const entry of entries) {
           const entryName = entry.entryName.replace(/\\/g, "/");
           const parts = entryName.split("/").filter(Boolean);
+          // Reject traversal entry names outright ("../x", "a/../../b").
+          if (parts.some((p) => p === ".." || p === ".")) {
+            continue;
+          }
           if (parts.length >= 2) {
             skillDirs.add(parts[0]);
           }
@@ -4586,8 +4861,22 @@ export class DashboardServer {
             });
           }
         } else {
-          for (const dirName of skillDirs) {
-            const dirPrefix = dirName + "/";
+          for (const rawDirName of skillDirs) {
+            // Sanitize the skill name/path derived from the ZIP entry name:
+            // basename only, no "..", slug-ified, so the registered skill's
+            // `path` can never escape the skills root via isPathSafe.
+            const dirName = sanitizeSkillPathSegment(rawDirName);
+            if (!dirName) {
+              zipResult.skills.push({
+                name: rawDirName,
+                status: "error",
+                message: "技能目录名非法（拒绝路径穿越或非法字符）",
+              });
+              continue;
+            }
+            // Entry matching keeps the ORIGINAL directory name; only the
+            // registered skill name/path are sanitized.
+            const dirPrefix = rawDirName + "/";
             const dirEntries = entries.filter((e: ZipEntry) => e.entryName.startsWith(dirPrefix));
 
             const hasSkillMd = dirEntries.some((e: ZipEntry) => {
@@ -4645,15 +4934,18 @@ export class DashboardServer {
           const item = line.replace(/^[-*]\s+/, "");
           const colonIdx = item.indexOf(":");
           if (colonIdx > 0) {
+            const name = sanitizeSkillPathSegment(item.substring(0, colonIdx).trim());
+            if (!name) { i++; continue; }
             results.push({
-              name: item.substring(0, colonIdx).trim(),
+              name,
               description: item.substring(colonIdx + 1).trim(),
               path: "skills.md", active: true, sourceType: "upload", sourceLabel: "ZIP上传",
               localExists: false, sandboxExists: false, pluginName: "", readonly: false,
             });
           }
         } else if (line.startsWith("# ")) {
-          const name = line.replace(/^#+\s*/, "").trim();
+          const name = sanitizeSkillPathSegment(line.replace(/^#+\s*/, "").trim());
+          if (!name) { i++; continue; }
           const descLines: string[] = [];
           i++;
           while (i < lines.length && !lines[i].startsWith("#") && lines[i].trim()) descLines.push(lines[i++].trim());
@@ -4670,7 +4962,7 @@ export class DashboardServer {
       try {
         const parsed = JSON.parse(content);
         results.push({
-          name: parsed.name || "unnamed-skill",
+          name: sanitizeSkillPathSegment(parsed.name ?? "") || "unnamed-skill",
           description: parsed.description || "",
           path: "manifest.json", active: parsed.active !== false, sourceType: "upload", sourceLabel: "ZIP上传",
           localExists: false, sandboxExists: false, pluginName: "", readonly: !!parsed.readonly,
@@ -4707,7 +4999,7 @@ export class DashboardServer {
       }
 
       results.push({
-        name: name || "unnamed-skill", description,
+        name: sanitizeSkillPathSegment(name) || "unnamed-skill", description,
         path: "skill.md", active: true, sourceType: "upload", sourceLabel: "ZIP上传",
         localExists: false, sandboxExists: false, pluginName: "", readonly: false,
       });
@@ -4745,7 +5037,7 @@ export class DashboardServer {
         if (endIdx > 0) {
           for (let j = 1; j < endIdx; j++) {
             const l = lines[j].trim();
-            if (l.startsWith("name:")) name = l.split(":")[1].trim();
+            if (l.startsWith("name:")) name = sanitizeSkillPathSegment(l.split(":")[1].trim()) || name;
             if (l.startsWith("description:")) description = l.split(":")[1].slice(1).trim();
             if (l === "active: false") active = false;
             if (l === "readonly: true") readonly = true;
@@ -4755,7 +5047,7 @@ export class DashboardServer {
         }
       } else {
         for (const l of lines) {
-          if (l.startsWith("# ")) { name = l.replace(/^#+\s*/, "").trim(); continue; }
+          if (l.startsWith("# ")) { name = sanitizeSkillPathSegment(l.replace(/^#+\s*/, "").trim()) || name; continue; }
           if (name && l.trim() && !l.startsWith("#")) { description += (description ? " " : "") + l.trim(); }
         }
       }
@@ -4763,7 +5055,8 @@ export class DashboardServer {
       try {
         const content = zip.readAsText(manifestEntry);
         const parsed = JSON.parse(content);
-        if (parsed.name) name = parsed.name;
+        const parsedName = sanitizeSkillPathSegment(parsed.name ?? "");
+        if (parsedName) name = parsedName;
         if (parsed.description) description = parsed.description;
         if (parsed.active === false) active = false;
         if (parsed.readonly) readonly = true;

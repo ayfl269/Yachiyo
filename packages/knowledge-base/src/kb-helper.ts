@@ -51,7 +51,10 @@ export class KBHelper {
 
       // Content-Type allowlist: only accept text-based content that the
       // chunker can meaningfully process. Binary files (executables, images,
-      // archives) would produce garbage chunks and waste embedding tokens.
+      // archives, PDFs) would produce garbage chunks and waste embedding
+      // tokens — PDF is intentionally NOT accepted because we have no PDF
+      // text extractor; feeding raw PDF bytes to the chunker previously
+      // burned embedding tokens on binary noise.
       const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
       const isAllowedType =
         contentType.startsWith("text/") ||
@@ -60,12 +63,11 @@ export class KBHelper {
         contentType.includes("markdown") ||
         contentType.includes("plain") ||
         contentType.includes("html") ||
-        contentType.includes("application/pdf") ||
         contentType === ""; // some servers omit Content-Type; allow and let text() decide
       if (!isAllowedType) {
         throw new KnowledgeBaseUploadError({
           stage: "download",
-          userMessage: `Unsupported Content-Type "${contentType}". Only text-based content (text/*, JSON, XML, HTML, PDF) is accepted.`,
+          userMessage: `Unsupported Content-Type "${contentType}". Only text-based content (text/*, JSON, XML, HTML) is accepted; PDF is not supported.`,
           details: { contentType, url: finalUrl },
         });
       }
@@ -155,12 +157,24 @@ export class KBHelper {
     if (this.rerankProvider && results.length > 0) {
       const documents = results.map((r) => r.content);
       const rerankResults = await this.rerankProvider.rerank(query, documents, k);
-      return rerankResults.map((rr) => ({
-        chunkId: results[rr.index].chunkId,
-        content: results[rr.index].content,
-        score: rr.relevanceScore,
-        docName: results[rr.index].docName,
-      }));
+      const reranked: VectorSearchResult[] = [];
+      for (const rr of rerankResults) {
+        // Rerank providers occasionally return an out-of-range index (truncated
+        // results, provider bugs). Skip it with a warning instead of letting
+        // `results[rr.index]` be undefined and failing the whole retrieve.
+        if (!Number.isInteger(rr.index) || rr.index < 0 || rr.index >= results.length) {
+          console.warn(`[KBHelper] rerank returned out-of-range index ${rr.index} (results: ${results.length}); skipping.`);
+          continue;
+        }
+        const src = results[rr.index];
+        reranked.push({
+          chunkId: src.chunkId,
+          content: src.content,
+          score: rr.relevanceScore,
+          docName: src.docName,
+        });
+      }
+      return reranked;
     }
 
     return results;

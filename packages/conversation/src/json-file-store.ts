@@ -1,6 +1,6 @@
 import { ConversationStore, type ConversationMetadata, type PlatformMessageHistory, type WebchatThread, type Attachment, type ApiKey, type Preference, type CommandConfig, type PlatformSession, type ProviderStat } from "./store.js";
 import type { ConversationRecord } from "./manager.js";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from "fs";
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, readdirSync, unlinkSync } from "fs";
 import { join } from "path";
 
 interface SerializedConversationRecord {
@@ -47,6 +47,13 @@ function deserializeRecord(data: SerializedConversationRecord): ConversationReco
 }
 
 export class JsonFileConversationStore extends ConversationStore {
+  /** 上限：platformMessageHistory 最多保留最近 5000 条（防止 _aux.json 无限增长）。 */
+  private static readonly MAX_PLATFORM_MESSAGE_HISTORY = 5000;
+  /** 上限：providerStats 最多保留最近 1000 条。 */
+  private static readonly MAX_PROVIDER_STATS = 1000;
+  /** 上限：platformStats 最多保留最近 1000 条。 */
+  private static readonly MAX_PLATFORM_STATS = 1000;
+
   private dataDir: string;
   private cache: Map<string, ConversationRecord> = new Map();
   private dirty: Set<string> = new Set();
@@ -100,14 +107,22 @@ export class JsonFileConversationStore extends ConversationStore {
     try {
       const raw = readFileSync(auxPath, "utf-8");
       const data = JSON.parse(raw) as SerializedAuxData;
-      this.platformMessageHistory = (data.platformMessageHistory ?? []).map(deserializePlatformMessageHistory);
-      this.webchatThreads = new Map((data.webchatThreads ?? []).map((t: WebchatThread) => [t.id, t]));
-      this.attachments = new Map((data.attachments ?? []).map((a: Attachment) => [a.id, a]));
-      this.apiKeys = new Map((data.apiKeys ?? []).map((k: ApiKey) => [k.id, k]));
+      this.platformMessageHistory = (data.platformMessageHistory ?? [])
+        .map(deserializePlatformMessageHistory)
+        .slice(-JsonFileConversationStore.MAX_PLATFORM_MESSAGE_HISTORY);
+      this.webchatThreads = new Map((data.webchatThreads ?? []).map(deserializeWebchatThread).map((t) => [t.id, t]));
+      this.attachments = new Map((data.attachments ?? []).map(deserializeAttachment).map((a) => [a.id, a]));
+      this.apiKeys = new Map((data.apiKeys ?? []).map(deserializeApiKey).map((k) => [k.id, k]));
       this.preferences = new Map((data.preferences ?? []).map((p: Preference) => [p.key, p]));
       this.commandConfigs = new Map((data.commandConfigs ?? []).map((c: CommandConfig) => [c.commandName, c]));
       this.platformSessions = new Map((data.platformSessions ?? []).map((s: PlatformSession) => [s.id, s]));
-      this.providerStats = data.providerStats ?? [];
+      this.providerStats = (data.providerStats ?? [])
+        .map(deserializeProviderStat)
+        .slice(-JsonFileConversationStore.MAX_PROVIDER_STATS);
+      this.platformStats = (data.platformStats ?? [])
+        .map(deserializePlatformStats)
+        .slice(-JsonFileConversationStore.MAX_PLATFORM_STATS);
+      this.sessionConversations = new Map(data.sessionConversations ?? []);
     } catch {
       // skip corrupted aux file
     }
@@ -129,28 +144,43 @@ export class JsonFileConversationStore extends ConversationStore {
     this.auxDirty = true;
   }
 
+  /**
+   * Atomic write: write to a `*.tmp` sibling first, then rename over the
+   * target. Prevents a crash mid-write from leaving a truncated/corrupt JSON
+   * file behind (rename over an existing file is atomic on NTFS/POSIX).
+   */
+  private writeJsonFileAtomic(filePath: string, content: string): void {
+    const tmpPath = `${filePath}.tmp`;
+    writeFileSync(tmpPath, content, "utf-8");
+    renameSync(tmpPath, filePath);
+  }
+
   flush(): void {
+    const failedWrites: string[] = [];
     for (const id of this.dirty) {
       const record = this.cache.get(id);
       if (!record) continue;
       try {
         const dir = this.dataDir;
         if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-        writeFileSync(this.getFilePath(id), JSON.stringify(serializeRecord(record), null, 2), "utf-8");
-      } catch {
-        // log and continue
+        this.writeJsonFileAtomic(this.getFilePath(id), JSON.stringify(serializeRecord(record), null, 2));
+      } catch (err) {
+        // log and continue — keep the record dirty so the next flush retries
+        console.error(`[JsonFileConversationStore] Failed to flush conversation "${id}":`, err);
+        failedWrites.push(id);
       }
     }
-    this.dirty.clear();
+    this.dirty = new Set(failedWrites);
 
     if (this.auxDirty) {
       try {
         const dir = this.dataDir;
         if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-        writeFileSync(this.getAuxFilePath(), JSON.stringify(this.serializeAuxData(), null, 2), "utf-8");
+        this.writeJsonFileAtomic(this.getAuxFilePath(), JSON.stringify(this.serializeAuxData(), null, 2));
         this.auxDirty = false;
-      } catch {
-        // log and continue
+      } catch (err) {
+        // log and continue — aux data stays dirty and is retried next flush
+        console.error("[JsonFileConversationStore] Failed to flush aux data:", err);
       }
     }
   }
@@ -158,13 +188,15 @@ export class JsonFileConversationStore extends ConversationStore {
   private serializeAuxData(): SerializedAuxData {
     return {
       platformMessageHistory: this.platformMessageHistory.map(serializePlatformMessageHistory),
-      webchatThreads: [...this.webchatThreads.values()],
-      attachments: [...this.attachments.values()],
-      apiKeys: [...this.apiKeys.values()],
+      webchatThreads: [...this.webchatThreads.values()].map(serializeWebchatThread),
+      attachments: [...this.attachments.values()].map(serializeAttachment),
+      apiKeys: [...this.apiKeys.values()].map(serializeApiKey),
       preferences: [...this.preferences.values()],
       commandConfigs: [...this.commandConfigs.values()],
       platformSessions: [...this.platformSessions.values()],
-      providerStats: this.providerStats,
+      providerStats: this.providerStats.map(serializeProviderStat),
+      platformStats: this.platformStats.map(serializePlatformStats),
+      sessionConversations: [...this.sessionConversations.entries()],
     };
   }
 
@@ -316,6 +348,10 @@ export class JsonFileConversationStore extends ConversationStore {
 
   async insertPlatformMessageHistory(record: PlatformMessageHistory): Promise<void> {
     this.platformMessageHistory.push(record);
+    // 裁剪上限：只保留最近 MAX_PLATFORM_MESSAGE_HISTORY 条，防止 _aux.json 无限增长。
+    if (this.platformMessageHistory.length > JsonFileConversationStore.MAX_PLATFORM_MESSAGE_HISTORY) {
+      this.platformMessageHistory = this.platformMessageHistory.slice(-JsonFileConversationStore.MAX_PLATFORM_MESSAGE_HISTORY);
+    }
     this.markAuxDirty();
   }
 
@@ -421,11 +457,17 @@ export class JsonFileConversationStore extends ConversationStore {
 
   async insertProviderStat(stat: ProviderStat): Promise<void> {
     this.providerStats.push(stat);
+    if (this.providerStats.length > JsonFileConversationStore.MAX_PROVIDER_STATS) {
+      this.providerStats = this.providerStats.slice(-JsonFileConversationStore.MAX_PROVIDER_STATS);
+    }
     this.markAuxDirty();
   }
 
   async insertPlatformStats(stat: import("./store.js").PlatformStats): Promise<void> {
     this.platformStats.push(stat);
+    if (this.platformStats.length > JsonFileConversationStore.MAX_PLATFORM_STATS) {
+      this.platformStats = this.platformStats.slice(-JsonFileConversationStore.MAX_PLATFORM_STATS);
+    }
     this.markAuxDirty();
   }
 
@@ -455,15 +497,90 @@ export class JsonFileConversationStore extends ConversationStore {
   }
 }
 
+/** Serialized (Date → ISO string) shape of WebchatThread. */
+type SerializedWebchatThread = Omit<WebchatThread, "createdAt"> & { createdAt: string };
+/** Serialized (Date → ISO string) shape of Attachment. */
+type SerializedAttachment = Omit<Attachment, "createdAt"> & { createdAt: string };
+/** Serialized (Date → ISO string) shape of ApiKey. */
+type SerializedApiKey = Omit<ApiKey, "createdAt" | "lastUsedAt" | "expiresAt" | "revokedAt"> & {
+  createdAt: string;
+  lastUsedAt: string | null;
+  expiresAt: string | null;
+  revokedAt: string | null;
+};
+/** Serialized (Date → ISO string) shape of ProviderStat. */
+type SerializedProviderStat = Omit<ProviderStat, "createdAt"> & { createdAt: string };
+/** Serialized (Date → ISO string) shape of PlatformStats. */
+type SerializedPlatformStats = Omit<import("./store.js").PlatformStats, "timestamp"> & { timestamp: string };
+
 interface SerializedAuxData {
   platformMessageHistory: ReturnType<typeof serializePlatformMessageHistory>[];
-  webchatThreads: WebchatThread[];
-  attachments: Attachment[];
-  apiKeys: ApiKey[];
+  webchatThreads: SerializedWebchatThread[];
+  attachments: SerializedAttachment[];
+  apiKeys: SerializedApiKey[];
   preferences: Preference[];
   commandConfigs: CommandConfig[];
   platformSessions: PlatformSession[];
-  providerStats: ProviderStat[];
+  providerStats: SerializedProviderStat[];
+  platformStats: SerializedPlatformStats[];
+  /** [umo, conversationId] pairs of the session→conversation mapping. */
+  sessionConversations: [string, string][];
+}
+
+// JSON 序列化会把 Date 变成 ISO 字符串，所以这里以 Serialized* 形状写入。
+// 写入方与读取方必须对称，否则恢复出来的对象会带着 string 冒充 Date
+// （例如 `since` 过滤里 `string >= Date` 恒为 NaN 比较，统计静默归零）。
+
+function serializeWebchatThread(t: WebchatThread): SerializedWebchatThread {
+  return { ...t, createdAt: t.createdAt.toISOString() };
+}
+
+function deserializeWebchatThread(t: SerializedWebchatThread): WebchatThread {
+  return { ...t, createdAt: new Date(t.createdAt) };
+}
+
+function serializeAttachment(a: Attachment): SerializedAttachment {
+  return { ...a, createdAt: a.createdAt.toISOString() };
+}
+
+function deserializeAttachment(a: SerializedAttachment): Attachment {
+  return { ...a, createdAt: new Date(a.createdAt) };
+}
+
+function serializeApiKey(k: ApiKey): SerializedApiKey {
+  return {
+    ...k,
+    createdAt: k.createdAt.toISOString(),
+    lastUsedAt: k.lastUsedAt ? k.lastUsedAt.toISOString() : null,
+    expiresAt: k.expiresAt ? k.expiresAt.toISOString() : null,
+    revokedAt: k.revokedAt ? k.revokedAt.toISOString() : null,
+  };
+}
+
+function deserializeApiKey(k: SerializedApiKey): ApiKey {
+  return {
+    ...k,
+    createdAt: new Date(k.createdAt),
+    lastUsedAt: k.lastUsedAt ? new Date(k.lastUsedAt) : null,
+    expiresAt: k.expiresAt ? new Date(k.expiresAt) : null,
+    revokedAt: k.revokedAt ? new Date(k.revokedAt) : null,
+  };
+}
+
+function serializeProviderStat(s: ProviderStat): SerializedProviderStat {
+  return { ...s, createdAt: s.createdAt.toISOString() };
+}
+
+function deserializeProviderStat(s: SerializedProviderStat): ProviderStat {
+  return { ...s, createdAt: new Date(s.createdAt) };
+}
+
+function serializePlatformStats(s: import("./store.js").PlatformStats): SerializedPlatformStats {
+  return { ...s, timestamp: s.timestamp.toISOString() };
+}
+
+function deserializePlatformStats(s: SerializedPlatformStats): import("./store.js").PlatformStats {
+  return { ...s, timestamp: new Date(s.timestamp) };
 }
 
 function serializePlatformMessageHistory(record: PlatformMessageHistory): Record<string, unknown> {

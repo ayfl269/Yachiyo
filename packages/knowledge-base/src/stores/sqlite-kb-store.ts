@@ -397,9 +397,11 @@ export class SqliteVectorStore extends VectorStore {
     const MAX_SCAN_ROWS = Math.max(topK * 50, 5000);
 
     // 1. 根据是否传入 kbId，决定是否仅筛选当前知识库的向量，减少数据库 I/O 和内存开销
+    // ORDER BY rowid：LIMIT 截断必须建立在确定性顺序上，否则超过扫描上限的库
+    // 每次检索覆盖到的行不同，结果不完整且不可复现。
     const sql = kbId
-      ? "SELECT chunk_id, embedding, content, doc_name FROM kb_vectors WHERE kb_id = ? LIMIT ?"
-      : "SELECT chunk_id, embedding, content, doc_name FROM kb_vectors LIMIT ?";
+      ? "SELECT chunk_id, embedding, content, doc_name FROM kb_vectors WHERE kb_id = ? ORDER BY rowid LIMIT ?"
+      : "SELECT chunk_id, embedding, content, doc_name FROM kb_vectors ORDER BY rowid LIMIT ?";
 
     const rows = (kbId
       ? this.db.prepare(sql).all(kbId, MAX_SCAN_ROWS)

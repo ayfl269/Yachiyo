@@ -29,9 +29,27 @@ export class KnowledgeBaseManager {
   private chunker: TextChunker;
   private metadataStore?: SqliteKBMetadataStore;
 
+  /**
+   * @param providerManager Provider manager used to resolve embedding/rerank providers.
+   * @param vectorStore Vector store for KB chunks/embeddings. Defaults to an
+   *   InMemoryVectorStore, which is NOT persisted: vectors are lost on restart
+   *   while KB metadata (when a metadata store is attached) survives, so
+   *   getDocuments()/metadata and the actual vector contents can drift apart.
+   *   Pass a SqliteVectorStore for a persistent setup.
+   */
   constructor(providerManager: ProviderManager, vectorStore?: VectorStore) {
     this.providerManager = providerManager;
-    this.vectorStore = vectorStore ?? new InMemoryVectorStore();
+    if (vectorStore) {
+      this.vectorStore = vectorStore;
+    } else {
+      console.warn(
+        "[KnowledgeBaseManager] No vectorStore provided — falling back to InMemoryVectorStore. " +
+        "Vectors will NOT persist across restarts while KB metadata (metadataStore) does; " +
+        "after a restart documents will still be listed but their vectors are gone until re-uploaded. " +
+        "Pass a SqliteVectorStore to keep vectors and metadata in sync.",
+      );
+      this.vectorStore = new InMemoryVectorStore();
+    }
     this.chunker = new TextChunker();
   }
 
