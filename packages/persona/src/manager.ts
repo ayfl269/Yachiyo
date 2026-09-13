@@ -1,5 +1,5 @@
 import type { Message } from "@yachiyo/agent/message.js";
-import { readFile, writeFile, mkdir } from "fs/promises";
+import { readFile, writeFile, mkdir, rename, unlink } from "fs/promises";
 import { existsSync } from "fs";
 import { dirname } from "path";
 
@@ -90,7 +90,29 @@ export class FilePersonaStore extends PersonaStore {
   async init(): Promise<void> {
     if (existsSync(this.filePath)) {
       const raw = await readFile(this.filePath, "utf-8");
-      this.data = JSON.parse(raw);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (e) {
+        // Corrupt file: start fresh rather than crash on every startup.
+        console.error(`FilePersonaStore: failed to parse ${this.filePath}, starting empty:`, e);
+        parsed = null;
+      }
+      // Shape validation/normalization: a hand-edited or partially corrupted
+      // file must not leave `personas`/`folders` undefined or non-object
+      // (every get/set below would throw).
+      const obj = (parsed && typeof parsed === "object" ? parsed : {}) as Record<string, unknown>;
+      const asRecord = (v: unknown): Record<string, unknown> =>
+        v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+      this.data = {
+        personas: asRecord(obj.personas) as PersonaStoreData["personas"],
+        folders: asRecord(obj.folders) as PersonaStoreData["folders"],
+      };
+      // `deletePersona("constructor")` style probes must not report inherited
+      // properties, and lookups must not see them either. Strip any inherited
+      // keys by copying own enumerable properties (also drops __proto__).
+      this.data.personas = { ...this.data.personas };
+      this.data.folders = { ...this.data.folders };
     } else {
       this.data = { personas: {}, folders: {} };
       await this.flush();
@@ -120,12 +142,27 @@ export class FilePersonaStore extends PersonaStore {
     if (!existsSync(dir)) {
       await mkdir(dir, { recursive: true });
     }
-    await writeFile(this.filePath, JSON.stringify(this.data, null, 2), "utf-8");
+    // Atomic write: write to a temp file in the same directory, then rename
+    // over the target. A crash mid-write previously left a truncated JSON
+    // file behind (bricking the store on every later startup); rename is
+    // atomic within a filesystem.
+    const tmpPath = `${this.filePath}.tmp-${process.pid}-${Date.now()}`;
+    await writeFile(tmpPath, JSON.stringify(this.data, null, 2), "utf-8");
+    try {
+      await rename(tmpPath, this.filePath);
+    } catch (e) {
+      // Best-effort cleanup of the orphaned temp file if rename failed.
+      try { await unlink(tmpPath); } catch { /* ignore */ }
+      throw e;
+    }
     this.dirty = false;
   }
 
   async getPersona(personaId: string): Promise<Personality | null> {
-    return this.data.personas[personaId] ?? null;
+    // hasOwnProperty guard: without it getPersona("constructor") returns the
+    // inherited Object constructor instead of null.
+    if (!Object.prototype.hasOwnProperty.call(this.data.personas, personaId)) return null;
+    return this.data.personas[personaId];
   }
 
   async setPersona(personaId: string, persona: Personality): Promise<void> {
@@ -134,7 +171,9 @@ export class FilePersonaStore extends PersonaStore {
   }
 
   async deletePersona(personaId: string): Promise<boolean> {
-    if (!(personaId in this.data.personas)) return false;
+    // `in` would match inherited properties (e.g. deletePersona("constructor")
+    // reported true while deleting nothing) — use own-property checks.
+    if (!Object.prototype.hasOwnProperty.call(this.data.personas, personaId)) return false;
     delete this.data.personas[personaId];
     this.scheduleWrite();
     return true;
@@ -145,7 +184,8 @@ export class FilePersonaStore extends PersonaStore {
   }
 
   async getFolder(folderId: string): Promise<PersonaFolder | null> {
-    return this.data.folders[folderId] ?? null;
+    if (!Object.prototype.hasOwnProperty.call(this.data.folders, folderId)) return null;
+    return this.data.folders[folderId];
   }
 
   async setFolder(folderId: string, folder: PersonaFolder): Promise<void> {
@@ -154,7 +194,7 @@ export class FilePersonaStore extends PersonaStore {
   }
 
   async deleteFolder(folderId: string): Promise<boolean> {
-    if (!(folderId in this.data.folders)) return false;
+    if (!Object.prototype.hasOwnProperty.call(this.data.folders, folderId)) return false;
     delete this.data.folders[folderId];
     this.scheduleWrite();
     return true;

@@ -16,7 +16,13 @@ function parseSSEEvent(eventText: string): SSEEvent | null {
     if (line.startsWith("event:")) {
       eventType = line.slice(6).trim();
     } else if (line.startsWith("data:")) {
-      dataLines.push(line.slice(5).trim());
+      // Per the SSE spec, only ONE leading space after the colon is stripped.
+      // `trim()` would also remove intentional leading/trailing whitespace in
+      // the payload (e.g. `data:  {"a": 1}` where the JSON starts with a
+      // significant space is fine, but `data: text ` would lose its trailing
+      // space), so slice exactly one optional space.
+      const value = line.slice(5);
+      dataLines.push(value.startsWith(" ") ? value.slice(1) : value);
     }
   }
 
@@ -34,6 +40,10 @@ export async function* parseSSEStream(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  // Set when a chunk ends with "\r" that might be the first half of a "\r\n"
+  // terminator straddling the chunk boundary. The \r is held back and merged
+  // into the next chunk before normalization.
+  let pendingCR = false;
 
   try {
     while (true) {
@@ -44,12 +54,30 @@ export async function* parseSSEStream(
       // Per the SSE spec, line terminators may be \r\n, \n, or bare \r.
       // Normalize to \n so that event delimiters (\n\n) and `event:`/`data:`
       // prefixes parse correctly regardless of upstream proxy/CDN behavior.
-      // Doing this per-chunk is safe even when \r\n straddles a chunk
-      // boundary: \r becomes \n and the trailing \n stays \n, yielding the
-      // same \n\n delimiter after concatenation.
-      const chunk = decoder.decode(value, { stream: true })
-        .replace(/\r\n/g, "\n")
-        .replace(/\r/g, "\n");
+      // We CANNOT normalize per-chunk blindly: if a \r\n straddles a chunk
+      // boundary (\r at the end of this chunk, \n starting the next), a naive
+      // `\r -> \n` conversion would produce "\n\n" across the boundary and
+      // fabricate a phantom event delimiter. Instead, keep a trailing \r in
+      // the buffer untouched; it is normalized on the next iteration once the
+      // following byte is known. A bare \r that is genuinely the last byte of
+      // the stream is flushed by the final normalization after the read loop.
+      let chunk = decoder.decode(value, { stream: true });
+      if (pendingCR) {
+        // A previous chunk ended with "\r" — prepend it so a straddling
+        // "\r\n" is normalized as a single terminator (no phantom event
+        // delimiter) and a bare "\r" becomes a line terminator.
+        chunk = "\r" + chunk;
+        pendingCR = false;
+      }
+      if (chunk.endsWith("\r")) {
+        // Hold back a trailing "\r": it may pair with the next chunk's "\n".
+        pendingCR = true;
+        chunk = chunk.slice(0, -1);
+      }
+      // Per the SSE spec, line terminators may be \r\n, \n, or bare \r.
+      // Normalize to \n so that event delimiters (\n\n) and `event:`/`data:`
+      // prefixes parse correctly regardless of upstream proxy/CDN behavior.
+      chunk = chunk.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
       buffer += chunk;
 
       const events = buffer.split("\n\n");
@@ -66,6 +94,12 @@ export async function* parseSSEStream(
     // servers do not append a trailing `\n\n` after the final event, so
     // without this the last event (often carrying usage/finish_reason)
     // would be silently dropped.
+    // A \r held back as potentially-straddling is now known to be a bare \r
+    // terminator — normalize it like every other terminator.
+    if (pendingCR) {
+      buffer += "\n";
+      pendingCR = false;
+    }
     if (buffer.trim()) {
       const evt = parseSSEEvent(buffer);
       if (evt) yield evt;

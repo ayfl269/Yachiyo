@@ -7,11 +7,13 @@
  * 3. Saving the result as an image file
  */
 
-import { chromium, type Browser, type Page } from "playwright";
-import { mkdirSync, existsSync } from "fs";
+import { chromium, type Browser, type Page, type Route } from "playwright";
+import { mkdirSync, existsSync, readdirSync, statSync, unlinkSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { randomUUID } from "crypto";
+import { lookup } from "dns";
+import { assertSafeUrl } from "@yachiyo/common/ssrf-guard.js";
 
 // ── Types ──
 
@@ -126,6 +128,12 @@ const TEMPLATES: Record<string, string> = {
 </style>
 </head>
 <body><div id="content">{{CONTENT}}</div>
+<!-- NOTE (supply chain): marked is loaded from a public CDN without SRI pinning.
+       This is a deliberate, accepted dependency: the script executes in a throwaway
+       headless page whose only input is HTML-escaped text, and all page network
+       requests are SSRF-filtered (see ssrfGuardRoute). A CDN compromise could still
+       alter the rendered output, so pin/unvendor marked if this ever renders
+       security-sensitive content. -->
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script>
   const el = document.getElementById('content');
@@ -198,6 +206,12 @@ const TEMPLATES: Record<string, string> = {
 </style>
 </head>
 <body><div id="content">{{CONTENT}}</div>
+<!-- NOTE (supply chain): marked is loaded from a public CDN without SRI pinning.
+       This is a deliberate, accepted dependency: the script executes in a throwaway
+       headless page whose only input is HTML-escaped text, and all page network
+       requests are SSRF-filtered (see ssrfGuardRoute). A CDN compromise could still
+       alter the rendered output, so pin/unvendor marked if this ever renders
+       security-sensitive content. -->
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script>
   const el = document.getElementById('content');
@@ -208,9 +222,88 @@ const TEMPLATES: Record<string, string> = {
 
 // ── MarkdownRenderer ──
 
+/**
+ * Private / reserved IP ranges blocked for page-initiated subresource loads.
+ * The headless browser fetches arbitrary external links embedded in model
+ * output (markdown images etc.), which would otherwise bypass the project's
+ * unified safeFetch SSRF protections. Unlike safeFetch (LAN allowed for
+ * business reasons), browser rendering has no such requirement, so ALL
+ * private/reserved ranges are blocked, in addition to the cloud metadata
+ * hosts covered by `assertSafeUrl` from ssrf-guard.
+ */
+function isPrivateOrReservedIp(ip: string): boolean {
+  // IPv4 (including IPv4-mapped IPv6 ::ffff:a.b.c.d)
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(ip);
+  if (ip.includes(".") || mapped) {
+    const v4 = mapped ? mapped[1] : ip;
+    const parts = v4.split(".").map(Number);
+    // Malformed addresses fail closed.
+    if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
+    const [a, b] = parts;
+    if (a === 0 || a === 10 || a === 127) return true;            // this-network, private, loopback
+    if (a === 100 && b >= 64 && b <= 127) return true;            // CGNAT 100.64/10 (incl. Aliyun metadata)
+    if (a === 169 && b === 254) return true;                      // link-local (incl. 169.254.169.254)
+    if (a === 172 && b >= 16 && b <= 31) return true;             // private
+    if (a === 192 && b === 168) return true;                      // private
+    if (a === 192 && b === 0) return true;                        // 192.0.0.0/24 + TEST-NET-1
+    if (a === 198 && (b === 18 || b === 19)) return true;         // benchmarking
+    if (a === 198 && b === 51) return true;                       // TEST-NET-2
+    if (a === 203 && b === 0) return true;                        // TEST-NET-3
+    if (a >= 224) return true;                                    // multicast + reserved
+    return false;
+  }
+  const lower = ip.toLowerCase();
+  if (lower === "::" || lower === "::1") return true;             // unspecified, loopback
+  if (lower.startsWith("fe80:")) return true;                     // link-local
+  if (lower.startsWith("fc") || lower.startsWith("fd")) return true; // ULA fc00::/7
+  if (lower.startsWith("::ffff:")) return true;                   // other v4-mapped forms
+  return false;
+}
+
+/**
+ * SSRF guard for page-initiated requests. Blocks non-http(s) schemes and
+ * cloud metadata hosts (via assertSafeUrl), then resolves the hostname via
+ * DNS and blocks when ANY resolved address falls into a private/reserved
+ * range (DNS-rebinding resistant: we check the actual resolved addresses,
+ * matching how Chromium will connect). Fails closed on DNS errors.
+ */
+async function ssrfGuardRoute(route: Route): Promise<void> {
+  const url = route.request().url();
+  try {
+    await assertSafeUrl(url); // scheme allowlist + cloud metadata hosts
+    const hostname = new URL(url).hostname;
+    const addresses = await new Promise<{ address: string }[] | null>((resolvePromise) => {
+      lookup(hostname, { all: true }, (err, result) => {
+        resolvePromise(err ? null : result as { address: string }[]);
+      });
+    });
+    if (!addresses || addresses.length === 0) {
+      await route.abort("addressunreachable");
+      return;
+    }
+    if (addresses.some((a) => isPrivateOrReservedIp(a.address))) {
+      console.warn(`[T2I] Blocked request to private/reserved address: ${url}`);
+      await route.abort("blockedbyclient");
+      return;
+    }
+    await route.continue();
+  } catch (e) {
+    console.warn(`[T2I] Blocked unsafe page request: ${url} (${e instanceof Error ? e.message : e})`);
+    await route.abort("blockedbyclient");
+  }
+}
+
+/** TTL for rendered images in the t2i output directory (process-local temp). */
+const T2I_FILE_TTL_MS = 60 * 60 * 1000; // 1 hour — send happens within seconds
+const T2I_SWEEP_INTERVAL_MS = 60 * 1000;
+
 export class MarkdownToImageRenderer {
   private browser: Browser | null = null;
+  /** Shared launch promise so concurrent initialize()/render() calls start exactly one browser. */
+  private launchPromise: Promise<Browser> | null = null;
   private config: T2IConfig;
+  private lastSweepAt = 0;
+  private exitHookInstalled = false;
 
   constructor(config?: Partial<T2IConfig>) {
     this.config = { ...DEFAULT_T2I_CONFIG, ...config };
@@ -227,19 +320,16 @@ export class MarkdownToImageRenderer {
   /**
    * Initialize Playwright browser instance.
    * Call once during startup.
+   *
+   * Concurrency-safe: concurrent callers share a single launch promise
+   * (same pattern as getSharedBrowser in web-tools.ts). The previous
+   * check-then-launch implementation started two browsers when two
+   * requests raced between the `if (this.browser)` check and the launch,
+   * leaking one of them.
    */
   async initialize(): Promise<void> {
-    if (this.browser) return;
     try {
-      this.browser = await chromium.launch({
-        headless: true,
-        args: [
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
-          "--disable-gpu",
-          "--font-render-hinting=none",
-        ],
-      });
+      await this.ensureBrowser();
       console.info("[T2I] Playwright browser initialized.");
     } catch (error) {
       console.error("[T2I] Failed to launch Playwright browser:", error);
@@ -247,14 +337,70 @@ export class MarkdownToImageRenderer {
     }
   }
 
+  private ensureBrowser(): Promise<Browser> {
+    if (this.browser && this.browser.isConnected()) return Promise.resolve(this.browser);
+    if (this.launchPromise) return this.launchPromise;
+    this.launchPromise = (async () => {
+      try {
+        const browser = await chromium.launch({
+          headless: true,
+          args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-gpu",
+            "--font-render-hinting=none",
+          ],
+        });
+        this.browser = browser;
+        return browser;
+      } catch (e) {
+        // Reset on failure so later calls can retry instead of awaiting a
+        // permanently rejected promise.
+        this.launchPromise = null;
+        throw e;
+      }
+    })();
+    return this.launchPromise;
+  }
+
   /**
    * Close the browser instance.
    */
   async close(): Promise<void> {
+    if (this.launchPromise) {
+      try { await this.launchPromise; } catch { /* ignore */ }
+      this.launchPromise = null;
+    }
     if (this.browser) {
-      await this.browser.close();
+      await this.browser.close().catch(() => {});
       this.browser = null;
       console.info("[T2I] Browser closed.");
+    }
+  }
+
+  /**
+   * Best-effort cleanup of stale rendered images in the t2i output
+   * directory (files whose delivery/consumption already fell outside the
+   * TTL). Throttled; also removes the whole directory on process exit.
+   */
+  private sweepTempImages(outputDir: string): void {
+    const now = Date.now();
+    if (now - this.lastSweepAt < T2I_SWEEP_INTERVAL_MS) return;
+    this.lastSweepAt = now;
+    try {
+      if (!existsSync(outputDir)) return;
+      for (const name of readdirSync(outputDir)) {
+        const p = join(outputDir, name);
+        try {
+          if (now - statSync(p).mtimeMs >= T2I_FILE_TTL_MS) unlinkSync(p);
+        } catch { /* ignore individual failures */ }
+      }
+    } catch { /* ignore */ }
+    if (!this.exitHookInstalled) {
+      this.exitHookInstalled = true;
+      process.once("exit", () => {
+        try { rmSync(outputDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      });
     }
   }
 
@@ -268,14 +414,13 @@ export class MarkdownToImageRenderer {
     if (!this.config.enabled) return null;
     if (!markdownText.trim()) return null;
 
-    // Ensure browser is ready
-    if (!this.browser) {
-      try {
-        await this.initialize();
-      } catch {
-        console.error("[T2I] Cannot render: browser not available.");
-        return null;
-      }
+    // Ensure browser is ready (concurrency-safe shared launch)
+    let browser: Browser;
+    try {
+      browser = await this.ensureBrowser();
+    } catch {
+      console.error("[T2I] Cannot render: browser not available.");
+      return null;
     }
 
     const template = TEMPLATES[this.config.template] ?? TEMPLATES.default;
@@ -283,10 +428,23 @@ export class MarkdownToImageRenderer {
       .replace("{{WIDTH}}", String(this.config.width))
       .replace("{{CONTENT}}", escapeHtml(markdownText));
 
+    // Ensure output directory exists
+    const outputDir = join(tmpdir(), "yachiyo-t2i");
+    if (!existsSync(outputDir)) {
+      mkdirSync(outputDir, { recursive: true });
+    }
+    this.sweepTempImages(outputDir);
+
     let page: Page | null = null;
     try {
-      page = await this.browser!.newPage();
+      page = await browser.newPage();
       await page.setViewportSize({ width: this.config.width + 60, height: 800 });
+
+      // SSRF protection: model-controlled markdown may contain external
+      // links/images that the headless browser would fetch directly,
+      // bypassing the project-wide safeFetch. Intercept every request and
+      // block private/reserved addresses and cloud metadata endpoints.
+      await page.route("**/*", (route) => ssrfGuardRoute(route));
 
       await page.setContent(html, { waitUntil: "networkidle" });
 
@@ -304,12 +462,6 @@ export class MarkdownToImageRenderer {
         width: this.config.width + 60,
         height: Math.max(bodyHeight + 20, 100),
       });
-
-      // Ensure output directory exists
-      const outputDir = join(tmpdir(), "yachiyo-t2i");
-      if (!existsSync(outputDir)) {
-        mkdirSync(outputDir, { recursive: true });
-      }
 
       const fileName = `t2i_${randomUUID()}.${this.config.format}`;
       const filePath = join(outputDir, fileName);

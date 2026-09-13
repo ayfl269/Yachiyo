@@ -142,4 +142,26 @@ export async function* parseOpenAIStream(
       yield { ...result, isChunk: false };
     }
   }
+
+  // Fallback flush: some OpenAI-compatible gateways/proxies (and interrupted
+  // streams) terminate without ever sending `finish_reason: "tool_calls"`.
+  // If tool calls were accumulated but never emitted, flush them here as a
+  // final response — otherwise the tool chain silently breaks mid-conversation
+  // (the model "asked" for a tool but downstream never sees it).
+  if (toolCallsAccum.size > 0) {
+    const sorted = [...toolCallsAccum.entries()].sort(([a], [b]) => a - b);
+    yield {
+      role: "assistant",
+      isChunk: false,
+      toolsCallIds: sorted.map(([, v]) => v.id),
+      toolsCallName: sorted.map(([, v]) => v.name),
+      toolsCallArgs: sorted.map(([, v]) => {
+        try {
+          return JSON.parse(v.arguments);
+        } catch {
+          return { raw: v.arguments };
+        }
+      }),
+    };
+  }
 }

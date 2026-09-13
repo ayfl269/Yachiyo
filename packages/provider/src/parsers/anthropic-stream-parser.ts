@@ -30,11 +30,17 @@ export async function* parseAnthropicStream(
   let activeToolIndex: number | null = null;
 
   // `message_start` reports the prompt (input) token count; `message_delta`
-  // reports the completion (output) token count. Previously `message_delta`
-  // overwrote the entire usage object with promptTokens: 0, discarding the
-  // real prompt token count. We now cache the promptTokens from
-  // `message_start` and re-emit it alongside the completion tokens in
-  // `message_delta`, so downstream token accounting stays correct.
+  // reports the completion (output) token count. We cache the message_start
+  // values and emit ONE usage object from `message_delta` carrying the
+  // cumulative totals.
+  //
+  // Downstream semantics (verified): the agent runner ACCUMULATES usage
+  // across chunks (`stats.tokenUsage.promptTokens += ...`) and also treats
+  // any chunk carrying `usage` as the final response, breaking the stream
+  // loop. Emitting usage on message_start therefore both double-counted the
+  // prompt tokens (message_start P + message_delta P) and truncated the
+  // stream right after message_start. `message_start` no longer yields a
+  // usage chunk; the final cumulative usage comes with `message_delta`.
   let cachedPromptTokens = 0;
   let cachedCacheCreationInputTokens: number | undefined;
   let cachedCacheReadInputTokens: number | undefined;
@@ -55,17 +61,15 @@ export async function* parseAnthropicStream(
     switch (eventType) {
       case "message_start": {
         const d = data as { message?: { usage?: AnthropicUsage } };
+        // Cache the prompt-side usage only. Do NOT attach `result.usage`
+        // here: downstream accumulates usage per chunk and treats any
+        // usage-bearing chunk as the final response, so a message_start
+        // usage chunk would double-count prompt tokens and cut the stream
+        // short. The cumulative usage is emitted once from message_delta.
         if (d.message?.usage) {
           cachedPromptTokens = d.message.usage.input_tokens ?? 0;
           cachedCacheCreationInputTokens = d.message.usage.cache_creation_input_tokens;
           cachedCacheReadInputTokens = d.message.usage.cache_read_input_tokens;
-          result.usage = {
-            promptTokens: cachedPromptTokens,
-            completionTokens: 0,
-            total: cachedPromptTokens,
-            cacheCreationInputTokens: cachedCacheCreationInputTokens,
-            cacheReadInputTokens: cachedCacheReadInputTokens,
-          };
         }
         break;
       }

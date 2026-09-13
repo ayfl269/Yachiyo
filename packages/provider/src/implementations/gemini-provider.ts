@@ -274,11 +274,41 @@ export class GeminiProvider implements Provider {
         const cacheLimit = contents.length - 2;
         if (cacheLimit > 0) {
           const prefixContents = contents.slice(0, cacheLimit);
-          const dummyMsgChain = resolved.slice(0, resolved.length - 2) as unknown as Message[];
+          // Estimate tokens over the SAME array that will be sent as the
+          // cache prefix (the merged GeminiContent list). The previous code
+          // sliced the pre-merge Message array (`resolved`), which diverges
+          // whenever messageToGemini merges consecutive same-role messages —
+          // the estimated prefix then corresponds to different content than
+          // the cached prefix. Gemini parts are mapped into the generic
+          // content-part shape understood by EstimateTokenCounter: text
+          // parts are counted as text, inline media gets the same fixed
+          // per-item estimate as image_url/audio_url parts, and function
+          // call/response payloads are counted via their JSON.
           const tokenCounter = new EstimateTokenCounter();
-          const estimatedTokens = tokenCounter.countTokens(dummyMsgChain);
+          const prefixMessages = prefixContents.map((c) => ({
+            role: "assistant",
+            content: (c.parts ?? []).map((p): Record<string, unknown> => {
+              if (typeof p.text === "string") {
+                return { type: "text", text: p.text };
+              }
+              if (p.inlineData) {
+                return p.inlineData.mimeType.startsWith("audio/")
+                  ? { type: "audio_url", audio_url: { url: "" } }
+                  : { type: "image_url", image_url: { url: "" } };
+              }
+              if (p.functionCall || p.functionResponse) {
+                return { type: "text", text: JSON.stringify(p.functionCall ?? p.functionResponse) };
+              }
+              return { type: "text", text: "" };
+            }),
+          })) as unknown as Message[];
+          const estimatedTokens = tokenCounter.countTokens(prefixMessages);
 
-          const cacheThreshold = (this.providerConfig.cacheThreshold as number) || 32768;
+          // Nullish (not falsy) so an explicit `cacheThreshold: 0` — meaning
+          // "always cache" — is respected instead of being replaced by the
+          // default.
+          const rawThreshold = this.providerConfig.cacheThreshold as number | undefined;
+          const cacheThreshold = rawThreshold ?? 32768;
 
           if (estimatedTokens >= cacheThreshold) {
             try {
@@ -421,11 +451,14 @@ export class GeminiProvider implements Provider {
     const content = candidate?.content as Record<string, unknown> | undefined;
     const parts = content?.parts as Array<Record<string, unknown>> | undefined;
 
-    // Diagnostic: log raw response structure for empty content debugging
+    // Diagnostic: log raw response structure for empty content debugging.
+    // Downgraded to console.debug: this block dumps raw API response content
+    // (potentially full conversation payloads) and must not pollute the
+    // default warn-level output where it would leak session content into logs.
     if (!Array.isArray(parts) || parts.length === 0) {
       const promptFeedback = data.promptFeedback as Record<string, unknown> | undefined;
       const safetyRatings = candidate?.safetyRatings as Array<Record<string, unknown>> | undefined;
-      console.warn(
+      console.debug(
         `[GeminiProvider] Empty/missing parts in response. ` +
         `candidates=${candidates?.length ?? 0}, ` +
         `content keys=${content ? Object.keys(content).join(",") : "none"}, ` +
@@ -435,12 +468,12 @@ export class GeminiProvider implements Provider {
         (safetyRatings ? `, safetyRatings=${JSON.stringify(safetyRatings).slice(0, 300)}` : "")
       );
       if (candidate) {
-        console.warn(`[GeminiProvider] candidate=`, JSON.stringify(candidate).slice(0, 500));
+        console.debug(`[GeminiProvider] candidate=`, JSON.stringify(candidate).slice(0, 500));
       }
       // Dump full response body (truncated) to see proxy-level errors
       const fullRespStr = JSON.stringify(data);
-      console.warn(`[GeminiProvider] <<< FULL RAW RESPONSE (length=${fullRespStr.length}):`);
-      console.warn(fullRespStr.length > 2000
+      console.debug(`[GeminiProvider] <<< FULL RAW RESPONSE (length=${fullRespStr.length}):`);
+      console.debug(fullRespStr.length > 2000
         ? fullRespStr.slice(0, 1500) + "\n... [TRUNCATED] ...\n" + fullRespStr.slice(-500)
         : fullRespStr);
     }

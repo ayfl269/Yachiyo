@@ -41,14 +41,20 @@ export async function* parseGeminiStream(
     try {
       chunk = JSON.parse(event.data);
     } catch {
-      // Diagnostic: log unparseable events
-      console.warn(`[GeminiStreamParser] Chunk ${chunkCount}: failed to parse, data=${(event.data ?? "").slice(0, 200)}`);
+      // Diagnostic: log unparseable events. Kept at warn level but truncated
+      // so malformed upstream responses stay visible; the payload preview may
+      // contain conversation content, hence the hard length cap.
+      const preview = (event.data ?? "").slice(0, 200);
+      console.warn(`[GeminiStreamParser] Chunk ${chunkCount}: failed to parse, data preview length=${(event.data ?? "").length}`);
+      console.debug(`[GeminiStreamParser] Chunk ${chunkCount} unparseable data preview: ${preview}`);
       continue;
     }
 
-    // Diagnostic: log first few chunks' raw structure
+    // Diagnostic: log first few chunks' raw structure. Downgraded to
+    // console.debug: raw chunk JSON contains session content and must not be
+    // emitted at warn level in production logs.
     if (chunkCount <= 3) {
-      console.warn(`[GeminiStreamParser] Chunk ${chunkCount} raw:`, JSON.stringify(chunk).slice(0, 500));
+      console.debug(`[GeminiStreamParser] Chunk ${chunkCount} raw:`, JSON.stringify(chunk).slice(0, 500));
     }
 
     const result: LLMResponse = { role: "assistant", isChunk: true };
@@ -112,7 +118,7 @@ export async function* parseGeminiStream(
     }
   }
 
-  // Diagnostic: summary
+  // Diagnostic: summary (stays at warn — no content, purely structural)
   if (chunkCount > 0 && yieldedCount === 0) {
     console.warn(`[GeminiStreamParser] Stream ended: ${chunkCount} chunks received, ${yieldedCount} yielded (all empty!)`);
   }

@@ -178,7 +178,10 @@ export class SqliteProviderStore {
     for (const field of SECRET_FIELDS) {
       const v = out[field];
       if (typeof v === "string" && v.length > 0) {
-        out[field] = decryptSecret(v, this.encKey);
+        // decryptSecret returns null on malformed/failed decryption — degrade
+        // to an empty secret (provider calls will fail auth, which is
+        // recoverable) rather than propagating ciphertext as a usable value.
+        out[field] = decryptSecret(v, this.encKey) ?? "";
       }
     }
     return out;
@@ -191,7 +194,7 @@ export class SqliteProviderStore {
 
   private decryptKey(key: string): string {
     if (!this.encKey || !key) return key;
-    return decryptSecret(key, this.encKey);
+    return decryptSecret(key, this.encKey) ?? "";
   }
 
   // === Provider Config ===
@@ -260,6 +263,57 @@ export class SqliteProviderStore {
 
   // === MCP Server Config ===
 
+  /**
+   * Whether we already warned this process about storing MCP configs in
+   * plaintext (no encryption key available).
+   */
+  private warnedMcpPlaintext = false;
+
+  // MCP server configs routinely carry secrets in NESTED objects (env vars,
+  // HTTP headers) that the flat SECRET_FIELDS scan used for provider configs
+  // cannot reach. Instead of field-scanning, the ENTIRE config JSON is
+  // encrypted with the same AES-256-GCM scheme (`enc:v1:` / `enc:v2:` prefix)
+  // used for provider keys. Legacy plaintext rows remain readable: decryptSecret
+  // returns input without an `enc:` prefix unchanged.
+  private encryptMcpConfig(config: Record<string, unknown>): string {
+    const serialized = JSON.stringify(config);
+    if (this.encKey) {
+      return encryptSecret(serialized, this.encKey);
+    }
+    if (!this.warnedMcpPlaintext) {
+      this.warnedMcpPlaintext = true;
+      console.warn(
+        "[SqliteProviderStore] WARNING: no encryption key configured — MCP server configs " +
+        "(which may contain secrets in env/headers) are stored in PLAINTEXT in the database. " +
+        "Set YACHIYO_DB_KEY or provide a key file to enable at-rest encryption."
+      );
+    }
+    return serialized;
+  }
+
+  private decryptMcpConfig(raw: string): string {
+    if (!raw.startsWith("enc:v1:") && !raw.startsWith("enc:v2:")) return raw; // legacy plaintext row
+    if (!this.encKey) {
+      console.error("[SqliteProviderStore] MCP config row is encrypted but no encryption key is available; returning empty config.");
+      return "{}";
+    }
+    try {
+      const decrypted = decryptSecret(raw, this.encKey);
+      if (decrypted === null) {
+        // Wrong key or corrupted ciphertext — degrade to an empty config
+        // instead of crashing startup or feeding JSON.parse garbage.
+        console.error("[SqliteProviderStore] Failed to decrypt MCP config row; returning empty config.");
+        return "{}";
+      }
+      return decrypted;
+    } catch (e) {
+      // Wrong key or corrupted ciphertext (decryptSecret throws on GCM tag
+      // mismatch) — degrade to an empty config instead of crashing startup.
+      console.error("[SqliteProviderStore] Failed to decrypt MCP config row:", e);
+      return "{}";
+    }
+  }
+
   saveMcpServerConfig(config: StoredMcpServerConfig): void {
     this.db.prepare(`
       INSERT OR REPLACE INTO mcp_server_configs
@@ -267,7 +321,7 @@ export class SqliteProviderStore {
       VALUES (?, ?, ?, ?)
     `).run(
       config.serverName,
-      JSON.stringify(config.config),
+      this.encryptMcpConfig(config.config),
       config.createdAt,
       config.updatedAt,
     );
@@ -277,7 +331,7 @@ export class SqliteProviderStore {
     const rows = this.db.prepare("SELECT server_name, config, created_at, updated_at FROM mcp_server_configs").all() as McpServerConfigRow[];
     return rows.map((r) => ({
       serverName: r.server_name,
-      config: JSON.parse(r.config),
+      config: JSON.parse(this.decryptMcpConfig(r.config)),
       createdAt: r.created_at,
       updatedAt: r.updated_at,
     }));

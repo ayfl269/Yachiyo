@@ -515,10 +515,13 @@ export class ProviderManager {
         });
       } catch (e) {
         // If persistence fails, roll back the in-memory state so the
-        // instance and config stay consistent. The instance was already
-        // registered successfully, so we just need to remove it.
+        // instance and config stay consistent: remove both the instance
+        // and the config entry we just added, otherwise a dangling
+        // providerConfigs entry survives (it would even be merged into
+        // getMergedProviderConfig lookups for this ID).
         console.warn(`[ProviderManager] Failed to persist config for ${id}, rolling back: ${e}`);
         this.removeProviderInstance(id);
+        this.providerConfigs.delete(id);
         throw e;
       }
     }
@@ -857,6 +860,12 @@ export class ProviderManager {
     if (chatTypes.has(type)) {
       const provider = await dynamicCreateChatProvider(type, config as unknown as ChatProviderConfig);
       if (provider) {
+        // 与 registerProvider 一致：chat provider 缺省 modalities 时补默认
+        // ["text","tool_use"]。SQLite 恢复/dashboard 动态创建的 provider 同样
+        // 需要该默认值，否则缺省时按"支持一切"处理，图片/音频输入不会降级。
+        if (provider.providerConfig.modalities == null) {
+          provider.providerConfig.modalities = ["text", "tool_use"];
+        }
         this.providerInsts.push(provider);
         this.instMap.set(id, provider);
         this.notifyChange(id, "chat_completion" as ProviderType, "load");
@@ -906,6 +915,11 @@ export class ProviderManager {
         const instance = new cls(config) as Record<string, unknown>;
         // Default to chat provider registration
         if ("textChat" in instance) {
+          // Same modalities default as known chat types (see above).
+          const pc = instance.providerConfig as Record<string, unknown> | undefined;
+          if (pc && pc.modalities == null) {
+            pc.modalities = ["text", "tool_use"];
+          }
           this.providerInsts.push(instance as unknown as Provider);
         }
         this.instMap.set(id, instance as unknown as AnyProvider);

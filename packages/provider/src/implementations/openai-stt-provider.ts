@@ -2,7 +2,7 @@ import { STTProvider } from "../manager.js";
 import { withRetry } from "../retry.js";
 import { ProviderAPIError } from "../errors.js";
 import { safeFetch } from "@yachiyo/common/ssrf-guard.js";
-import { readFileSync } from "fs";
+import { readFileSync, unlinkSync } from "fs";
 import { basename, isAbsolute, relative, resolve } from "path";
 import { tmpdir } from "os";
 
@@ -29,10 +29,16 @@ export class OpenAISttProvider extends STTProvider {
 
   async getText(audioUrl: string): Promise<string> {
     let filePath: string;
+    // Track files THIS call created (remote downloads). They are internal
+    // intermediates only — deleted in the finally block below so repeated
+    // STT calls do not accumulate files in the OS temp directory forever.
+    // Caller-provided local paths are NOT deleted (we don't own them).
+    let selfCreatedFile: string | null = null;
 
     if (this.isUrl(audioUrl)) {
       const downloaded = await this.downloadAudio(audioUrl);
       filePath = downloaded;
+      selfCreatedFile = downloaded;
     } else {
       // Local paths are attacker-influencable (the value comes from message
       // content). Only files inside the OS temp directory may be read —
@@ -55,38 +61,45 @@ export class OpenAISttProvider extends STTProvider {
     const fileBuffer = readFileSync(filePath);
     const fileName = basename(filePath);
 
-    const formData = new FormData();
-    formData.append("model", this.model);
-    formData.append("file", new Blob([fileBuffer]), fileName);
-    if (this.language) {
-      formData.append("language", this.language);
-    }
-
-    const data = await withRetry(async () => {
-      const res = await fetch(`${this.baseUrl}/audio/transcriptions`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-        body: formData,
-      });
-
-      if (!res.ok) {
-        let errorMessage: string;
-        try {
-          const errorBody = (await res.json()) as Record<string, unknown>;
-          const error = errorBody?.error as Record<string, unknown> | undefined;
-          errorMessage = (error?.message as string) ?? res.statusText;
-        } catch {
-          errorMessage = res.statusText;
-        }
-        throw new ProviderAPIError("openai-stt", res.status, undefined, errorMessage);
+    try {
+      const formData = new FormData();
+      formData.append("model", this.model);
+      formData.append("file", new Blob([fileBuffer]), fileName);
+      if (this.language) {
+        formData.append("language", this.language);
       }
 
-      return res.json() as Promise<{ text: string }>;
-    });
+      const data = await withRetry(async () => {
+        const res = await fetch(`${this.baseUrl}/audio/transcriptions`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${this.apiKey}`,
+          },
+          body: formData,
+        });
 
-    return data.text;
+        if (!res.ok) {
+          let errorMessage: string;
+          try {
+            const errorBody = (await res.json()) as Record<string, unknown>;
+            const error = errorBody?.error as Record<string, unknown> | undefined;
+            errorMessage = (error?.message as string) ?? res.statusText;
+          } catch {
+            errorMessage = res.statusText;
+          }
+          throw new ProviderAPIError("openai-stt", res.status, undefined, errorMessage);
+        }
+
+        return res.json() as Promise<{ text: string }>;
+      });
+
+      return data.text;
+    } finally {
+      // Best-effort cleanup of the file this call downloaded.
+      if (selfCreatedFile) {
+        try { unlinkSync(selfCreatedFile); } catch { /* ignore */ }
+      }
+    }
   }
 
   private isUrl(str: string): boolean {

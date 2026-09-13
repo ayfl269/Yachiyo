@@ -171,6 +171,12 @@ export class SkillManager {
     const result: Record<string, string | boolean | number | unknown[]> = {};
     let currentKey = ""; // 追踪当前 key，用于将块序列项 (- item) 归属到正确的 key
 
+    // Prototype-pollution hardening: skill frontmatter comes from disk (and
+    // potentially from imported plugin archives), so a crafted file could
+    // otherwise set `__proto__`/`constructor`/`prototype` on the parsed
+    // result. Such keys are skipped entirely.
+    const unsafeKeys = new Set(["__proto__", "constructor", "prototype"]);
+
     for (const rawLine of yamlText.split(/\r?\n/)) {
       const line = rawLine.trim();
       if (!line || line.startsWith("#")) continue;
@@ -178,7 +184,7 @@ export class SkillManager {
       // YAML 块序列项：以 - 或 * 开头的行
       // 将其值追加到 currentKey 的数组中
       if (line.startsWith("- ") || line.startsWith("* ") || line === "-") {
-        if (!currentKey) continue;
+        if (!currentKey || unsafeKeys.has(currentKey)) continue;
         const item = line === "-" ? "" : line.replace(/^[-*]\s+/, "");
         const parsedItem = this.parseScalarValue(item);
         const existing = result[currentKey];
@@ -208,14 +214,24 @@ export class SkillManager {
         try { value = JSON.parse(value.replace(/'/g, '"')); } catch { /* keep as string */ }
       }
 
+      // Skip unsafe keys before touching `result` (reading result["constructor"]
+      // would even hit the inherited Object constructor and take the wrong branch).
+      if (unsafeKeys.has(key)) {
+        console.debug(`[SkillManager] Ignoring unsafe YAML frontmatter key "${key}"`);
+        currentKey = "";
+        continue;
+      }
+
       currentKey = key; // 更新当前 key，供后续块序列项使用
       const existing = result[key];
-      if (Array.isArray(existing)) {
-        existing.push(value);
-      } else if (existing !== undefined) {
-        result[key] = [existing, value];
-      } else {
+      if (existing === undefined) {
         result[key] = value;
+      } else {
+        // Duplicate key: keep the FIRST value. The previous behaviour
+        // silently converted the field into `[first, second]`, which broke
+        // every single-value consumer (e.g. `fm.name` became an array and
+        // `String(fm.name)` produced "a,b").
+        console.debug(`[SkillManager] Duplicate YAML frontmatter key "${key}" — keeping first value`);
       }
     }
     return result;
