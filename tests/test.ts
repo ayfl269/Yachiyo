@@ -1128,15 +1128,14 @@ async function testInMemoryVectorStoreDimensionValidation(): Promise<void> {
   console.log("  维度相同时搜索结果数量:", results.length);
   assert(results[0]?.score != null, "维度相同时得分是否非空");
 
-  // 2. Mismatched dimension query should throw error
-  let threwError = false;
-  try {
-    await store.search([0.1, 0.2], 5, "kb-1"); // dimension 2, mismatch!
-  } catch (e) {
-    threwError = true;
-    console.log("  维度不同时捕获到预期错误:", (e as Error).message);
-  }
-  assert(threwError, "维度校验成功触发错误");
+  // 2. Mismatched dimension: stale vector is skipped with a warning
+  //    (semantics aligned with SqliteVectorStore; no longer throws)
+  const mismatched = await store.search([0.1, 0.2], 5, "kb-1"); // dimension 2, mismatch!
+  assert(mismatched.length === 0, "维度不匹配的向量被跳过");
+
+  // 3. Dimension-matched vector still returned after a mismatched search
+  const results2 = await store.search([0.1, 0.2, 0.3], 5, "kb-1");
+  assert(results2.length === 1, "维度匹配向量仍正常返回");
 
   console.log("  ✅ InMemoryVectorStore 维度校验测试通过");
 }
