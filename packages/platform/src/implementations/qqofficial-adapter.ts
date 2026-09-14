@@ -141,7 +141,7 @@ export type QQOfficialIntentName =
 
 interface AccessTokenResponse {
   access_token: string;
-  expires_in: number;
+  expires_in: number | string;
 }
 
 interface QQOfficialAuthor {
@@ -1178,15 +1178,16 @@ export class QQOfficialAdapter extends PlatformAdapter {
     if (!data || typeof data.access_token !== "string" || data.access_token.length === 0) {
       throw new Error("[QQOfficial] Authentication response missing or empty access_token");
     }
-    if (typeof data.expires_in !== "number" || !Number.isFinite(data.expires_in) || data.expires_in <= 0) {
+    const expiresInNum = typeof data.expires_in === "number" ? data.expires_in : Number(data.expires_in);
+    if (!Number.isFinite(expiresInNum) || expiresInNum <= 0) {
       throw new Error(`[QQOfficial] Authentication response has invalid expires_in: ${String((data as { expires_in?: unknown })?.expires_in)}`);
     }
     this.accessToken = data.access_token;
     // Refresh token 30 seconds before expiry
-    const refreshDelay = Math.max((data.expires_in - 30) * 1000, 60000);
-    this.tokenExpiresAt = Date.now() + data.expires_in * 1000;
+    const refreshDelay = Math.max((expiresInNum - 30) * 1000, 60000);
+    this.tokenExpiresAt = Date.now() + expiresInNum * 1000;
 
-    console.info(`[QQOfficial] Authenticated successfully, token expires in ${data.expires_in}s`);
+    console.info(`[QQOfficial] Authenticated successfully, token expires in ${expiresInNum}s`);
 
     if (this.tokenRefreshTimer) {
       clearTimeout(this.tokenRefreshTimer);
