@@ -31,7 +31,7 @@ export async function getProxyAgent(url?: string | null): Promise<unknown> {
     proxyAgentCache.set(normalized, agent);
     return agent;
   } catch (e) {
-    console.warn(`[ProxyAgent] Failed to create ProxyAgent for ${normalized}:`, e);
+    console.warn("[ProxyAgent] Failed to create ProxyAgent for %s:", normalized, e);
     return undefined;
   }
 }
