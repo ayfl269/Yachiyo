@@ -9,6 +9,7 @@ import { ProviderAPIError, RateLimitError, safeParseJsonResponse } from "../erro
 import { EstimateTokenCounter } from "@yachiyo/common/token-counter.js";
 import { safeFetch } from "@yachiyo/common/ssrf-guard.js";
 import { resolveImageToDataUrl, resolveAudioToDataUrl } from "@yachiyo/common/download-utils.js";
+import { getProxyAgent } from "@yachiyo/common";
 
 async function resolveRemoteMediaInContexts(
   contexts: Record<string, unknown>[]
@@ -81,6 +82,7 @@ export interface GeminiProviderConfig extends ProviderConfig {
   apiKey: string;
   baseUrl?: string;
   model: string;
+  proxy?: string;
 }
 
 export class GeminiProvider implements Provider {
@@ -89,12 +91,14 @@ export class GeminiProvider implements Provider {
   private apiKey: string;
   private baseUrl: string;
   private model: string;
+  private proxy?: string;
 
   constructor(config: GeminiProviderConfig) {
     this.providerConfig = config;
     this.apiKey = config.apiKey;
     this.baseUrl = config.baseUrl ?? "https://generativelanguage.googleapis.com/v1beta";
     this.model = config.model;
+    this.proxy = config.proxy;
   }
 
   // Map to store active context caches
@@ -122,11 +126,13 @@ export class GeminiProvider implements Provider {
   private async deleteContextCache(cacheName: string): Promise<void> {
     try {
       const url = `${this.baseUrl}/${cacheName}`;
+      const dispatcher = await getProxyAgent(this.proxy);
       const res = await safeFetch(url, {
         method: "DELETE",
         headers: { "x-goog-api-key": this.apiKey },
         signal: AbortSignal.timeout(10000),
-      });
+        ...(dispatcher ? { dispatcher } : {}),
+      } as any);
       if (!res.ok) {
         console.warn(`[GeminiProvider] Failed to delete context cache ${cacheName}: ${res.status}`);
       }
@@ -167,6 +173,7 @@ export class GeminiProvider implements Provider {
       body.tools = tools;
     }
 
+    const dispatcher = await getProxyAgent(this.proxy);
     const response = await safeFetch(url, {
       method: "POST",
       headers: {
@@ -174,7 +181,8 @@ export class GeminiProvider implements Provider {
         "x-goog-api-key": this.apiKey,
       },
       body: JSON.stringify(body),
-    });
+      ...(dispatcher ? { dispatcher } : {}),
+    } as any);
 
     if (!response.ok) {
       const errText = await response.text();
@@ -200,13 +208,14 @@ export class GeminiProvider implements Provider {
       contexts,
       this.providerConfig.modalities,
     );
+    const resolvedContexts = await resolveRemoteMediaInContexts(
+      sanitized as Record<string, unknown>[]
+    );
+    const { contents, systemInstruction } = messageToGemini(
+      resolvedContexts as unknown as Message[]
+    );
 
-    // Resolve remote images and audio files to base64 data URLs
-    const resolved = await resolveRemoteMediaInContexts(sanitized);
-
-    const { systemInstruction, contents } = messageToGemini(resolved as unknown as Message[]);
-
-    const enableCaching = params.enableCaching ?? (this.providerConfig.enableCaching as boolean | undefined) ?? false;
+    const body: Record<string, unknown> = {};
 
     const generationConfig: Record<string, unknown> = {};
     if (params.temperature !== undefined) {
@@ -214,76 +223,32 @@ export class GeminiProvider implements Provider {
     } else if (this.providerConfig.temperature !== undefined) {
       generationConfig.temperature = Number(this.providerConfig.temperature);
     }
-
-    const body: Record<string, unknown> = {
-      // Relax safety settings
-      safetySettings: [
-        { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
-        { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
-        { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
-        { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
-      ],
-    };
-
     if (Object.keys(generationConfig).length > 0) {
       body.generationConfig = generationConfig;
     }
 
-    let tools: unknown[] | undefined = undefined;
+    let tools: unknown[] | undefined;
     if (funcTool && !funcTool.empty()) {
       tools = [funcTool.googleSchema()];
+      body.tools = tools;
     }
 
-     const rawTtl = this.providerConfig.cacheTtl ?? 300;
-     const ttlStr = typeof rawTtl === "number" ? `${rawTtl}s` : String(rawTtl);
-     const ttlMs = typeof rawTtl === "number" ? rawTtl * 1000 : (parseInt(String(rawTtl), 10) * 1000 || 300000);
+    // Context caching logic
+    const enableCaching = params.enableCaching ?? (this.providerConfig.enableCaching as boolean | undefined) ?? false;
+    const sessionKey = params.sessionId ?? "default";
 
-    if (enableCaching && params.sessionId) {
-      this.cleanExpiredCaches();
-      const sessionKey = `${params.sessionId}_${useModel}`;
-      const existing = this.activeCaches.get(sessionKey);
+    this.cleanExpiredCaches();
 
-      let canReuse = false;
-      if (existing && Date.now() < existing.expireTime) {
-        const cachedLen = existing.cachedContents.length;
-        if (contents.length > cachedLen) {
-          // Fast path: reference equality for system instruction and tools
-          const sysMatch = existing.cachedSystemInstruction === systemInstruction ||
-            JSON.stringify(existing.cachedSystemInstruction) === JSON.stringify(systemInstruction);
-          const toolsMatch = existing.cachedTools === tools ||
-            JSON.stringify(existing.cachedTools) === JSON.stringify(tools);
-          if (sysMatch && toolsMatch) {
-            // Fast path: check element reference equality before expensive JSON.stringify
-            let refMatch = true;
-            for (let i = 0; i < cachedLen; i++) {
-              if (contents[i] !== existing.cachedContents[i]) { refMatch = false; break; }
-            }
-            if (refMatch) {
-              canReuse = true;
-            } else {
-              canReuse = JSON.stringify(contents.slice(0, cachedLen)) === JSON.stringify(existing.cachedContents);
-            }
-          }
-        }
-      }
+    if (enableCaching && contents.length > 1) {
+      const ttl = (this.providerConfig.cacheTtlSeconds as number | undefined) ?? 300;
+      const ttlStr = `${ttl}s`;
 
-      if (canReuse && existing) {
-        body.cachedContent = existing.cacheName;
-        body.contents = contents.slice(existing.cachedContents.length);
-      } else {
-        const cacheLimit = contents.length - 2;
-        if (cacheLimit > 0) {
-          const prefixContents = contents.slice(0, cacheLimit);
-          // Estimate tokens over the SAME array that will be sent as the
-          // cache prefix (the merged GeminiContent list). The previous code
-          // sliced the pre-merge Message array (`resolved`), which diverges
-          // whenever messageToGemini merges consecutive same-role messages —
-          // the estimated prefix then corresponds to different content than
-          // the cached prefix. Gemini parts are mapped into the generic
-          // content-part shape understood by EstimateTokenCounter: text
-          // parts are counted as text, inline media gets the same fixed
-          // per-item estimate as image_url/audio_url parts, and function
-          // call/response payloads are counted via their JSON.
+      const prefixContents = contents.slice(0, -1);
+      const lastMessage = contents[contents.length - 1];
+
+      if (prefixContents.length > 0) {
+        const existing = this.activeCaches.get(sessionKey);
+        if (!existing || existing.expireTime <= Date.now()) {
           const tokenCounter = new EstimateTokenCounter();
           const prefixMessages = prefixContents.map((c) => ({
             role: "assistant",
@@ -304,9 +269,6 @@ export class GeminiProvider implements Provider {
           })) as unknown as Message[];
           const estimatedTokens = tokenCounter.countTokens(prefixMessages);
 
-          // Nullish (not falsy) so an explicit `cacheThreshold: 0` — meaning
-          // "always cache" — is respected instead of being replaced by the
-          // default.
           const rawThreshold = this.providerConfig.cacheThreshold as number | undefined;
           const cacheThreshold = rawThreshold ?? 32768;
 
@@ -315,28 +277,25 @@ export class GeminiProvider implements Provider {
               console.info(`[GeminiProvider] Creating context cache for session ${sessionKey} (estimated tokens: ${estimatedTokens})...`);
               const cacheResult = await this.createContextCache(useModel, prefixContents, systemInstruction, tools, ttlStr);
               if (cacheResult) {
-                // Delete the old server-side cache before overwriting the local entry
                 if (existing) {
                   await this.deleteContextCache(existing.cacheName);
                 }
-                // Use server-provided expireTime for accuracy; fall back to local estimate
-                const expireTime = Date.parse(cacheResult.expireTime) || (Date.now() + ttlMs);
                 this.activeCaches.set(sessionKey, {
                   cacheName: cacheResult.name,
                   cachedContents: prefixContents,
                   cachedSystemInstruction: systemInstruction,
                   cachedTools: tools,
-                  expireTime
+                  expireTime: Date.now() + ttl * 1000,
                 });
                 body.cachedContent = cacheResult.name;
-                body.contents = contents.slice(cacheLimit);
+                body.contents = [lastMessage];
               } else {
                 body.contents = contents;
                 if (systemInstruction) body.systemInstruction = systemInstruction;
                 if (tools) body.tools = tools;
               }
-            } catch (e) {
-              console.error(`[GeminiProvider] Failed to create context cache:`, e);
+            } catch (cacheErr) {
+              console.warn("[GeminiProvider] Context caching failed, falling back to standard prompt:", cacheErr);
               body.contents = contents;
               if (systemInstruction) body.systemInstruction = systemInstruction;
               if (tools) body.tools = tools;
@@ -347,10 +306,13 @@ export class GeminiProvider implements Provider {
             if (tools) body.tools = tools;
           }
         } else {
-          body.contents = contents;
-          if (systemInstruction) body.systemInstruction = systemInstruction;
-          if (tools) body.tools = tools;
+          body.cachedContent = existing.cacheName;
+          body.contents = [lastMessage];
         }
+      } else {
+        body.contents = contents;
+        if (systemInstruction) body.systemInstruction = systemInstruction;
+        if (tools) body.tools = tools;
       }
     } else {
       body.contents = contents;
@@ -371,6 +333,7 @@ export class GeminiProvider implements Provider {
       "Content-Type": "application/json",
       "x-goog-api-key": this.apiKey,
     };
+    const dispatcher = await getProxyAgent(this.proxy);
 
     const response = await withRetry(
       async () => {
@@ -379,7 +342,8 @@ export class GeminiProvider implements Provider {
           headers,
           body: JSON.stringify(body),
           signal: abortSignal,
-        });
+          ...(dispatcher ? { dispatcher } : {}),
+        } as RequestInit);
         await this.checkResponse(res);
         return res;
       },
@@ -400,6 +364,7 @@ export class GeminiProvider implements Provider {
       "Content-Type": "application/json",
       "x-goog-api-key": this.apiKey,
     };
+    const dispatcher = await getProxyAgent(this.proxy);
 
     const response = await withRetry(
       async () => {
@@ -408,7 +373,8 @@ export class GeminiProvider implements Provider {
           headers,
           body: JSON.stringify(body),
           signal: abortSignal,
-        });
+          ...(dispatcher ? { dispatcher } : {}),
+        } as RequestInit);
         await this.checkResponse(res);
         return res;
       },

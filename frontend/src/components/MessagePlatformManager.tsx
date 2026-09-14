@@ -150,7 +150,38 @@ export default function MessagePlatformManager() {
   // QR code login state for weixin_oc (for edit mode)
   const qrPollTimer = useRef<ReturnType<typeof setInterval> | null>(null)
 
+  // 鉴权 Token 真实值缓存与卡片查看状态
+  const [revealedSecretsCache, setRevealedSecretsCache] = useState<Record<string, Record<string, string>>>({})
+
   const { toast, showMessage } = useToast()
+
+  const fetchRealAdapterSecret = useCallback(async (id: string, field?: string): Promise<string> => {
+    if (revealedSecretsCache[id]) {
+      const cached = revealedSecretsCache[id]
+      if (field && cached[field]) return cached[field]
+      if (cached.token || cached.accessToken || cached.appSecret) {
+        return (field ? cached[field] : '') || cached.accessToken || cached.token || cached.appSecret || ''
+      }
+    }
+    try {
+      const res = await apiFetch(`/api/adapters/${encodeURIComponent(id)}/reveal_secret${field ? `?field=${encodeURIComponent(field)}` : ''}`)
+      const data = await res.json()
+      if (data.status === 'ok') {
+        const secrets = data.secrets || {}
+        setRevealedSecretsCache(prev => ({
+          ...prev,
+          [id]: { ...(prev[id] || {}), ...secrets }
+        }))
+        if (field && secrets[field]) return secrets[field]
+        return data.token || data.key || secrets.accessToken || secrets.token || secrets.appSecret || ''
+      } else if (data.message) {
+        showMessage(data.message, 'error')
+      }
+    } catch (e: any) {
+      showMessage(e?.message || '获取鉴权 Token 失败', 'error')
+    }
+    return ''
+  }, [revealedSecretsCache, showMessage])
 
   const fetchAdapters = useCallback(async () => {
     setIsLoading(true)
@@ -343,6 +374,9 @@ export default function MessagePlatformManager() {
     setEditingAdapterId(adapter.id)
     setModalAdapterType(adapter.type)
     setModalAdapterId(adapter.id)
+    setShowOb11Token(false)
+    setShowQqAppSecret(false)
+    setShowWxToken(false)
 
     if (adapter.type === 'onebot11') {
       setOb11Direction(adapter.config.direction ?? 'forward')
@@ -742,7 +776,14 @@ export default function MessagePlatformManager() {
                 <button
                   type="button"
                   className="toggle-visibility"
-                  onClick={() => setShowOb11Token(!showOb11Token)}
+                  onClick={async () => {
+                    const next = !showOb11Token
+                    setShowOb11Token(next)
+                    if (next && isEditMode && editingAdapterId && ob11AccessToken === SECRET_MASK) {
+                      const real = await fetchRealAdapterSecret(editingAdapterId, 'accessToken')
+                      if (real) setOb11AccessToken(real)
+                    }
+                  }}
                   title={showOb11Token ? '隐藏 Token' : '显示 Token'}
                   tabIndex={-1}
                 >
@@ -785,7 +826,14 @@ export default function MessagePlatformManager() {
                     <button
                       type="button"
                       className="toggle-visibility"
-                      onClick={() => setShowQqAppSecret(!showQqAppSecret)}
+                      onClick={async () => {
+                        const next = !showQqAppSecret
+                        setShowQqAppSecret(next)
+                        if (next && isEditMode && editingAdapterId && qqAppSecret === SECRET_MASK) {
+                          const real = await fetchRealAdapterSecret(editingAdapterId, 'appSecret')
+                          if (real) setQqAppSecret(real)
+                        }
+                      }}
                       title={showQqAppSecret ? '隐藏 AppSecret' : '显示 AppSecret'}
                       tabIndex={-1}
                     >
@@ -935,7 +983,14 @@ export default function MessagePlatformManager() {
                       <button
                         type="button"
                         className="toggle-visibility"
-                        onClick={() => setShowWxToken(!showWxToken)}
+                        onClick={async () => {
+                          const next = !showWxToken
+                          setShowWxToken(next)
+                          if (next && isEditMode && editingAdapterId && editingWxToken === SECRET_MASK) {
+                            const real = await fetchRealAdapterSecret(editingAdapterId, 'token')
+                            if (real) setEditingWxToken(real)
+                          }
+                        }}
                         title={showWxToken ? '隐藏 Token' : '显示 Token'}
                         tabIndex={-1}
                       >

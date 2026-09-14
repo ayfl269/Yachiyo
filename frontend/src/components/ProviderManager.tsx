@@ -4,7 +4,7 @@ import {
   Plus, Save, Trash2, RefreshCw, Search, Download,
   Pencil, Power, Image as ImageIcon,
   AudioWaveform, Wrench, Brain, Globe,
-  Play, Eye, EyeOff, Ruler
+  Play, Eye, EyeOff, Ruler, Maximize2, Minimize2
 } from 'lucide-react'
 import { useToast, ToastPortal, Modal, useAsyncEffect } from './shared'
 import { apiFetch } from '../lib/api'
@@ -17,6 +17,7 @@ interface ProviderSource {
   provider: string
   key?: string
   api_base?: string
+  proxy?: string
   enable: boolean
   [key: string]: any
 }
@@ -28,6 +29,7 @@ interface Provider {
   provider_source_id: string
   provider_type?: string
   type?: string
+  proxy?: string
   modalities?: string[]
   custom_extra_body?: Record<string, any>
   max_context_tokens?: number
@@ -313,6 +315,46 @@ export default function ProviderManager() {
   const [showAddSourceMenu, setShowAddSourceMenu] = useState(false)
   const [showSourceDrawer, setShowSourceDrawer] = useState(false)
   const [isNewProviderSource, setIsNewProviderSource] = useState(false)
+  const [drawerWidth, setDrawerWidth] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('yachiyo_provider_drawer_width')
+      if (saved) {
+        const parsed = parseInt(saved, 10)
+        if (!isNaN(parsed) && parsed >= 520 && parsed <= 2400) return parsed
+      }
+    } catch { /* ignore */ }
+    return 800
+  })
+  const [isDrawerExpanded, setIsDrawerExpanded] = useState(false)
+  const [isResizingDrawer, setIsResizingDrawer] = useState(false)
+
+  const handleDrawerResizeStart = (e: React.MouseEvent) => {
+    e.preventDefault()
+    setIsResizingDrawer(true)
+    const startX = e.clientX
+    const startWidth = drawerWidth
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const delta = startX - moveEvent.clientX
+      const newWidth = Math.min(Math.max(startWidth + delta, 520), Math.max(window.innerWidth - 60, 520))
+      setDrawerWidth(newWidth)
+    }
+
+    const handleMouseUp = () => {
+      setIsResizingDrawer(false)
+      window.removeEventListener('mousemove', handleMouseMove)
+      window.removeEventListener('mouseup', handleMouseUp)
+    }
+
+    window.addEventListener('mousemove', handleMouseMove)
+    window.addEventListener('mouseup', handleMouseUp)
+  }
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('yachiyo_provider_drawer_width', String(drawerWidth))
+    } catch { /* ignore */ }
+  }, [drawerWidth])
 
   // Non-chat provider full config dialog
   const [showNonChatConfigDialog, setShowNonChatConfigDialog] = useState(false)
@@ -422,7 +464,7 @@ export default function ProviderManager() {
 
   const advancedSourceConfig = useMemo(() => {
     if (!editableProviderSource) return null
-    const excluded = new Set(['id', 'key', 'api_base', 'enable', 'type', 'provider_type', 'provider'])
+    const excluded = new Set(['id', 'key', 'api_base', 'proxy', 'enable', 'type', 'provider_type', 'provider'])
     const result: Record<string, any> = {}
     for (const [key, value] of Object.entries(editableProviderSource)) {
       if (!excluded.has(key)) {
@@ -693,7 +735,8 @@ export default function ProviderManager() {
       custom_extra_body: {},
       max_context_tokens: maxContext,
       reasoning: isReasoning,
-      temperature: 0.7
+      temperature: 0.7,
+      proxy: editableProviderSource?.proxy || selectedProviderSource.proxy || '',
     }
   }
 
@@ -1101,15 +1144,35 @@ export default function ProviderManager() {
           {showSourceDrawer && editableProviderSource && createPortal(
             <>
               <div className="drawer-overlay" onClick={closeSourceDrawer} />
-              <div className="drawer" role="dialog" aria-modal="true">
+              <div
+                className={`drawer${isDrawerExpanded ? ' drawer-expanded' : ''}${isResizingDrawer ? ' resizing' : ''}`}
+                style={{ width: isDrawerExpanded ? 'min(1280px, 100vw)' : `min(${drawerWidth}px, 100vw)` }}
+                role="dialog"
+                aria-modal="true"
+              >
+                <div
+                  className="drawer-resize-handle"
+                  onMouseDown={handleDrawerResizeStart}
+                  title="拖动调整抽屉宽度"
+                />
                 <div className="drawer-header">
                   <div className="drawer-header-text">
                     <div className="drawer-title">{editableProviderSource.id}</div>
                     <div className="drawer-subtitle">{editableProviderSource.api_base || '未配置 API 地址'}</div>
                   </div>
-                  <button className="close-btn" onClick={closeSourceDrawer} aria-label="关闭" title="关闭">
-                    ×
-                  </button>
+                  <div className="drawer-header-actions">
+                    <button
+                      type="button"
+                      className="drawer-action-btn"
+                      onClick={() => setIsDrawerExpanded(!isDrawerExpanded)}
+                      title={isDrawerExpanded ? '还原宽度' : '展开为超宽窗口'}
+                    >
+                      {isDrawerExpanded ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+                    </button>
+                    <button className="close-btn" onClick={closeSourceDrawer} aria-label="关闭" title="关闭">
+                      ×
+                    </button>
+                  </div>
                 </div>
                 <div className="drawer-body">
                   {/* Basic Settings */}
@@ -1150,6 +1213,17 @@ export default function ProviderManager() {
                       <div className="form-group span-2">
                         <label>API Base URL</label>
                         <input type="text" value={editableProviderSource.api_base ?? ''} onChange={e => setSourceField('api_base', e.target.value)} className="form-control font-mono" placeholder="API 端点地址" />
+                      </div>
+                      <div className="form-group span-2">
+                        <label>代理地址</label>
+                        <input
+                          type="text"
+                          value={editableProviderSource.proxy ?? ''}
+                          onChange={e => setSourceField('proxy', e.target.value)}
+                          className="form-control font-mono"
+                          placeholder="例如: http://127.0.0.1:7890"
+                        />
+                        <span className="help-text">HTTP/HTTPS 代理地址，格式如 http://127.0.0.1:7890。留空则直接连接或使用全局代理。</span>
                       </div>
                     </div>
                   </section>
@@ -1559,6 +1633,17 @@ export default function ProviderManager() {
                 <input type="number" value={providerEditData.temperature ?? 0.7} onChange={e => setProviderEditField('temperature', Number(e.target.value))} min={0} max={2} step={0.1} className="form-control font-mono" style={{ width: 70, textAlign: 'center', padding: '0.3rem' }} />
               </div>
               <span className="help-text">设置该模型的默认生成温度 (0.0 - 2.0，默认 0.7)</span>
+            </div>
+            <div className="form-group span-2">
+              <label>代理地址（可选）</label>
+              <input
+                type="text"
+                value={providerEditData.proxy ?? ''}
+                onChange={e => setProviderEditField('proxy', e.target.value)}
+                className="form-control font-mono"
+                placeholder="继承提供商源的代理，或在此单独覆盖 (如: http://127.0.0.1:7890)"
+              />
+              <span className="help-text">留空则自动继承所属提供商源的代理地址</span>
             </div>
           </div>
         )}

@@ -6,6 +6,7 @@
 
 export interface SafeFetchOptions extends RequestInit {
   allowedContentTypes?: string[];
+  dispatcher?: any;
 }
 
 /** Maximum number of HTTP redirects to follow manually. */

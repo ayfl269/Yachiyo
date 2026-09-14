@@ -7,12 +7,14 @@ import { sanitizeContextsByModalities } from "../modalities.js";
 import { withRetry } from "../retry.js";
 import { ProviderAPIError, RateLimitError, safeParseJsonResponse } from "../errors.js";
 import { EstimateTokenCounter } from "@yachiyo/common/token-counter.js";
+import { getProxyAgent } from "@yachiyo/common";
 
 export interface OpenAIResponsesProviderConfig extends ProviderConfig {
   apiKey: string;
   baseUrl?: string;
   model: string;
   organization?: string;
+  proxy?: string;
 }
 
 export class OpenAIResponsesProvider implements Provider {
@@ -22,6 +24,7 @@ export class OpenAIResponsesProvider implements Provider {
   private baseUrl: string;
   private model: string;
   private organization?: string;
+  private proxy?: string;
 
   constructor(config: OpenAIResponsesProviderConfig) {
     this.providerConfig = config;
@@ -29,6 +32,7 @@ export class OpenAIResponsesProvider implements Provider {
     this.baseUrl = config.baseUrl ?? "https://api.openai.com/v1";
     this.model = config.model;
     this.organization = config.organization;
+    this.proxy = config.proxy;
   }
 
   async textChat(params: ProviderChatParams): Promise<LLMResponse> {
@@ -66,6 +70,7 @@ export class OpenAIResponsesProvider implements Provider {
 
     const url = `${this.baseUrl}/responses`;
     const headers = this.buildHeaders();
+    const dispatcher = await getProxyAgent(this.proxy);
 
     const response = await withRetry(
       async () => {
@@ -74,7 +79,8 @@ export class OpenAIResponsesProvider implements Provider {
           headers,
           body: JSON.stringify(body),
           signal: abortSignal,
-        });
+          ...(dispatcher ? { dispatcher } : {}),
+        } as RequestInit);
         await this.checkResponse(res);
         return res;
       },
@@ -123,6 +129,7 @@ export class OpenAIResponsesProvider implements Provider {
 
     const url = `${this.baseUrl}/responses`;
     const headers = this.buildHeaders();
+    const dispatcher = await getProxyAgent(this.proxy);
 
     const response = await withRetry(
       async () => {
@@ -131,7 +138,8 @@ export class OpenAIResponsesProvider implements Provider {
           headers,
           body: JSON.stringify(body),
           signal: abortSignal,
-        });
+          ...(dispatcher ? { dispatcher } : {}),
+        } as RequestInit);
         await this.checkResponse(res);
         return res;
       },

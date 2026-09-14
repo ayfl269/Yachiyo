@@ -58,6 +58,7 @@ import type { SqliteMemoryStore, MemoryEntry, ConversationIndexEntry, MemoryType
 import type { SqliteSchedulerTaskStore, SchedulerTask, TaskType, TaskStatus } from "@yachiyo/agent/scheduler-task-store.js";
 import type { SkillManager } from "@yachiyo/skill/index.js";
 import { safeFetch } from "@yachiyo/common/ssrf-guard.js";
+import { getProxyAgent } from "@yachiyo/common";
 import { proxyManager } from "@yachiyo/agent/proxy-manager.js";
 
 export interface BootstrapContext {
@@ -2099,6 +2100,77 @@ export class DashboardServer {
       return;
     }
 
+    // GET /api/adapters/:id/reveal_secret — 获取消息平台适配器的真实鉴权 Token / 密钥
+    if (pathname.startsWith("/api/adapters/") && pathname.endsWith("/reveal_secret") && req.method === "GET") {
+      const id = decodeURIComponent(pathname.substring("/api/adapters/".length, pathname.length - "/reveal_secret".length));
+      try {
+        if (!id) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ status: "error", message: "缺少 id 参数" }));
+          return;
+        }
+
+        // Rate limiting: max 30 reveals per 5 minutes per auth session
+        const authToken = (req.headers["authorization"] ?? "").slice(7).trim();
+        const rlKey = `reveal:adapter:${authToken}`;
+        const now = Date.now();
+        const rlEntry = this.loginAttempts.get(rlKey);
+        const REVEAL_WINDOW_MS = 5 * 60 * 1000;
+        const REVEAL_MAX = 30;
+        if (rlEntry && now - rlEntry.firstAttemptAt <= REVEAL_WINDOW_MS) {
+          rlEntry.count++;
+          if (rlEntry.count > REVEAL_MAX) {
+            const retryAfterSec = Math.ceil((REVEAL_WINDOW_MS - (now - rlEntry.firstAttemptAt)) / 1000);
+            res.writeHead(429, { "Content-Type": "application/json", "Retry-After": String(retryAfterSec) });
+            res.end(JSON.stringify({ status: "error", message: `密钥查看过于频繁，请 ${retryAfterSec} 秒后重试` }));
+            return;
+          }
+        } else {
+          this.loginAttempts.set(rlKey, { count: 1, firstAttemptAt: now });
+        }
+
+        let rawConfig: Record<string, unknown> | undefined;
+        const activeAdapter = this.ctx.adapterRegistry.getAdapter(id) as { config?: Record<string, unknown> } | undefined;
+        if (activeAdapter?.config) {
+          rawConfig = activeAdapter.config;
+        } else if (this.ctx.adapterStore) {
+          const stored = this.ctx.adapterStore.get(id);
+          if (stored) {
+            rawConfig = stored as unknown as Record<string, unknown>;
+          }
+        }
+
+        const secrets: Record<string, string> = {};
+        if (rawConfig) {
+          for (const key of DashboardServer.ADAPTER_SECRET_KEYS) {
+            if (typeof rawConfig[key] === "string" && (rawConfig[key] as string).length > 0) {
+              secrets[key] = rawConfig[key] as string;
+            }
+          }
+        }
+
+        const requestedField = url.searchParams.get("field");
+        const tokenVal = (requestedField && secrets[requestedField]) || secrets.token || secrets.accessToken || secrets.appSecret || "";
+
+        res.writeHead(200, {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+          "Pragma": "no-cache",
+          "Expires": "0",
+        });
+        res.end(JSON.stringify({
+          status: "ok",
+          key: tokenVal,
+          token: tokenVal,
+          secrets,
+        }));
+      } catch (err: unknown) {
+        res.writeHead(200, { "Cache-Control": "no-store" });
+        res.end(JSON.stringify({ status: "error", message: safeClientMessage(err, "获取密钥失败") }));
+      }
+      return;
+    }
+
     // PATCH /api/adapters/:id/toggle — 停用/启用适配器
     if (pathname.startsWith("/api/adapters/") && pathname.endsWith("/toggle") && req.method === "PATCH") {
       const id = decodeURIComponent(pathname.substring("/api/adapters/".length, pathname.length - "/toggle".length));
@@ -2293,6 +2365,7 @@ export class DashboardServer {
         let apiKey = "";
         let apiBase = "";
         let providerType = "openai";
+        let proxy = "";
 
         if (sourceId) {
           // 从已保存的配置中读取（优先查 providerConfigs，再查 provider_sources 表）
@@ -2326,6 +2399,7 @@ export class DashboardServer {
           apiKey = (providerConfig.key || providerConfig.apiKey || "") as string;
           apiBase = (providerConfig.api_base || providerConfig.baseUrl || "") as string;
           providerType = (providerConfig.type || providerConfig.provider || "openai") as string;
+          proxy = (providerConfig.proxy || "") as string;
         } else {
           res.writeHead(400);
           res.end(JSON.stringify({ status: "error", message: "Missing source_id parameter. To fetch models for an unsaved key, POST to /api/providers/models with a JSON body." }));
@@ -2342,6 +2416,7 @@ export class DashboardServer {
         const entries = await this.fetchModelEntriesFromProvider(providerType, {
           apiKey,
           baseUrl: apiBase,
+          proxy,
         });
         const models = entries.map((e) => e.id).sort();
 
@@ -2429,6 +2504,7 @@ export class DashboardServer {
             // Masked key — real key only returned via reveal_key endpoint
             key: maskSecret(cfg.apiKey),
             api_base: cfg.baseUrl || "",
+            proxy: (cfg as any).proxy || "",
           });
         }
 
@@ -2727,6 +2803,7 @@ export class DashboardServer {
               model: providerConfig.model || "",
               apiKey,
               baseUrl: apiBase,
+              proxy: providerConfig.proxy || undefined,
               provider_source_id: providerConfig.provider_source_id || "",
               provider_type: providerConfig.provider_type || "chat_completion",
               modalities: providerConfig.modalities || [],
@@ -2736,11 +2813,15 @@ export class DashboardServer {
               enable: providerConfig.enable !== false,
             };
 
-        // 合并 source 的额外配置
+        // 合并 source 的额外配置（保留显式配置的字段）
         if (sqliteStore && providerConfig.provider_source_id) {
           const source = sqliteStore.getProviderSource(providerConfig.provider_source_id);
           if (source && source.extra_config) {
-            Object.assign(loadConfig, source.extra_config);
+            for (const [k, v] of Object.entries(source.extra_config)) {
+              if (loadConfig[k] === undefined) {
+                loadConfig[k] = v;
+              }
+            }
           }
         }
 
@@ -2817,6 +2898,7 @@ export class DashboardServer {
         let sourceType = config.type || "";
         let apiKey = config.key || "";
         let apiBase = config.api_base || "";
+        let proxy = (config.proxy as string | undefined) || "";
 
         if (sqliteStore && config.provider_source_id) {
           const source = sqliteStore.getProviderSource(config.provider_source_id);
@@ -2827,6 +2909,9 @@ export class DashboardServer {
             }
             apiKey = source.key || apiKey;
             apiBase = source.api_base || apiBase;
+            if (!proxy && source.extra_config && (source.extra_config as any).proxy) {
+              proxy = String((source.extra_config as any).proxy || "");
+            }
           }
         }
 
@@ -2844,6 +2929,7 @@ export class DashboardServer {
           type: sourceType,
           apiKey,
           baseUrl: apiBase,
+          ...(proxy ? { proxy } : {}),
         };
 
         await this.ctx.providerManager.updateProvider(id, loadConfig as unknown as Parameters<typeof this.ctx.providerManager.updateProvider>[1]);
@@ -2918,7 +3004,13 @@ export class DashboardServer {
         } else {
           // 聊天模型：使用完整配置创建临时 provider 进行测试
           const { createChatProvider } = await import("@yachiyo/provider/factory.js");
-          const prov = createChatProvider(type as unknown as Parameters<typeof createChatProvider>[0], { apiKey, baseUrl, model, modalities: providerConfig.modalities || [] } as unknown as Parameters<typeof createChatProvider>[1]);
+          const prov = createChatProvider(type as unknown as Parameters<typeof createChatProvider>[0], {
+            apiKey,
+            baseUrl,
+            model,
+            proxy: providerConfig.proxy as string | undefined,
+            modalities: providerConfig.modalities || [],
+          } as unknown as Parameters<typeof createChatProvider>[1]);
 
           // 优先使用流式调用测试（与实际对话一致），配置禁用或不支持流式时回退到非流式
           const config = this.ctx.configManager.getActiveConfig();
@@ -4356,6 +4448,8 @@ export class DashboardServer {
   private async fetchModelEntriesFromProvider(type: string, config: Record<string, unknown>): Promise<ModelEntry[]> {
     const apiKey = (config.apiKey as string) ?? "";
     const rawBaseUrl = ((config.baseUrl as string | undefined) || "").replace(/\/+$/, "");
+    const proxy = (config.proxy as string | undefined) || "";
+    const dispatcher = await getProxyAgent(proxy);
 
     // OpenAI 兼容接口 (openai, openai_responses)
     if (type === "openai" || type === "openai_responses") {
@@ -4364,6 +4458,7 @@ export class DashboardServer {
       const response = await safeFetch(url, {
         headers: { Authorization: `Bearer ${apiKey}` },
         signal: AbortSignal.timeout(15000),
+        ...(dispatcher ? { dispatcher } : {}),
       });
 
       if (!response.ok) {
@@ -4422,6 +4517,7 @@ export class DashboardServer {
       const response = await safeFetch(url, {
         headers: { "x-goog-api-key": apiKey },
         signal: AbortSignal.timeout(15000),
+        ...(dispatcher ? { dispatcher } : {}),
       });
       const respText = await response.text();
 
@@ -4464,6 +4560,7 @@ export class DashboardServer {
           "anthropic-dangerous-direct-browser-access": "true",
         },
         signal: AbortSignal.timeout(15000),
+        ...(dispatcher ? { dispatcher } : {}),
       });
 
       if (!response.ok) {
@@ -4500,6 +4597,7 @@ export class DashboardServer {
         provider: "openai",
         key: "",
         api_base: "https://api.openai.com/v1",
+        proxy: "",
         model: "gpt-4o",
         modalities: ["text", "image", "tool_use"],
       },
@@ -4510,6 +4608,7 @@ export class DashboardServer {
         provider: "openai",
         key: "",
         api_base: "https://api.openai.com/v1",
+        proxy: "",
         model: "gpt-4o",
         modalities: ["text", "image", "tool_use"],
       },
@@ -4520,6 +4619,7 @@ export class DashboardServer {
         provider: "google",
         key: "",
         api_base: "",
+        proxy: "",
         model: "gemini-2.0-flash",
         modalities: ["text", "image", "tool_use"],
       },
@@ -4530,6 +4630,7 @@ export class DashboardServer {
         provider: "anthropic",
         key: "",
         api_base: "https://api.anthropic.com",
+        proxy: "",
         model: "claude-sonnet-4-20250514",
         modalities: ["text", "image", "tool_use"],
         anthropic_version: "2023-06-01",

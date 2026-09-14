@@ -4542,7 +4542,7 @@ body.light-theme .content-block {
   top: 0;
   right: 0;
   bottom: 0;
-  width: min(560px, 100vw);
+  width: min(800px, 100vw);
   background: var(--bg-modal);
   border-left: 1px solid var(--border-color);
   box-shadow: var(--shadow-lg);
@@ -4550,6 +4550,32 @@ body.light-theme .content-block {
   display: flex;
   flex-direction: column;
   animation: drawerSlideIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: width 0.2s ease;
+}
+
+.drawer.drawer-expanded {
+  width: min(1280px, 100vw);
+}
+
+.drawer.resizing {
+  transition: none !important;
+  user-select: none;
+}
+
+.drawer-resize-handle {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: ew-resize;
+  z-index: 10;
+  transition: background 0.15s ease;
+}
+
+.drawer-resize-handle:hover,
+.drawer.resizing .drawer-resize-handle {
+  background: var(--accent-primary);
 }
 
 @keyframes drawerFadeIn {
@@ -4642,12 +4668,20 @@ body.light-theme .drawer .drawer-section {
   display: none;
 }
 
-/* Models toolbar: stack title above actions for better space usage */
+/* Models toolbar: responsive arrangement */
 .drawer .models-toolbar {
   flex-direction: column;
   align-items: stretch;
   gap: 0.75rem;
   margin-bottom: 1rem;
+}
+
+@media (min-width: 640px) {
+  .drawer .models-toolbar {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+  }
 }
 
 .drawer .models-actions {
@@ -4657,6 +4691,35 @@ body.light-theme .drawer .drawer-section {
 .drawer .search-box {
   flex: 1;
   min-width: 120px;
+}
+
+.drawer-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.drawer .drawer-action-btn {
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  padding: 0;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.drawer .drawer-action-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--border-color);
 }
 
 /* Circular close button */

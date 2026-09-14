@@ -7,6 +7,7 @@ import { sanitizeContextsByModalities } from "../modalities.js";
 import { withRetry } from "../retry.js";
 import { ProviderAPIError, RateLimitError, safeParseJsonResponse } from "../errors.js";
 import { EstimateTokenCounter } from "@yachiyo/common/token-counter.js";
+import { getProxyAgent } from "@yachiyo/common";
 
 export interface AnthropicProviderConfig extends ProviderConfig {
   apiKey: string;
@@ -14,6 +15,7 @@ export interface AnthropicProviderConfig extends ProviderConfig {
   model: string;
   anthropicVersion?: string;
   maxTokens?: number;
+  proxy?: string;
 }
 
 export class AnthropicProvider implements Provider {
@@ -24,6 +26,7 @@ export class AnthropicProvider implements Provider {
   private model: string;
   private anthropicVersion: string;
   private maxTokens: number;
+  private proxy?: string;
 
   constructor(config: AnthropicProviderConfig) {
     this.providerConfig = config;
@@ -32,6 +35,7 @@ export class AnthropicProvider implements Provider {
     this.model = config.model;
     this.anthropicVersion = config.anthropicVersion ?? "2023-06-01";
     this.maxTokens = config.maxTokens ?? 4096;
+    this.proxy = config.proxy;
   }
 
   async textChat(params: ProviderChatParams): Promise<LLMResponse> {
@@ -39,6 +43,7 @@ export class AnthropicProvider implements Provider {
     const { body, headers, sanitized } = this.prepareRequest(params, false);
 
     const url = `${this.baseUrl}/v1/messages`;
+    const dispatcher = await getProxyAgent(this.proxy);
 
     const response = await withRetry(
       async () => {
@@ -47,7 +52,8 @@ export class AnthropicProvider implements Provider {
           headers,
           body: JSON.stringify(body),
           signal: abortSignal,
-        });
+          ...(dispatcher ? { dispatcher } : {}),
+        } as RequestInit);
         await this.checkResponse(res);
         return res;
       },
@@ -66,6 +72,7 @@ export class AnthropicProvider implements Provider {
     const { body, headers } = this.prepareRequest(params, true);
 
     const url = `${this.baseUrl}/v1/messages`;
+    const dispatcher = await getProxyAgent(this.proxy);
 
     const response = await withRetry(
       async () => {
@@ -74,7 +81,8 @@ export class AnthropicProvider implements Provider {
           headers,
           body: JSON.stringify(body),
           signal: abortSignal,
-        });
+          ...(dispatcher ? { dispatcher } : {}),
+        } as RequestInit);
         await this.checkResponse(res);
         return res;
       },
