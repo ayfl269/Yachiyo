@@ -450,8 +450,23 @@ export class GeminiProvider implements Provider {
       const toolCallIds: string[] = [];
       const toolCallNames: string[] = [];
       const toolCallArgs: Record<string, unknown>[] = [];
+      const toolCallExtra: (Record<string, unknown> | undefined)[] = [];
+      let reasoningSignature: string | undefined;
 
       for (const part of parts) {
+        const signature = typeof part.thoughtSignature === "string" ? part.thoughtSignature : undefined;
+
+        if (part.functionCall) {
+          const fc = part.functionCall as Record<string, unknown>;
+          toolCallIds.push(`gemini_fc_${fc.name}`);
+          toolCallNames.push(fc.name as string);
+          toolCallArgs.push((fc.args as Record<string, unknown>) ?? {});
+          // A functionCall part may carry its own thoughtSignature which must
+          // be replayed alongside the call.
+          toolCallExtra.push(signature ? { thoughtSignature: signature } : undefined);
+          continue;
+        }
+
         if (part.thought) {
           if (typeof part.thought === "string") {
             reasoningParts.push(part.thought);
@@ -461,11 +476,12 @@ export class GeminiProvider implements Provider {
         } else if (typeof part.text === "string") {
           textParts.push(part.text);
         }
-        if (part.functionCall) {
-          const fc = part.functionCall as Record<string, unknown>;
-          toolCallIds.push(`gemini_fc_${fc.name}`);
-          toolCallNames.push(fc.name as string);
-          toolCallArgs.push((fc.args as Record<string, unknown>) ?? {});
+
+        // Thinking models return an opaque signature that must be echoed back
+        // verbatim when the turn is replayed. It rides on the thought part (or
+        // its own part); keep the value.
+        if (signature) {
+          reasoningSignature = signature;
         }
       }
 
@@ -475,10 +491,16 @@ export class GeminiProvider implements Provider {
       if (reasoningParts.length > 0) {
         result.reasoningContent = reasoningParts.join("");
       }
+      if (reasoningSignature) {
+        result.reasoningSignature = reasoningSignature;
+      }
       if (toolCallIds.length > 0) {
         result.toolsCallIds = toolCallIds;
         result.toolsCallName = toolCallNames;
         result.toolsCallArgs = toolCallArgs;
+        if (toolCallExtra.some(Boolean)) {
+          result.toolsCallExtraContent = toolCallExtra.map((e) => e ?? {});
+        }
       }
     }
 

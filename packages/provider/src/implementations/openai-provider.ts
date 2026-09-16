@@ -103,6 +103,15 @@ export class OpenAIProvider implements Provider {
       stream: true,
     };
 
+    // Ask the upstream to emit a final usage-only chunk (empty `choices`) so
+    // streaming token accounting matches the non-streaming path. Some
+    // OpenAI-compatible gateways reject unknown fields with 400, so this can
+    // be turned off per-provider via `streamIncludeUsage: false`; the parser
+    // falls back to local estimation when no usage arrives.
+    if (this.providerConfig.streamIncludeUsage !== false) {
+      body.stream_options = { include_usage: true };
+    }
+
     if (params.temperature !== undefined) {
       body.temperature = params.temperature;
     } else if (this.providerConfig.temperature !== undefined) {
@@ -133,7 +142,7 @@ export class OpenAIProvider implements Provider {
       abortSignal,
     );
 
-    yield* parseOpenAIStream(response, abortSignal);
+    yield* parseOpenAIStream(response, abortSignal, sanitized as unknown as Message[]);
   }
 
   private buildHeaders(): Record<string, string> {
@@ -192,17 +201,44 @@ export class OpenAIProvider implements Provider {
         if (typeof rawContent === "string") {
           result.completionText = rawContent;
         } else if (Array.isArray(rawContent)) {
-          // Extract text from array-format content parts
-          const textParts = rawContent
-            .filter((p: { type?: string; text?: string }) => p?.type === "text" && p?.text)
-            .map((p: { type?: string; text?: string }) => p.text as string);
+          // Array-format content parts. Besides `text`, OpenAI-compatible
+          // gateways (notably OpenRouter) emit `reasoning` parts that must be
+          // routed to reasoningContent rather than dropped or leaked into the
+          // visible reply.
+          const textParts: string[] = [];
+          const reasoningParts: string[] = [];
+          for (const p of rawContent as Array<{ type?: string; text?: string }>) {
+            if (!p?.text) continue;
+            if (p.type === "text" || p.type === "output_text") {
+              textParts.push(p.text);
+            } else if (p.type === "reasoning" || p.type === "reasoning_text") {
+              reasoningParts.push(p.text);
+            }
+          }
           result.completionText = textParts.length > 0 ? textParts.join("") : undefined;
+          if (reasoningParts.length > 0) {
+            result.reasoningContent = reasoningParts.join("");
+          }
         } else {
           result.completionText = String(rawContent);
         }
       }
       if (message.reasoning_content) {
         result.reasoningContent = message.reasoning_content as string;
+      }
+      // OpenRouter-style reasoning. Prefer the plain `reasoning` string; fall
+      // back to joining `reasoning_details[].text` (or `.summary`).
+      if (!result.reasoningContent) {
+        if (typeof message.reasoning === "string" && message.reasoning) {
+          result.reasoningContent = message.reasoning;
+        } else if (Array.isArray(message.reasoning_details)) {
+          const details = message.reasoning_details as Array<Record<string, unknown>>;
+          const joined = details
+            .map((d) => (typeof d.text === "string" ? d.text : typeof d.summary === "string" ? d.summary : ""))
+            .filter(Boolean)
+            .join("");
+          if (joined) result.reasoningContent = joined;
+        }
       }
       if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
         result.toolsCallIds = (message.tool_calls as Array<Record<string, unknown>>).map(
@@ -221,6 +257,14 @@ export class OpenAIProvider implements Provider {
             }
           },
         );
+        // Some gateways (e.g. OpenRouter proxying Gemini) attach per-call
+        // opaque metadata under `extra_content` that must be echoed back.
+        const extra = (message.tool_calls as Array<Record<string, unknown>>).map(
+          (tc) => tc.extra_content as Record<string, unknown> | undefined,
+        );
+        if (extra.some(Boolean)) {
+          result.toolsCallExtraContent = extra.map((e) => e ?? {});
+        }
       }
     } else {
       // No message in response — log for debugging

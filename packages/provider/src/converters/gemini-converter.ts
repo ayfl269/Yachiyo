@@ -4,6 +4,13 @@ import type { ContentPart, Message, ToolCall } from "@yachiyo/common/llm-message
 
 export interface GeminiPart {
   text?: string;
+  thought?: boolean;
+  /**
+   * Opaque signature attached to a thought/functionCall part. Gemini thinking
+   * models require it to be echoed back verbatim when the turn is replayed
+   * (notably in function-calling loops), otherwise the API rejects the request.
+   */
+  thoughtSignature?: string;
   inlineData?: { mimeType: string; data: string };
   functionCall?: { name: string; args: Record<string, unknown> };
   functionResponse?: { name: string; response: Record<string, unknown> };
@@ -33,8 +40,17 @@ export function contentPartToGemini(part: ContentPart): GeminiPart | null {
   switch (part.type) {
     case "text":
       return { text: part.text };
-    case "think":
-      return { text: `[Thinking] ${part.think}` };
+    case "think": {
+      // Gemini represents thinking as a part flagged `thought: true`. Sending
+      // it back as `[Thinking] ...` plain text (the old behaviour) pollutes the
+      // model's context with a marker string. A native thought part is only
+      // valid when accompanied by its opaque `thoughtSignature` (required for
+      // function-calling replay); without one Gemini rejects/ignores it, and
+      // the thought summary does not need to be replayed on ordinary turns.
+      // Redacted/opaque blocks have no Gemini equivalent — drop them too.
+      if (part.redacted || !part.encrypted) return null;
+      return { text: part.think, thought: true, thoughtSignature: part.encrypted };
+    }
     case "image_url": {
       const url = part.image_url.url;
       const parsed = parseDataUri(url);
@@ -64,11 +80,13 @@ function toolCallToGeminiFunctionCall(tc: ToolCall): GeminiPart {
       args = { raw: tc.function.arguments };
     }
   }
+  const signature = tc.extraContent?.thoughtSignature;
   return {
     functionCall: {
       name: tc.function.name,
       args,
     },
+    ...(typeof signature === "string" ? { thoughtSignature: signature } : {}),
   };
 }
 

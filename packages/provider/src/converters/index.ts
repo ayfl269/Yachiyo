@@ -8,4 +8,4 @@ export { messageToGemini, contentPartToGemini } from "./gemini-converter.js";
 export type { GeminiConversionResult, GeminiContent, GeminiPart } from "./gemini-converter.js";
 
 export { messageToAnthropic, contentPartToAnthropic } from "./anthropic-converter.js";
-export type { AnthropicConversionResult, AnthropicMessage, AnthropicContentBlock, AnthropicTextBlock, AnthropicThinkingBlock, AnthropicImageBlock, AnthropicToolUseBlock, AnthropicToolResultBlock } from "./anthropic-converter.js";
+export type { AnthropicConversionResult, AnthropicMessage, AnthropicContentBlock, AnthropicTextBlock, AnthropicThinkingBlock, AnthropicRedactedThinkingBlock, AnthropicImageBlock, AnthropicToolUseBlock, AnthropicToolResultBlock } from "./anthropic-converter.js";

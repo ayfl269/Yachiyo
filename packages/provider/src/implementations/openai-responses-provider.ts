@@ -189,6 +189,7 @@ export class OpenAIResponsesProvider implements Provider {
     const output = data.output as Array<Record<string, unknown>> | undefined;
     if (Array.isArray(output)) {
       const textParts: string[] = [];
+      const reasoningParts: string[] = [];
       const toolCallIds: string[] = [];
       const toolCallNames: string[] = [];
       const toolCallArgs: Record<string, unknown>[] = [];
@@ -207,6 +208,35 @@ export class OpenAIResponsesProvider implements Provider {
           }
         }
 
+        // Reasoning items carry the model's thinking. The visible summary is
+        // in `summary[].text` (`summary_text`); the raw chain of thought is in
+        // `content[].text` (`reasoning_text`). Parse both so the non-streaming
+        // path matches the streaming parser, which already handles
+        // `response.reasoning_summary_text.delta`.
+        if (type === "reasoning") {
+          const summary = item.summary as Array<Record<string, unknown>> | undefined;
+          if (Array.isArray(summary)) {
+            for (const s of summary) {
+              if (s.type === "summary_text" && typeof s.text === "string") {
+                reasoningParts.push(s.text);
+              }
+            }
+          }
+          const reasoningContent = item.content as Array<Record<string, unknown>> | undefined;
+          if (Array.isArray(reasoningContent)) {
+            for (const c of reasoningContent) {
+              if (c.type === "reasoning_text" && typeof c.text === "string") {
+                reasoningParts.push(c.text);
+              }
+            }
+          }
+          // Encrypted reasoning payload (when `include` requests it) must be
+          // replayed verbatim on the next turn.
+          if (typeof item.encrypted_content === "string") {
+            result.reasoningSignature = item.encrypted_content;
+          }
+        }
+
         if (type === "function_call") {
           toolCallIds.push((item.call_id as string) ?? (item.id as string) ?? "");
           toolCallNames.push((item.name as string) ?? "");
@@ -221,6 +251,9 @@ export class OpenAIResponsesProvider implements Provider {
 
       if (textParts.length > 0) {
         result.completionText = textParts.join("");
+      }
+      if (reasoningParts.length > 0) {
+        result.reasoningContent = reasoningParts.join("");
       }
       if (toolCallIds.length > 0) {
         result.toolsCallIds = toolCallIds;

@@ -4,6 +4,7 @@ import { parseSSEStream } from "./sse-parser.js";
 interface GeminiPart {
   text?: string;
   thought?: string | boolean;
+  thoughtSignature?: string;
   functionCall?: {
     name: string;
     args?: Record<string, unknown>;
@@ -62,6 +63,14 @@ export async function* parseGeminiStream(
 
     const parts = chunk.candidates?.[0]?.content?.parts;
     if (parts) {
+      // A single chunk may carry multiple functionCall parts; accumulate them
+      // instead of letting the last one overwrite the previous (which silently
+      // dropped parallel tool calls).
+      const chunkToolCallIds: string[] = [];
+      const chunkToolCallNames: string[] = [];
+      const chunkToolCallArgs: Record<string, unknown>[] = [];
+      const chunkToolCallExtra: Record<string, unknown>[] = [];
+
       for (const part of parts) {
         // `part.thought` marks a thinking part. The official Gemini API uses
         // the boolean form: `thought: true` means part.text IS the model's
@@ -84,6 +93,12 @@ export async function* parseGeminiStream(
           result.completionText = (result.completionText ?? "") + part.text;
           hasContent = true;
         }
+        // Thinking models return an opaque signature that must be echoed back
+        // verbatim on replay (required for function-calling turns).
+        if (typeof part.thoughtSignature === "string" && part.thoughtSignature) {
+          result.reasoningSignature = part.thoughtSignature;
+          hasContent = true;
+        }
         if (part.functionCall) {
           const fc = part.functionCall;
           // C-14 fix: the previous ID format `gemini_fc_<name>_<idx>` could
@@ -94,10 +109,24 @@ export async function* parseGeminiStream(
           // converter strips via regex, leaving the original function name
           // intact even when it contains underscores or trailing digits.
           const id = `gemini_fc_${fc.name}__idx_${functionCallIndex++}`;
-          result.toolsCallIds = [id];
-          result.toolsCallName = [fc.name];
-          result.toolsCallArgs = [fc.args ?? {}];
+          chunkToolCallIds.push(id);
+          chunkToolCallNames.push(fc.name);
+          chunkToolCallArgs.push(fc.args ?? {});
+          chunkToolCallExtra.push(
+            typeof part.thoughtSignature === "string" && part.thoughtSignature
+              ? { thoughtSignature: part.thoughtSignature }
+              : {},
+          );
           hasContent = true;
+        }
+      }
+
+      if (chunkToolCallIds.length > 0) {
+        result.toolsCallIds = chunkToolCallIds;
+        result.toolsCallName = chunkToolCallNames;
+        result.toolsCallArgs = chunkToolCallArgs;
+        if (chunkToolCallExtra.some((e) => Object.keys(e).length > 0)) {
+          result.toolsCallExtraContent = chunkToolCallExtra;
         }
       }
     }

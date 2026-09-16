@@ -18,6 +18,12 @@ export interface ThinkPart extends ContentPartBase {
   type: "think";
   think: string;
   encrypted?: string;
+  /**
+   * True when this is an opaque redacted-thinking block (Anthropic
+   * `redacted_thinking`). `think` is empty and `encrypted` carries the
+   * opaque data, which must be replayed verbatim on the next request.
+   */
+  redacted?: boolean;
 }
 
 /**
@@ -29,6 +35,7 @@ export function mergeThinkPartInPlace(
   other: ThinkPart
 ): boolean {
   if (target.encrypted) return false;
+  if (target.redacted || other.redacted) return false;
   target.think += other.think;
   if (other.encrypted) {
     target.encrypted = other.encrypted;
@@ -86,6 +93,7 @@ registerContentPart("think", (data) => ({
   type: "think",
   think: String(data.think ?? ""),
   encrypted: data.encrypted != null ? String(data.encrypted) : undefined,
+  redacted: data.redacted ? true : undefined,
   _noSave: data._noSave ? true : undefined,
 }));
 
@@ -138,6 +146,7 @@ export function serializeContentPart(part: ContentPart): Record<string, unknown>
     case "think":
       result.think = part.think;
       if (part.encrypted != null) result.encrypted = part.encrypted;
+      if (part.redacted) result.redacted = true;
       break;
     case "image_url":
       result.image_url = { url: part.image_url.url };
@@ -178,6 +187,29 @@ export function serializeToolCall(tc: ToolCall): Record<string, unknown> {
     function: { name: tc.function.name, arguments: tc.function.arguments },
   };
   if (tc.extraContent != null) result.extra_content = tc.extraContent;
+  return result;
+}
+
+/**
+ * Deserialize a ToolCall from a plain object, restoring the camelCase
+ * `extraContent` field from its snake_case `extra_content` wire form so the
+ * converter layer can replay provider-specific metadata (e.g. Gemini
+ * `thoughtSignature`) after a reload.
+ */
+export function deserializeToolCall(data: Record<string, unknown>): ToolCall {
+  const fn = (data.function as Record<string, unknown> | undefined) ?? {};
+  const result: ToolCall = {
+    type: (data.type as "function") ?? "function",
+    id: String(data.id ?? ""),
+    function: {
+      name: String(fn.name ?? ""),
+      arguments: fn.arguments != null ? String(fn.arguments) : undefined,
+    },
+  };
+  const extra = data.extra_content ?? data.extraContent;
+  if (extra != null && typeof extra === "object") {
+    result.extraContent = extra as Record<string, unknown>;
+  }
   return result;
 }
 
@@ -270,7 +302,13 @@ export function validateMessage(data: Record<string, unknown>): Message {
   }
 
   if (toolCalls != null) {
-    message.tool_calls = toolCalls as ToolCall[] | Record<string, unknown>[];
+    message.tool_calls = Array.isArray(toolCalls)
+      ? (toolCalls as Record<string, unknown>[]).map((tc) =>
+          tc && typeof tc === "object" && "function" in tc
+            ? deserializeToolCall(tc as Record<string, unknown>)
+            : (tc as unknown as ToolCall)
+        )
+      : (toolCalls as ToolCall[] | Record<string, unknown>[]);
   }
   if (data.tool_call_id != null) {
     message.tool_call_id = String(data.tool_call_id);

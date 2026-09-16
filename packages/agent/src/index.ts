@@ -30,6 +30,7 @@ export {
   mergeThinkPartInPlace,
   markContentPartAsTemp,
   serializeToolCall,
+  deserializeToolCall,
   validateMessage,
   serializeMessage,
   isCheckpointMessage,

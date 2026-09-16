@@ -53,6 +53,17 @@ export async function* parseResponsesStream(
         break;
       }
 
+      // Raw chain-of-thought text (emitted when the request sets
+      // `include: ["reasoning.encrypted_content"]` or for models that stream
+      // the full reasoning text rather than a summary).
+      case "response.reasoning_text.delta": {
+        const d = data as { delta?: string };
+        if (d.delta) {
+          result.reasoningContent = d.delta;
+        }
+        break;
+      }
+
       case "response.function_call_arguments.delta": {
         const d = data as { item_id?: string; delta?: string };
         if (d.item_id && d.delta) {
@@ -92,8 +103,15 @@ export async function* parseResponsesStream(
             call_id?: string;
             name?: string;
             arguments?: string;
+            encrypted_content?: string;
           };
         };
+        // Reasoning item: capture the encrypted payload (present when the
+        // request sets `include: ["reasoning.encrypted_content"]`) so it can be
+        // replayed verbatim on the next turn.
+        if (d.item?.type === "reasoning" && typeof d.item.encrypted_content === "string") {
+          result.reasoningSignature = d.item.encrypted_content;
+        }
         if (d.item?.type === "function_call" && d.item?.id) {
           const accum = toolCallAccum.get(d.item.id);
           if (accum) {
@@ -131,6 +149,7 @@ export async function* parseResponsesStream(
     const hasContent =
       result.completionText !== undefined ||
       result.reasoningContent !== undefined ||
+      result.reasoningSignature !== undefined ||
       result.toolsCallName !== undefined ||
       result.usage !== undefined;
 

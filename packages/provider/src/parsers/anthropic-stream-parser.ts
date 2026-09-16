@@ -82,6 +82,7 @@ export async function* parseAnthropicStream(
             id?: string;
             name?: string;
             text?: string;
+            data?: string;
           };
         };
         const blockIdx = d.index ?? 0;
@@ -97,6 +98,13 @@ export async function* parseAnthropicStream(
         if (d.content_block?.type === "text" && d.content_block.text) {
           result.completionText = d.content_block.text;
         }
+        // `redacted_thinking` has no readable text — only an opaque `data`
+        // blob that must be replayed verbatim. Surface it as the reasoning
+        // signature with the redacted flag so downstream persists it.
+        if (d.content_block?.type === "redacted_thinking" && typeof d.content_block.data === "string") {
+          result.reasoningSignature = d.content_block.data;
+          result.reasoningRedacted = true;
+        }
         break;
       }
 
@@ -107,6 +115,7 @@ export async function* parseAnthropicStream(
             type?: string;
             text?: string;
             thinking?: string;
+            signature?: string;
             partial_json?: string;
           };
         };
@@ -115,6 +124,12 @@ export async function* parseAnthropicStream(
         }
         if (d.delta?.type === "thinking_delta" && d.delta.thinking) {
           result.reasoningContent = d.delta.thinking;
+        }
+        // The thinking signature arrives in its own `signature_delta` event,
+        // separate from the `thinking_delta` text. It is required to replay
+        // the thinking block on the next tool-use turn.
+        if (d.delta?.type === "signature_delta" && d.delta.signature) {
+          result.reasoningSignature = d.delta.signature;
         }
         if (d.delta?.type === "input_json_delta" && d.delta.partial_json) {
           // Deltas carry their own `index` so we can route the partial JSON
@@ -176,6 +191,7 @@ export async function* parseAnthropicStream(
     const hasContent =
       result.completionText !== undefined ||
       result.reasoningContent !== undefined ||
+      result.reasoningSignature !== undefined ||
       result.toolsCallName !== undefined ||
       result.usage !== undefined;
 

@@ -533,9 +533,11 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
     // Accumulate text/reasoning across streaming chunks so final usage chunk doesn't lose content
     let accumulatedText = "";
     let accumulatedReasoning = "";
+    let accumulatedReasoningSignature: string | undefined;
     let accumulatedToolCallIds: string[] = [];
     let accumulatedToolCallNames: string[] = [];
     let accumulatedToolCallArgs: Record<string, unknown>[] = [];
+    let accumulatedToolCallExtraContent: Record<string, unknown>[] = [];
 
     for await (const llmResponse of this.iterLlmResponsesWithFallback()) {
 
@@ -551,10 +553,16 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
         if (llmResponse.reasoningContent) {
           accumulatedReasoning += llmResponse.reasoningContent;
         }
+        // The reasoning signature arrives in its own chunk (e.g. Anthropic
+        // `signature_delta`), so keep the latest non-empty value.
+        if (llmResponse.reasoningSignature) {
+          accumulatedReasoningSignature = llmResponse.reasoningSignature;
+        }
         if (llmResponse.toolsCallIds?.length) {
           accumulatedToolCallIds.push(...llmResponse.toolsCallIds);
           accumulatedToolCallNames.push(...(llmResponse.toolsCallName ?? []));
           accumulatedToolCallArgs.push(...(llmResponse.toolsCallArgs ?? []));
+          accumulatedToolCallExtraContent.push(...(llmResponse.toolsCallExtraContent ?? []));
         }
 
         if (llmResponse.reasoningContent) {
@@ -596,11 +604,15 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
             ...llmResponse,
             completionText: llmResponse.completionText || accumulatedText || undefined,
             reasoningContent: llmResponse.reasoningContent || accumulatedReasoning || undefined,
+            reasoningSignature: llmResponse.reasoningSignature || accumulatedReasoningSignature,
           };
           if (accumulatedToolCallIds.length > 0 && !llmRespResult.toolsCallIds?.length) {
             llmRespResult.toolsCallIds = accumulatedToolCallIds;
             llmRespResult.toolsCallName = accumulatedToolCallNames;
             llmRespResult.toolsCallArgs = accumulatedToolCallArgs;
+            if (accumulatedToolCallExtraContent.some((e) => Object.keys(e).length > 0)) {
+              llmRespResult.toolsCallExtraContent = accumulatedToolCallExtraContent;
+            }
           }
           break;
         }
@@ -617,7 +629,26 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
         }
         continue;
       }
-      llmRespResult = llmResponse;
+      // Terminal (non-chunk) response. It may be an empty-delta finish chunk
+      // (carrying only usage) — merge the accumulated streamed content into it
+      // so the reply isn't lost. Without this, a provider that never reports
+      // usage (or an OpenAI-compatible gateway that ignores
+      // `stream_options.include_usage`) ends the step with an empty response
+      // even though text was streamed.
+      llmRespResult = {
+        ...llmResponse,
+        completionText: llmResponse.completionText || accumulatedText || undefined,
+        reasoningContent: llmResponse.reasoningContent || accumulatedReasoning || undefined,
+        reasoningSignature: llmResponse.reasoningSignature || accumulatedReasoningSignature,
+      };
+      if (accumulatedToolCallIds.length > 0 && !llmRespResult.toolsCallIds?.length) {
+        llmRespResult.toolsCallIds = accumulatedToolCallIds;
+        llmRespResult.toolsCallName = accumulatedToolCallNames;
+        llmRespResult.toolsCallArgs = accumulatedToolCallArgs;
+        if (accumulatedToolCallExtraContent.some((e) => Object.keys(e).length > 0)) {
+          llmRespResult.toolsCallExtraContent = accumulatedToolCallExtraContent;
+        }
+      }
 
       if (llmResponse.usage) {
         this.stats.tokenUsage.promptTokens += llmResponse.usage.promptTokens;
@@ -639,6 +670,31 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
     if (!llmRespResult) {
       if (this.isStopRequested()) {
         llmRespResult = { role: "assistant", completionText: "", isChunk: false };
+      } else if (
+        accumulatedText ||
+        accumulatedReasoning ||
+        accumulatedToolCallIds.length > 0
+      ) {
+        // The provider's stream ended without ever emitting a terminal
+        // (non-chunk) response — some OpenAI-compatible gateways and
+        // providers omit both the finish marker and the usage chunk. Without
+        // this synthesis the whole streamed reply would be dropped and the
+        // step would return as if the model said nothing.
+        llmRespResult = {
+          role: "assistant",
+          isChunk: false,
+          completionText: accumulatedText || undefined,
+          reasoningContent: accumulatedReasoning || undefined,
+          reasoningSignature: accumulatedReasoningSignature,
+        };
+        if (accumulatedToolCallIds.length > 0) {
+          llmRespResult.toolsCallIds = accumulatedToolCallIds;
+          llmRespResult.toolsCallName = accumulatedToolCallNames;
+          llmRespResult.toolsCallArgs = accumulatedToolCallArgs;
+          if (accumulatedToolCallExtraContent.some((e) => Object.keys(e).length > 0)) {
+            llmRespResult.toolsCallExtraContent = accumulatedToolCallExtraContent;
+          }
+        }
       } else {
         return;
       }
@@ -765,6 +821,7 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
             type: "think",
             think: llmResp.reasoningContent ?? "",
             encrypted: llmResp.reasoningSignature,
+            redacted: llmResp.reasoningRedacted,
           }
         );
       }
@@ -782,6 +839,9 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
             name,
             arguments: JSON.stringify(llmResp.toolsCallArgs?.[i] ?? {}),
           },
+          ...(llmResp.toolsCallExtraContent?.[i]
+            ? { extraContent: llmResp.toolsCallExtraContent[i] }
+            : {}),
         })),
       };
 
@@ -897,6 +957,7 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
         type: "think",
         think: llmResp.reasoningContent ?? "",
         encrypted: llmResp.reasoningSignature,
+        redacted: llmResp.reasoningRedacted,
       });
     }
     // Prefer resultChain's plain text over completionText
@@ -955,6 +1016,7 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
         type: "think",
         think: llmResp.reasoningContent ?? "",
         encrypted: llmResp.reasoningSignature,
+        redacted: llmResp.reasoningRedacted,
       });
     }
     if (llmResp.completionText) {
@@ -1998,7 +2060,7 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
 // Helper types
 type ContentPartForMsg =
   | { type: "text"; text: string }
-  | { type: "think"; think: string; encrypted?: string };
+  | { type: "think"; think: string; encrypted?: string; redacted?: boolean };
 
 // HandleFunctionToolsResult
 class HandleFunctionToolsResult {

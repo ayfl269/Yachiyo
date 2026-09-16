@@ -223,6 +223,19 @@ export class AnthropicProvider implements Provider {
 
         if (type === "thinking" && typeof block.thinking === "string") {
           result.reasoningContent = block.thinking;
+          // The signature is required to replay this thinking block on the
+          // next turn of a tool-use loop; dropping it makes Anthropic reject
+          // the follow-up request with a 400.
+          if (typeof block.signature === "string") {
+            result.reasoningSignature = block.signature;
+          }
+        }
+
+        // `redacted_thinking` carries no readable text — only an opaque
+        // `data` blob that must be echoed back verbatim with its `type`.
+        if (type === "redacted_thinking" && typeof block.data === "string") {
+          result.reasoningSignature = block.data;
+          result.reasoningRedacted = true;
         }
 
         if (type === "tool_use") {

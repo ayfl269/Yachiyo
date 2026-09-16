@@ -1,4 +1,6 @@
 import type { LLMResponse, TokenUsage } from "@yachiyo/common/llm-types.js";
+import type { Message } from "@yachiyo/common/llm-message.js";
+import { EstimateTokenCounter } from "@yachiyo/common/token-counter.js";
 import { parseSSEStream } from "./sse-parser.js";
 
 interface OpenAIDelta {
@@ -27,6 +29,9 @@ interface OpenAIChunk {
     total_tokens?: number;
     input_tokens?: number;
     output_tokens?: number;
+    prompt_tokens_details?: {
+      cached_tokens?: number;
+    };
   };
 }
 
@@ -36,11 +41,67 @@ interface ToolCallAccum {
   arguments: string;
 }
 
+interface FinalToolCalls {
+  ids: string[];
+  names: string[];
+  args: Record<string, unknown>[];
+}
+
+function finalizeToolCalls(accum: Map<number, ToolCallAccum>): FinalToolCalls {
+  const sorted = [...accum.entries()].sort(([a], [b]) => a - b);
+  return {
+    ids: sorted.map(([, v]) => v.id),
+    names: sorted.map(([, v]) => v.name),
+    args: sorted.map(([, v]) => {
+      try {
+        return JSON.parse(v.arguments);
+      } catch {
+        return { raw: v.arguments };
+      }
+    }),
+  };
+}
+
+function parseUsage(raw: NonNullable<OpenAIChunk["usage"]>): TokenUsage {
+  const promptTokens = raw.prompt_tokens ?? raw.input_tokens ?? 0;
+  const completionTokens = raw.completion_tokens ?? raw.output_tokens ?? 0;
+  const total = raw.total_tokens ?? promptTokens + completionTokens;
+  const cacheReadInputTokens = raw.prompt_tokens_details?.cached_tokens ?? 0;
+  return { promptTokens, completionTokens, total, cacheReadInputTokens };
+}
+
+/**
+ * Local token estimate used when the upstream never reports usage (gateways
+ * that ignore `stream_options.include_usage`, or plain HTTP proxies). Mirrors
+ * the non-streaming paths in the provider implementations so streaming and
+ * non-streaming token accounting stay consistent.
+ */
+function estimateUsage(inputMessages: Message[], outputText: string): TokenUsage {
+  const counter = new EstimateTokenCounter();
+  const promptTokens = counter.countTokens(inputMessages);
+  const completionTokens = outputText
+    ? counter.countTokens([{ role: "assistant", content: outputText } as Message])
+    : 0;
+  return { promptTokens, completionTokens, total: promptTokens + completionTokens };
+}
+
 export async function* parseOpenAIStream(
   response: Response,
   abortSignal?: AbortSignal,
+  inputMessages?: Message[],
 ): AsyncGenerator<LLMResponse, void, unknown> {
   const toolCallsAccum = new Map<number, ToolCallAccum>();
+  // Finalized tool calls, attached to the first chunk emitted after they are
+  // known complete (the usage chunk, when `include_usage` is on, or the
+  // terminal below otherwise). The agent runner treats a chunk carrying usage
+  // OR tool calls as terminal, so bundling them together ensures neither is
+  // dropped when it stops early.
+  let finalToolCalls: FinalToolCalls | undefined;
+  let finalToolCallsAttached = false;
+  // Accumulated user-visible text, used only for the local usage estimate when
+  // the upstream omits usage.
+  let accumulatedText = "";
+  let sawUsage = false;
 
   for await (const event of parseSSEStream(response, abortSignal)) {
     if (event.data === "[DONE]") {
@@ -59,61 +120,69 @@ export async function* parseOpenAIStream(
       continue;
     }
 
+    // `choices` is EMPTY on the trailing usage-only chunk that OpenAI (and
+    // compatible gateways) emit when `stream_options.include_usage` is set.
+    // Usage must therefore be handled BEFORE any per-choice logic, otherwise
+    // the usage-only chunk is dropped and token accounting is lost.
     const choice = chunk.choices?.[0];
-    if (!choice) continue;
-
-    const delta = choice.delta;
     const result: LLMResponse = { role: "assistant", isChunk: true };
 
-    if (delta?.content != null) {
-      result.completionText = delta.content;
-    }
+    if (choice) {
+      const delta = choice.delta;
 
-    if (delta?.reasoning_content) {
-      result.reasoningContent = delta.reasoning_content;
-    }
-
-    if (delta?.tool_calls) {
-      for (const tc of delta.tool_calls) {
-        const idx = tc.index;
-        let accum = toolCallsAccum.get(idx);
-        if (!accum) {
-          accum = { id: tc.id ?? "", name: tc.function?.name ?? "", arguments: "" };
-          toolCallsAccum.set(idx, accum);
-        }
-        if (tc.id) accum.id = tc.id;
-        if (tc.function?.name) accum.name = tc.function.name;
-        if (tc.function?.arguments) accum.arguments += tc.function.arguments;
+      if (delta?.content != null) {
+        result.completionText = delta.content;
+        accumulatedText += delta.content;
       }
-    }
 
-    if (choice.finish_reason === "tool_calls" && toolCallsAccum.size > 0) {
-      const sorted = [...toolCallsAccum.entries()].sort(([a], [b]) => a - b);
-      result.toolsCallIds = sorted.map(([, v]) => v.id);
-      result.toolsCallName = sorted.map(([, v]) => v.name);
-      result.toolsCallArgs = sorted.map(([, v]) => {
-        try {
-          return JSON.parse(v.arguments);
-        } catch {
-          return { raw: v.arguments };
+      if (delta?.reasoning_content) {
+        result.reasoningContent = delta.reasoning_content;
+      }
+
+      if (delta?.tool_calls) {
+        for (const tc of delta.tool_calls) {
+          const idx = tc.index;
+          let accum = toolCallsAccum.get(idx);
+          if (!accum) {
+            accum = { id: tc.id ?? "", name: tc.function?.name ?? "", arguments: "" };
+            toolCallsAccum.set(idx, accum);
+          }
+          if (tc.id) accum.id = tc.id;
+          if (tc.function?.name) accum.name = tc.function.name;
+          if (tc.function?.arguments) accum.arguments += tc.function.arguments;
         }
-      });
-      toolCallsAccum.clear();
+      }
+
+      // The model signalled the tool-call block is complete. Defer emitting
+      // them until the usage chunk or terminal so a following usage-only chunk
+      // is still read.
+      if (choice.finish_reason === "tool_calls" && !finalToolCalls && toolCallsAccum.size > 0) {
+        finalToolCalls = finalizeToolCalls(toolCallsAccum);
+        toolCallsAccum.clear();
+      }
+
+      // NOTE: terminal `finish_reason` values ("stop", "length",
+      // "content_filter", "function_call") are intentionally NOT emitted here.
+      // They arrive on an empty-delta chunk that is normally followed by the
+      // usage chunk; emitting a terminal immediately would make downstream
+      // stop before reading usage, losing token accounting. A single terminal
+      // is emitted at end of stream instead.
     }
 
     if (chunk.usage) {
-      const promptTokens = chunk.usage.prompt_tokens ?? chunk.usage.input_tokens ?? 0;
-      const completionTokens = chunk.usage.completion_tokens ?? chunk.usage.output_tokens ?? 0;
-      const total = chunk.usage.total_tokens ?? (promptTokens + completionTokens);
-      const promptTokensDetails = (chunk.usage as { prompt_tokens_details?: { cached_tokens?: number } }).prompt_tokens_details;
-      const cacheReadInputTokens = promptTokensDetails?.cached_tokens ?? 0;
-      const usage: TokenUsage = {
-        promptTokens,
-        completionTokens,
-        total,
-        cacheReadInputTokens,
-      };
-      result.usage = usage;
+      result.usage = parseUsage(chunk.usage);
+      sawUsage = true;
+      // Attach finalized tool calls to the usage chunk. The agent runner stops
+      // at the first chunk carrying usage OR tool calls, so bundling both onto
+      // this chunk is the only way to capture them together. (Attaching them
+      // to the earlier `finish_reason: "tool_calls"` chunk would make the
+      // runner stop before the usage chunk is read.)
+      if (finalToolCalls !== undefined && !finalToolCallsAttached) {
+        result.toolsCallIds = finalToolCalls.ids;
+        result.toolsCallName = finalToolCalls.names;
+        result.toolsCallArgs = finalToolCalls.args;
+        finalToolCallsAttached = true;
+      }
     }
 
     const hasContent =
@@ -122,46 +191,32 @@ export async function* parseOpenAIStream(
       result.toolsCallName !== undefined ||
       result.usage !== undefined;
 
-    // OpenAI finish_reason values: "stop", "length", "tool_calls",
-    // "content_filter", "function_call" (legacy). `end_turn` is Anthropic's
-    // finish reason and must NOT be treated as an OpenAI final-chunk marker —
-    // doing so could cause the parser to yield a spurious empty non-chunk
-    // when an OpenAI-compatible proxy leaks Anthropic-style values.
-    // `length` (max tokens reached) and `content_filter` (safety filter
-    // triggered) are both terminal states that must be emitted as final
-    // chunks so downstream consumers know generation stopped.
-    const isFinalChunk =
-      choice.finish_reason === "stop" ||
-      choice.finish_reason === "length" ||
-      choice.finish_reason === "content_filter" ||
-      choice.finish_reason === "function_call";
-
     if (hasContent) {
       yield result;
-    } else if (isFinalChunk) {
-      yield { ...result, isChunk: false };
     }
   }
 
-  // Fallback flush: some OpenAI-compatible gateways/proxies (and interrupted
-  // streams) terminate without ever sending `finish_reason: "tool_calls"`.
-  // If tool calls were accumulated but never emitted, flush them here as a
-  // final response — otherwise the tool chain silently breaks mid-conversation
-  // (the model "asked" for a tool but downstream never sees it).
-  if (toolCallsAccum.size > 0) {
-    const sorted = [...toolCallsAccum.entries()].sort(([a], [b]) => a - b);
-    yield {
-      role: "assistant",
-      isChunk: false,
-      toolsCallIds: sorted.map(([, v]) => v.id),
-      toolsCallName: sorted.map(([, v]) => v.name),
-      toolsCallArgs: sorted.map(([, v]) => {
-        try {
-          return JSON.parse(v.arguments);
-        } catch {
-          return { raw: v.arguments };
-        }
-      }),
-    };
+  // Flush any tool calls accumulated without a `finish_reason: "tool_calls"`
+  // marker — some OpenAI-compatible gateways/proxies terminate without ever
+  // sending it. Without this the tool chain silently breaks mid-conversation
+  // (the model asked for a tool but downstream never sees it).
+  if (finalToolCalls === undefined && toolCallsAccum.size > 0) {
+    finalToolCalls = finalizeToolCalls(toolCallsAccum);
+    toolCallsAccum.clear();
   }
+
+  // Exactly one terminal non-chunk per stream, carrying any accumulated tool
+  // calls and the usage estimate. Emitted even when no `finish_reason` was
+  // seen so downstream consumers always finalize the step. The agent runner
+  // merges the accumulated streamed text into this response.
+  const terminal: LLMResponse = { role: "assistant", isChunk: false };
+  if (finalToolCalls !== undefined && !finalToolCallsAttached) {
+    terminal.toolsCallIds = finalToolCalls.ids;
+    terminal.toolsCallName = finalToolCalls.names;
+    terminal.toolsCallArgs = finalToolCalls.args;
+  }
+  if (!sawUsage && inputMessages) {
+    terminal.usage = estimateUsage(inputMessages, accumulatedText);
+  }
+  yield terminal;
 }

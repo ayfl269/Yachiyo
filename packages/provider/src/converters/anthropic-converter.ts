@@ -10,6 +10,12 @@ export interface AnthropicTextBlock {
 export interface AnthropicThinkingBlock {
   type: "thinking";
   thinking: string;
+  signature?: string;
+}
+
+export interface AnthropicRedactedThinkingBlock {
+  type: "redacted_thinking";
+  data: string;
 }
 
 export interface AnthropicImageBlock {
@@ -37,6 +43,7 @@ export interface AnthropicToolResultBlock {
 export type AnthropicContentBlock =
   | AnthropicTextBlock
   | AnthropicThinkingBlock
+  | AnthropicRedactedThinkingBlock
   | AnthropicImageBlock
   | AnthropicToolUseBlock
   | AnthropicToolResultBlock;
@@ -66,7 +73,19 @@ export function contentPartToAnthropic(part: ContentPart): AnthropicContentBlock
     case "text":
       return { type: "text", text: part.text };
     case "think":
-      return { type: "thinking", thinking: part.think };
+      // Redacted thinking blocks carry only opaque data and must be replayed
+      // with their original block type, otherwise Anthropic rejects the
+      // assistant turn.
+      if (part.redacted) {
+        return { type: "redacted_thinking", data: part.encrypted ?? "" };
+      }
+      // Extended thinking requires a valid signature on every replayed
+      // thinking block; an unsigned `thinking` block triggers a 400. Fall back
+      // to a text block (always accepted) when no signature is available,
+      // e.g. history produced by another provider.
+      return part.encrypted
+        ? { type: "thinking", thinking: part.think, signature: part.encrypted }
+        : { type: "text", text: part.think };
     case "image_url": {
       const url = part.image_url.url;
       const parsed = parseDataUri(url);

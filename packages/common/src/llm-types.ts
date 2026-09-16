@@ -25,13 +25,31 @@ export interface LLMResponse {
   role: "assistant" | "err";
   completionText?: string;
   reasoningContent?: string;
+  /**
+   * Provider-specific encrypted payload for the reasoning/thinking block.
+   * - Anthropic: the `signature` of a `thinking` block (required when the
+   *   assistant turn is replayed in a tool-use loop).
+   * - Gemini: the `thoughtSignature` associated with a thought part.
+   * Must be passed back verbatim on the next request.
+   */
   reasoningSignature?: string;
+  /**
+   * True when `reasoningContent` is empty and `reasoningSignature` holds an
+   * opaque redacted-thinking payload (Anthropic `redacted_thinking`). Such a
+   * block has no human-readable text and must be replayed unchanged.
+   */
+  reasoningRedacted?: boolean;
   resultChain?: MessageChain;
   isChunk: boolean;
   usage?: TokenUsage;
   toolsCallName?: string[];
   toolsCallArgs?: Record<string, unknown>[];
   toolsCallIds?: string[];
+  /**
+   * Per-tool-call opaque metadata that must be replayed with the call
+   * (e.g. Gemini `thoughtSignature`). Index-aligned with `toolsCallIds`.
+   */
+  toolsCallExtraContent?: Record<string, unknown>[];
 }
 
 export interface ToolSetInterface {

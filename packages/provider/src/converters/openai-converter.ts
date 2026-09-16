@@ -13,6 +13,8 @@ export interface OpenAIToolCall {
   id: string;
   type: "function";
   function: { name: string; arguments: string };
+  /** Opaque per-call metadata (e.g. Gemini `thoughtSignature`) to replay verbatim. */
+  extra_content?: Record<string, unknown>;
 }
 
 export interface OpenAIMessage {
@@ -70,6 +72,7 @@ function toolCallToOpenAI(tc: ToolCall): OpenAIToolCall {
       name: tc.function.name,
       arguments: tc.function.arguments ?? "{}",
     },
+    ...(tc.extraContent != null ? { extra_content: tc.extraContent } : {}),
   };
 }
 
