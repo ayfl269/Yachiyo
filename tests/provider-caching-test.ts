@@ -21,10 +21,25 @@ function assert(condition: boolean, message: string): void {
 const originalFetch = globalThis.fetch;
 let lastRequestUrl: string | null = null;
 let lastRequestInit: RequestInit | null = null;
+let requestLog: { url: string; body: any; method?: string }[] = [];
+let cacheCreateCount = 0;
+let cacheDeleteCount = 0;
 
 async function mockFetch(url: string | URL | Request, init?: RequestInit): Promise<Response> {
-  lastRequestUrl = typeof url === "string" ? url : (url as any).url || url.toString();
+  const requestUrl = typeof url === "string" ? url : (url as any).url || url.toString();
+  lastRequestUrl = requestUrl;
   lastRequestInit = init || null;
+  requestLog.push({
+    url: requestUrl,
+    body: init?.body ? JSON.parse(init.body as string) : null,
+    method: init?.method,
+  });
+  if (requestUrl.includes("/cachedContents") && init?.method === "POST") {
+    cacheCreateCount++;
+  }
+  if (requestUrl.includes("/cachedContents/") && init?.method === "DELETE") {
+    cacheDeleteCount++;
+  }
   return new Response(JSON.stringify({
     // Standard response mocks
     choices: [{ message: { content: "Mock OpenAI response" } }],
@@ -109,6 +124,121 @@ async function runTests() {
     assert(Array.isArray(cacheBody.contents), "Gemini createContextCache body contents");
     assert(cacheBody.ttl === "600s", "Gemini createContextCache TTL matches config");
     assert(cacheName?.name === "cachedContents/mock-cache-id", "Gemini createContextCache response cachedContent name parsed");
+
+    // 2b. Gemini cache reuse must not drop the messages between the cached
+    // prefix and the latest turn. Regression test: previously the reuse branch
+    // sent only `[lastMessage]`, silently dropping everything in between.
+    console.log("\n--- Testing Gemini Cache Reuse (no dropped messages) ---");
+    requestLog = [];
+    cacheCreateCount = 0;
+    const geminiReuse = new GeminiProvider({
+      apiKey: "test-gemini-key",
+      model: "gemini-1.5-flash",
+      enableCaching: true,
+      cacheThreshold: 10,
+      cacheTtlSeconds: 600,
+    } as any);
+
+    const pad = (s: string) => s + " lorem ipsum dolor sit amet consectetur adipiscing elit".repeat(3);
+    const systemMsg = { role: "system", content: pad("SYS") } as Message;
+    const u1 = { role: "user", content: pad("U1") } as Message;
+    const a1 = { role: "assistant", content: pad("A1") } as Message;
+    const u2 = { role: "user", content: "U2" } as Message;
+    const a2 = { role: "assistant", content: "A2" } as Message;
+    const u3 = { role: "user", content: "U3" } as Message;
+
+    const funcTool = {
+      empty: () => false,
+      openaiSchema: () => [{ type: "function", function: { name: "test_tool" } }],
+      anthropicSchema: () => [{ name: "test_tool" }],
+      googleSchema: () => ({ functionDeclarations: [{ name: "test_tool" }] }),
+    };
+
+    await geminiReuse.textChat({
+      contexts: [systemMsg, u1, a1, u2],
+      enableCaching: true,
+      sessionId: "reuse-session",
+      funcTool,
+    });
+    await geminiReuse.textChat({
+      contexts: [systemMsg, u1, a1, u2, a2, u3],
+      enableCaching: true,
+      sessionId: "reuse-session",
+      funcTool,
+    });
+
+    const genReqs = requestLog.filter((r) => r.url.includes("generateContent"));
+    assert(cacheCreateCount === 1, "Gemini cache created exactly once across turns");
+    assert(genReqs[1]?.body?.cachedContent === "cachedContents/mock-cache-id", "Gemini second turn reuses cachedContent");
+    assert(
+      Array.isArray(genReqs[1]?.body?.contents) && genReqs[1].body.contents.length === 3,
+      `Gemini reuse sends cached prefix delta (expected 3 contents, got ${genReqs[1]?.body?.contents?.length})`,
+    );
+    assert(
+      genReqs[1]?.body?.contents?.[0]?.parts?.[0]?.text === "U2",
+      "Gemini reuse keeps the message immediately after the cached prefix",
+    );
+    // Gemini bakes systemInstruction/tools into the cachedContent object and
+    // rejects requests that also carry them alongside `cachedContent`.
+    assert(genReqs[1]?.body?.tools === undefined, "Gemini reuse omits tools when cachedContent is sent");
+    assert(genReqs[1]?.body?.systemInstruction === undefined, "Gemini reuse omits systemInstruction when cachedContent is sent");
+    // The cache-creation request itself must carry the tools.
+    const createReq = requestLog.find((r) => r.url.includes("/cachedContents") && r.method === "POST");
+    assert(createReq?.body?.tools !== undefined, "Gemini cache creation embeds tools in the cachedContent object");
+
+    // 2c. A changed system instruction invalidates the cache and rebuilds it,
+    // and the stale server-side cache must be deleted (not leaked).
+    console.log("\n--- Testing Gemini Cache Invalidation on System Change ---");
+    requestLog = [];
+    cacheCreateCount = 0;
+    cacheDeleteCount = 0;
+    await geminiReuse.textChat({
+      contexts: [{ role: "system", content: pad("SYS-CHANGED") } as Message, u1, a1, u2, a2, u3],
+      enableCaching: true,
+      sessionId: "reuse-session",
+      funcTool,
+    });
+    const genReqs2 = requestLog.filter((r) => r.url.includes("generateContent"));
+    assert(cacheCreateCount === 1, "Gemini rebuilds cache when system instruction changes");
+    assert(cacheDeleteCount === 1, "Gemini deletes the stale server-side cache on invalidation");
+    assert(genReqs2[0]?.body?.cachedContent !== undefined || genReqs2[0]?.body?.contents?.length === 6,
+      "Gemini changed-system request is served (cached or inline)");
+
+    // 2d. A rebuild that cannot happen (below threshold) must still release the
+    // now-unusable server-side cache rather than leaking it.
+    console.log("\n--- Testing Gemini Stale Cache Release When Below Threshold ---");
+    requestLog = [];
+    cacheCreateCount = 0;
+    cacheDeleteCount = 0;
+    const geminiSmall = new GeminiProvider({
+      apiKey: "test-gemini-key",
+      model: "gemini-1.5-flash",
+      enableCaching: true,
+      cacheThreshold: 10,
+      cacheTtlSeconds: 600,
+    } as any);
+    // Seed a cache under one session...
+    await geminiSmall.textChat({
+      contexts: [systemMsg, u1, a1, u2],
+      enableCaching: true,
+      sessionId: "small-session",
+      funcTool,
+    });
+    assert(cacheCreateCount === 1, "Gemini seeds cache for the small-session");
+    // ...then issue a changed request whose prefix is too small to rebuild
+    // (below cacheThreshold): the old cache must be deleted instead of
+    // lingering until its remote TTL.
+    const tinySystem = { role: "system", content: "S" } as Message;
+    const tinyU1 = { role: "user", content: "a" } as Message;
+    const tinyA1 = { role: "assistant", content: "b" } as Message;
+    const tinyU2 = { role: "user", content: "c" } as Message;
+    await geminiSmall.textChat({
+      contexts: [tinySystem, tinyU1, tinyA1, tinyU2],
+      enableCaching: true,
+      sessionId: "small-session",
+      funcTool,
+    });
+    assert(cacheDeleteCount >= 1, "Gemini releases stale server-side cache when it cannot be rebuilt");
 
     // 3. OpenAI Responses Provider Caching Test
     console.log("\n--- Testing OpenAI Responses Caching ---");

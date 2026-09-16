@@ -110,13 +110,18 @@ export class GeminiProvider implements Provider {
     expireTime: number; // timestamp in ms
   }>();
 
-  private cleanExpiredCaches() {
+  private async cleanExpiredCaches(): Promise<void> {
     const now = Date.now();
+    const expired: string[] = [];
     for (const [key, cache] of this.activeCaches.entries()) {
       if (now >= cache.expireTime) {
         this.activeCaches.delete(key);
+        expired.push(cache.cacheName);
       }
     }
+    // Deleting only the local entry would leak the server-side object until the
+    // remote TTL elapses; delete it explicitly as well.
+    await Promise.all(expired.map((name) => this.deleteContextCache(name)));
   }
 
   /**
@@ -149,6 +154,42 @@ export class GeminiProvider implements Provider {
     const entries = Array.from(this.activeCaches.values());
     this.activeCaches.clear();
     await Promise.all(entries.map((c) => this.deleteContextCache(c.cacheName)));
+  }
+
+  private static sameJson(a: unknown, b: unknown): boolean {
+    return JSON.stringify(a) === JSON.stringify(b);
+  }
+
+  /**
+   * Whether an existing server-side cache may still be reused for this request.
+   *
+   * A cache is created from the request's *prefix* (`contents.slice(0, -1)`) at
+   * the time it was built. On a later turn the request has grown, so the cache
+   * only covers the older, shorter prefix. Reuse is valid only when the current
+   * `contents` still begins with the cached prefix and the cacheable metadata
+   * (system instruction, tools) is unchanged — otherwise the request must not
+   * point at the stale cache, or everything between the cached prefix and the
+   * last message would be silently dropped from the model's view.
+   */
+  private isCacheReusable(
+    existing: {
+      cachedContents: unknown[];
+      cachedSystemInstruction?: unknown;
+      cachedTools?: unknown;
+    },
+    contents: readonly unknown[],
+    systemInstruction: unknown,
+    tools: unknown[] | undefined
+  ): boolean {
+    // The cache must cover a *proper* prefix so at least one message (the delta)
+    // is sent alongside `cachedContent`.
+    if (existing.cachedContents.length >= contents.length) return false;
+    for (let i = 0; i < existing.cachedContents.length; i++) {
+      if (!GeminiProvider.sameJson(existing.cachedContents[i], contents[i])) return false;
+    }
+    if (!GeminiProvider.sameJson(existing.cachedSystemInstruction, systemInstruction)) return false;
+    if (!GeminiProvider.sameJson(existing.cachedTools, tools)) return false;
+    return true;
   }
 
   private async createContextCache(
@@ -230,14 +271,19 @@ export class GeminiProvider implements Provider {
     let tools: unknown[] | undefined;
     if (funcTool && !funcTool.empty()) {
       tools = [funcTool.googleSchema()];
-      body.tools = tools;
     }
+
+    const applyUncachedBody = () => {
+      body.contents = contents;
+      if (systemInstruction) body.systemInstruction = systemInstruction;
+      if (tools) body.tools = tools;
+    };
 
     // Context caching logic
     const enableCaching = params.enableCaching ?? (this.providerConfig.enableCaching as boolean | undefined) ?? false;
     const sessionKey = params.sessionId ?? "default";
 
-    this.cleanExpiredCaches();
+    await this.cleanExpiredCaches();
 
     if (enableCaching && contents.length > 1) {
       const ttl = (this.providerConfig.cacheTtlSeconds as number | undefined) ?? 300;
@@ -248,7 +294,29 @@ export class GeminiProvider implements Provider {
 
       if (prefixContents.length > 0) {
         const existing = this.activeCaches.get(sessionKey);
-        if (!existing || existing.expireTime <= Date.now()) {
+        const reusable =
+          existing !== undefined &&
+          existing.expireTime > Date.now() &&
+          this.isCacheReusable(existing, contents, systemInstruction, tools);
+
+        if (reusable && existing) {
+          // The cache only covers the older prefix; send every message after it
+          // so nothing between the cached prefix and the latest turn is dropped.
+          // `systemInstruction`/`tools` are baked into the cache, so the request
+          // must not repeat them — Gemini rejects that combination.
+          body.cachedContent = existing.cacheName;
+          body.contents = contents.slice(existing.cachedContents.length);
+          delete body.systemInstruction;
+          delete body.tools;
+        } else {
+          // A cache that can no longer serve this session is dead weight: drop
+          // the local entry and delete the server-side object now, otherwise it
+          // lingers until its remote TTL elapses.
+          if (existing) {
+            this.activeCaches.delete(sessionKey);
+            await this.deleteContextCache(existing.cacheName);
+          }
+
           const tokenCounter = new EstimateTokenCounter();
           const prefixMessages = prefixContents.map((c) => ({
             role: "assistant",
@@ -277,9 +345,6 @@ export class GeminiProvider implements Provider {
               console.info(`[GeminiProvider] Creating context cache for session ${sessionKey} (estimated tokens: ${estimatedTokens})...`);
               const cacheResult = await this.createContextCache(useModel, prefixContents, systemInstruction, tools, ttlStr);
               if (cacheResult) {
-                if (existing) {
-                  await this.deleteContextCache(existing.cacheName);
-                }
                 this.activeCaches.set(sessionKey, {
                   cacheName: cacheResult.name,
                   cachedContents: prefixContents,
@@ -289,35 +354,24 @@ export class GeminiProvider implements Provider {
                 });
                 body.cachedContent = cacheResult.name;
                 body.contents = [lastMessage];
+                delete body.systemInstruction;
+                delete body.tools;
               } else {
-                body.contents = contents;
-                if (systemInstruction) body.systemInstruction = systemInstruction;
-                if (tools) body.tools = tools;
+                applyUncachedBody();
               }
             } catch (cacheErr) {
               console.warn("[GeminiProvider] Context caching failed, falling back to standard prompt:", cacheErr);
-              body.contents = contents;
-              if (systemInstruction) body.systemInstruction = systemInstruction;
-              if (tools) body.tools = tools;
+              applyUncachedBody();
             }
           } else {
-            body.contents = contents;
-            if (systemInstruction) body.systemInstruction = systemInstruction;
-            if (tools) body.tools = tools;
+            applyUncachedBody();
           }
-        } else {
-          body.cachedContent = existing.cacheName;
-          body.contents = [lastMessage];
         }
       } else {
-        body.contents = contents;
-        if (systemInstruction) body.systemInstruction = systemInstruction;
-        if (tools) body.tools = tools;
+        applyUncachedBody();
       }
     } else {
-      body.contents = contents;
-      if (systemInstruction) body.systemInstruction = systemInstruction;
-      if (tools) body.tools = tools;
+      applyUncachedBody();
     }
 
     const action = isStream ? "streamGenerateContent?alt=sse" : "generateContent";
