@@ -39,7 +39,11 @@ function contentPartToOpenAI(part: ContentPart): OpenAIContentPart | null {
     case "text":
       return { type: "text", text: part.text };
     case "think":
-      return { type: "text", text: `[Thinking] ${part.think}` };
+      // Chat Completions has no field to replay a prior turn's reasoning, and
+      // splicing it into the visible transcript as `[Thinking] ...` pollutes
+      // the model's context with a marker string (and can surface in replies).
+      // Drop it — reasoning is only meaningful on the turn that produced it.
+      return null;
     case "image_url": {
       const url = part.image_url.url;
       const parsed = parseDataUri(url);

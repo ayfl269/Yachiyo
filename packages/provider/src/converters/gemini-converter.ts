@@ -154,8 +154,9 @@ export function messageToGemini(messages: Message[]): GeminiConversionResult {
       let funcName = msg.tool_call_id ?? "";
       if (funcName.startsWith("gemini_fc_")) {
         funcName = funcName.slice("gemini_fc_".length);
-        // Strip the `__idx_<n>` suffix appended by gemini-stream-parser.ts
-        // for concurrent tool calls. Only the function name should remain.
+        // Strip the `__idx_<n>` suffix appended by gemini-provider.ts /
+        // gemini-stream-parser.ts for concurrent tool calls. Only the function
+        // name should remain.
         funcName = funcName.replace(/__idx_\d+$/, "");
       } else {
         // Find the actual tool name by searching backwards through messages

@@ -25,6 +25,7 @@ interface GeminiChunk {
     promptTokenCount?: number;
     candidatesTokenCount?: number;
     totalTokenCount?: number;
+    cachedContentTokenCount?: number;
   };
 }
 
@@ -35,6 +36,13 @@ export async function* parseGeminiStream(
   let functionCallIndex = 0;
   let chunkCount = 0;
   let yieldedCount = 0;
+  // Gemini's `streamGenerateContent` reports `usageMetadata` on EVERY chunk,
+  // and the counts are cumulative. Downstream (ToolLoopAgentRunner) treats any
+  // chunk carrying `usage` as the terminal response and stops reading, so
+  // attaching usage to a mid-stream chunk truncates the reply after the first
+  // text delta. Instead, cache the latest cumulative usage and emit it once on
+  // a terminal chunk at end of stream — matching the OpenAI/Anthropic parsers.
+  let lastUsage: LLMResponse["usage"] | undefined;
 
   for await (const event of parseSSEStream(response, abortSignal)) {
     chunkCount++;
@@ -133,12 +141,22 @@ export async function* parseGeminiStream(
 
     if (chunk.usageMetadata) {
       const u = chunk.usageMetadata;
-      result.usage = {
+      lastUsage = {
         promptTokens: u.promptTokenCount ?? 0,
         completionTokens: u.candidatesTokenCount ?? 0,
         total: u.totalTokenCount ?? 0,
+        cacheReadInputTokens: u.cachedContentTokenCount,
       };
-      hasContent = true;
+    }
+
+    // A chunk carrying tool calls is terminal for the agent runner (it stops at
+    // the first chunk with tool calls OR usage). Gemini reports usageMetadata
+    // on that same chunk, so bundle the usage onto it — otherwise the terminal
+    // usage emitted below is never read on tool-call turns and accounting is
+    // lost. Plain text chunks deliberately do NOT carry usage: attaching it
+    // would stop the stream after the first delta.
+    if (result.toolsCallName !== undefined && lastUsage !== undefined) {
+      result.usage = lastUsage;
     }
 
     if (hasContent) {
@@ -146,6 +164,13 @@ export async function* parseGeminiStream(
       yield result;
     }
   }
+
+  // Emit exactly one terminal (non-chunk) response carrying the cumulative
+  // usage. Doing it here rather than on each chunk prevents downstream from
+  // stopping the stream early (see the `lastUsage` comment above). Emitted
+  // unconditionally so downstream always finalizes the step, matching the
+  // OpenAI/Anthropic parsers.
+  yield { role: "assistant", isChunk: false, usage: lastUsage };
 
   // Diagnostic: summary (stays at warn — no content, purely structural)
   if (chunkCount > 0 && yieldedCount === 0) {

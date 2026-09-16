@@ -15,6 +15,7 @@ import { AnthropicProvider } from "@yachiyo/provider/implementations/anthropic-p
 import { messageToAnthropic } from "@yachiyo/provider/converters/anthropic-converter.js";
 import { messageToGemini } from "@yachiyo/provider/converters/gemini-converter.js";
 import { messageToOpenAI } from "@yachiyo/provider/converters/openai-converter.js";
+import { messageToResponsesInput } from "@yachiyo/provider/converters/openai-responses-converter.js";
 import { parseAnthropicStream } from "@yachiyo/provider/parsers/anthropic-stream-parser.js";
 import { parseGeminiStream } from "@yachiyo/provider/parsers/gemini-stream-parser.js";
 import { parseResponsesStream } from "@yachiyo/provider/parsers/openai-responses-stream-parser.js";
@@ -120,16 +121,22 @@ async function testAnthropicStreamSignature() {
 function testAnthropicReplay() {
   console.log("\n=== Anthropic：历史回传保留签名 ===");
   const { messages } = messageToAnthropic([
-    { role: "assistant", content: [
-      { type: "think", think: "推理", encrypted: "SIG-123" },
-      { type: "text", text: "回复" },
-    ] },
-    { role: "assistant", content: [
-      { type: "think", think: "", encrypted: "BLOB-XYZ", redacted: true },
-    ] },
-    { role: "assistant", content: [
-      { type: "think", think: "无签名的思考" },
-    ] },
+    {
+      role: "assistant", content: [
+        { type: "think", think: "推理", encrypted: "SIG-123" },
+        { type: "text", text: "回复" },
+      ]
+    },
+    {
+      role: "assistant", content: [
+        { type: "think", think: "", encrypted: "BLOB-XYZ", redacted: true },
+      ]
+    },
+    {
+      role: "assistant", content: [
+        { type: "think", think: "无签名的思考" },
+      ]
+    },
   ]);
 
   const signed = messages[0].content as any[];
@@ -153,19 +160,27 @@ async function testGeminiSignature() {
   const parse = (provider as any).parseResponse.bind(provider);
 
   const nonStream = parse({
-    candidates: [{ content: { parts: [
-      { text: "推理", thought: true, thoughtSignature: "GSIG" },
-      { text: "回复" },
-    ] } }],
+    candidates: [{
+      content: {
+        parts: [
+          { text: "推理", thought: true, thoughtSignature: "GSIG" },
+          { text: "回复" },
+        ]
+      }
+    }],
   });
   assert(nonStream.reasoningContent === "推理", "thought:true 归入 reasoningContent");
   assert(nonStream.completionText === "回复", "普通 text 归入 completionText");
   assert(nonStream.reasoningSignature === "GSIG", "非流式捕获 thoughtSignature");
 
   const fc = parse({
-    candidates: [{ content: { parts: [
-      { functionCall: { name: "f", args: { x: 1 } }, thoughtSignature: "FSIG" },
-    ] } }],
+    candidates: [{
+      content: {
+        parts: [
+          { functionCall: { name: "f", args: { x: 1 } }, thoughtSignature: "FSIG" },
+        ]
+      }
+    }],
   });
   assert(fc.toolsCallExtraContent?.[0]?.thoughtSignature === "FSIG",
     "functionCall 的 thoughtSignature 随工具调用捕获");
@@ -230,10 +245,14 @@ function testOpenAICompat() {
   const parse = (provider as any).parseChatResponse.bind(provider);
 
   const arrayForm = parse({
-    choices: [{ message: { content: [
-      { type: "reasoning", text: "思考" },
-      { type: "text", text: "回复" },
-    ] } }],
+    choices: [{
+      message: {
+        content: [
+          { type: "reasoning", text: "思考" },
+          { type: "text", text: "回复" },
+        ]
+      }
+    }],
   });
   assert(arrayForm.reasoningContent === "思考", "数组 reasoning 分片归入 reasoningContent");
   assert(arrayForm.completionText === "回复", "数组 text 分片归入 completionText");
@@ -248,17 +267,23 @@ function testOpenAICompat() {
   assert(details.reasoningContent === "r1r2", "reasoning_details 拼接归入 reasoningContent");
 
   const tc = parse({
-    choices: [{ message: { content: "回复", tool_calls: [
-      { id: "1", function: { name: "f", arguments: "{}" }, extra_content: { thoughtSignature: "X" } },
-    ] } }],
+    choices: [{
+      message: {
+        content: "回复", tool_calls: [
+          { id: "1", function: { name: "f", arguments: "{}" }, extra_content: { thoughtSignature: "X" } },
+        ]
+      }
+    }],
   });
   assert(tc.toolsCallExtraContent?.[0]?.thoughtSignature === "X",
     "工具调用的 extra_content 被捕获");
 
   const replay = messageToOpenAI([
-    { role: "assistant", content: "回复", tool_calls: [
-      { type: "function", id: "1", function: { name: "f", arguments: "{}" }, extraContent: { thoughtSignature: "X" } },
-    ] },
+    {
+      role: "assistant", content: "回复", tool_calls: [
+        { type: "function", id: "1", function: { name: "f", arguments: "{}" }, extraContent: { thoughtSignature: "X" } },
+      ]
+    },
   ]);
   assert((replay[0].tool_calls as any[])[0].extra_content?.thoughtSignature === "X",
     "回传工具调用保留 extra_content");
@@ -286,6 +311,94 @@ async function testSerializationRoundTrip() {
     "反序列化恢复 extraContent");
 }
 
+// ── 8. OpenAI / Responses 转换器：思考不得作为 [Thinking] 文本注入 ──
+function testNoThinkingInjection() {
+  console.log("\n=== OpenAI 转换器：思考不得注入为文本 ===");
+  const msg: Message = {
+    role: "assistant",
+    content: [
+      { type: "think", think: "内部推理", encrypted: "SIG" },
+      { type: "text", text: "可见回复" },
+    ],
+  };
+  const chat = messageToOpenAI([msg]);
+  assert(!JSON.stringify(chat).includes("[Thinking]"), "Chat Completions 转换不注入 [Thinking]");
+  assert(!JSON.stringify(chat).includes("内部推理"), "Chat Completions 转换丢弃思考内容");
+  assert(JSON.stringify(chat).includes("可见回复"), "Chat Completions 保留可见回复");
+
+  const responses = messageToResponsesInput([msg]).input;
+  assert(!JSON.stringify(responses).includes("[Thinking]"), "Responses 转换不注入 [Thinking]");
+  assert(!JSON.stringify(responses).includes("内部推理"), "Responses 转换丢弃思考内容");
+  assert(JSON.stringify(responses).includes("可见回复"), "Responses 保留可见回复");
+}
+
+// ── 9. OpenAI Responses：工具 schema 必须为扁平结构 ──
+async function testResponsesToolSchema() {
+  console.log("\n=== OpenAI Responses：工具 schema 扁平化 ===");
+  const originalFetch = globalThis.fetch;
+  let body: any = null;
+  (globalThis as any).fetch = async (_url: string, init?: RequestInit) => {
+    body = init?.body ? JSON.parse(init.body as string) : null;
+    return new Response(JSON.stringify({ output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  try {
+    const provider = new OpenAIResponsesProvider({ apiKey: "k", model: "gpt-4o" });
+    const funcTool = {
+      empty: () => false,
+      openaiSchema: () => [{ type: "function", function: { name: "get_weather", description: "d", parameters: { type: "object", properties: { city: { type: "string" } } } } }],
+      anthropicSchema: () => [{ name: "get_weather" }],
+      googleSchema: () => ({ functionDeclarations: [{ name: "get_weather" }] }),
+    };
+    await provider.textChat({ contexts: [{ role: "user", content: "hi" }] as Message[], funcTool } as any);
+
+    const tool = body?.tools?.[0];
+    assert(tool?.type === "function", "Responses 工具 type=function");
+    assert(tool?.name === "get_weather", "Responses 工具 name 在顶层");
+    assert(tool?.function === undefined, "Responses 工具不含嵌套 function 键");
+    assert(tool?.parameters?.properties?.city !== undefined, "Responses 工具 parameters 在顶层");
+    assert(tool?.description === "d", "Responses 工具 description 在顶层");
+  } finally {
+    (globalThis as any).fetch = originalFetch;
+  }
+}
+
+// ── 10. Gemini 非流式：并行同名工具调用 ID 唯一 ──
+function testGeminiNonStreamToolIds() {
+  console.log("\n=== Gemini 非流式：同名工具调用 ID 唯一 ===");
+  const provider = new GeminiProvider({ apiKey: "k", model: "gemini-2.0-flash" });
+  const parse = (provider as any).parseResponse.bind(provider);
+  const parsed = parse({
+    candidates: [{
+      content: {
+        parts: [
+          { functionCall: { name: "search", args: { q: "a" } } },
+          { functionCall: { name: "search", args: { q: "b" } } },
+        ]
+      }
+    }],
+  });
+  assert(parsed.toolsCallIds?.length === 2, "解析出两个工具调用");
+  assert(new Set(parsed.toolsCallIds).size === 2, "并行同名工具调用 ID 唯一");
+}
+
+// ── 11. Responses：仅工具调用的 assistant 消息不得带空 content ──
+function testResponsesToolOnlyAssistant() {
+  console.log("\n=== Responses：仅工具调用的 assistant 消息 ===");
+  const input = messageToResponsesInput([
+    {
+      role: "assistant", content: undefined, tool_calls: [
+        { type: "function", id: "call_1", function: { name: "f", arguments: "{}" } },
+      ]
+    },
+  ]).input;
+  const messages = input.filter((i: any) => i.type === undefined || i.type === "message");
+  assert(messages.every((m: any) => m.content !== undefined), "仅工具调用的 assistant 不产出空 content 消息");
+  assert(input.some((i: any) => i.type === "function_call"), "function_call 项仍被保留");
+}
+
 // ── main ──
 (async () => {
   console.log("╔══════════════════════════════════════════════╗");
@@ -299,6 +412,10 @@ async function testSerializationRoundTrip() {
     await testResponsesReasoning();
     testOpenAICompat();
     await testSerializationRoundTrip();
+    testNoThinkingInjection();
+    await testResponsesToolSchema();
+    testGeminiNonStreamToolIds();
+    testResponsesToolOnlyAssistant();
     console.log(`\n总计: ${passed + failed} | 通过: ${passed} | 失败: ${failed}`);
     if (failures.length) {
       console.error("失败项:");

@@ -1,5 +1,5 @@
 import type { Provider, ProviderChatParams } from "../provider.js";
-import type { LLMResponse, ProviderConfig, TokenUsage } from "@yachiyo/common/llm-types.js";
+import type { LLMResponse, ProviderConfig, TokenUsage, ToolSetInterface } from "@yachiyo/common/llm-types.js";
 import type { Message } from "@yachiyo/common/llm-message.js";
 import { messageToResponsesInput } from "../converters/openai-responses-converter.js";
 import { parseResponsesStream } from "../parsers/openai-responses-stream-parser.js";
@@ -15,6 +15,29 @@ export interface OpenAIResponsesProviderConfig extends ProviderConfig {
   model: string;
   organization?: string;
   proxy?: string;
+}
+
+/**
+ * Convert the shared Chat-Completions-style tool schema
+ * (`{ type: "function", function: { name, description, parameters } }`) into the
+ * flat shape the Responses API requires (`{ type: "function", name, ... }`).
+ *
+ * Responses does NOT nest the function definition under a `function` key — a
+ * nested payload is rejected/ignored by the API. Spread `...t` on top of the
+ * Chat-Completions object (the previous behaviour) left that nested key in
+ * place, so tools never worked through this provider.
+ */
+function toResponsesTools(funcTool: ToolSetInterface): Record<string, unknown>[] {
+  return funcTool.openaiSchema(true).map((t) => {
+    const fn = (t.function ?? {}) as Record<string, unknown>;
+    const tool: Record<string, unknown> = {
+      type: "function",
+      name: fn.name,
+    };
+    if (fn.description !== undefined) tool.description = fn.description;
+    if (fn.parameters !== undefined) tool.parameters = fn.parameters;
+    return tool;
+  });
 }
 
 export class OpenAIResponsesProvider implements Provider {
@@ -62,10 +85,7 @@ export class OpenAIResponsesProvider implements Provider {
     }
 
     if (funcTool && !funcTool.empty()) {
-      body.tools = funcTool.openaiSchema(true).map((t) => ({
-        type: "function",
-        ...t,
-      }));
+      body.tools = toResponsesTools(funcTool);
     }
 
     const url = `${this.baseUrl}/responses`;
@@ -121,10 +141,7 @@ export class OpenAIResponsesProvider implements Provider {
     }
 
     if (funcTool && !funcTool.empty()) {
-      body.tools = funcTool.openaiSchema(true).map((t) => ({
-        type: "function",
-        ...t,
-      }));
+      body.tools = toResponsesTools(funcTool);
     }
 
     const url = `${this.baseUrl}/responses`;

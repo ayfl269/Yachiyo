@@ -506,13 +506,18 @@ export class GeminiProvider implements Provider {
       const toolCallArgs: Record<string, unknown>[] = [];
       const toolCallExtra: (Record<string, unknown> | undefined)[] = [];
       let reasoningSignature: string | undefined;
+      let functionCallIndex = 0;
 
       for (const part of parts) {
         const signature = typeof part.thoughtSignature === "string" ? part.thoughtSignature : undefined;
 
         if (part.functionCall) {
           const fc = part.functionCall as Record<string, unknown>;
-          toolCallIds.push(`gemini_fc_${fc.name}`);
+          // Suffix each id with its ordinal: parallel calls to the SAME function
+          // otherwise collide on `gemini_fc_<name>` and tool results can no
+          // longer be matched back to their call. The `__idx_<n>` suffix is
+          // stripped by gemini-converter.ts on replay.
+          toolCallIds.push(`gemini_fc_${fc.name}__idx_${functionCallIndex++}`);
           toolCallNames.push(fc.name as string);
           toolCallArgs.push((fc.args as Record<string, unknown>) ?? {});
           // A functionCall part may carry its own thoughtSignature which must

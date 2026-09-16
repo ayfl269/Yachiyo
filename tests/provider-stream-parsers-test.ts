@@ -157,6 +157,32 @@ async function testGeminiStream() {
   const chunk = results3[0];
   assert(chunk.reasoningContent === "thinking part" && chunk.completionText === "answer part",
     "同 chunk 多 part 时思考与正文各自归位");
+
+  // Gemini 每个 chunk 都带 usageMetadata。若把 usage 挂在中间 chunk 上，
+  // agent runner 会在读到该 chunk 后当作终结响应提前 break，导致正文被截断。
+  // 正确行为：中间 chunk 不带 usage，只在流末尾产出一次终结 usage。
+  const chunks4 = [
+    JSON.stringify({ candidates: [{ content: { parts: [{ text: "Hello " }] } }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 1, totalTokenCount: 11 } }),
+    JSON.stringify({ candidates: [{ content: { parts: [{ text: "world" }] } }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2, totalTokenCount: 12 } }),
+    JSON.stringify({ candidates: [{ content: { parts: [{ text: "!" }] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 3, totalTokenCount: 13, cachedContentTokenCount: 8 } }),
+  ];
+  const results4 = await collect(parseGeminiStream(sseResponse(chunks4)));
+  const usageCarriers = results4.filter((r) => r.usage);
+  assert(usageCarriers.length === 1, `中间 chunk 不得携带 usage（期望仅 1 个终结 usage，实际 ${usageCarriers.length}）`);
+  assert(usageCarriers[0].isChunk === false, "usage 仅出现在终结（非 chunk）响应上");
+  assert(usageCarriers[0].usage?.total === 13, "终结 usage 取最后一次累计值");
+  assert(usageCarriers[0].usage?.cacheReadInputTokens === 8, "Gemini 流式捕获 cachedContentTokenCount");
+  const text4 = results4.filter((r) => r.completionText).map((r) => r.completionText).join("");
+  assert(text4 === "Hello world!", "usage 不再截断流式正文");
+
+  // 工具调用 chunk 本身是 runner 的终结信号，usage 必须搭车携带，
+  // 否则工具轮次的 token 统计会丢失。
+  const chunks5 = [
+    JSON.stringify({ candidates: [{ content: { parts: [{ functionCall: { name: "f", args: {} } }] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 2, totalTokenCount: 7 } }),
+  ];
+  const results5 = await collect(parseGeminiStream(sseResponse(chunks5)));
+  const toolChunk = results5.find((r) => r.toolsCallName?.length);
+  assert(toolChunk?.usage?.total === 7, "工具调用 chunk 携带 usage（工具轮次统计不丢失）");
 }
 
 // ── 3. Anthropic 流式：thinking_delta 分离 ──

@@ -52,7 +52,12 @@ export function contentPartToResponsesContent(part: ContentPart): ResponsesConte
     case "text":
       return { type: "input_text", text: part.text };
     case "think":
-      return { type: "input_text", text: `[Thinking] ${part.think}` };
+      // Responses has no field to replay a prior turn's reasoning as plain
+      // text, and splicing it in as `[Thinking] ...` pollutes the model's
+      // context (and can surface in replies). Encrypted reasoning is replayed
+      // through its own `reasoning` item, not as message content, so drop it
+      // here — matching the Anthropic/Gemini converters.
+      return null;
     case "image_url":
       return { type: "input_image", image_url: part.image_url.url };
     case "audio_url":
@@ -135,15 +140,23 @@ export function messageToResponsesInput(messages: Message[]): ResponsesConversio
     }
 
     // user / assistant messages
-    const item: ResponsesMessage = {
-      role: msg.role as "user" | "assistant",
-      content: convertContent(msg.content),
-    };
-    input.push(item);
+    const content = convertContent(msg.content);
+    const hasToolCalls = msg.role === "assistant" && !!msg.tool_calls?.length;
+    // The Responses API requires `content` on message items. An assistant turn
+    // that only requested tools has no text content, so emitting a message item
+    // with `content: undefined` is invalid — the function_call items below
+    // already represent that turn. Skip the empty message.
+    if (content !== undefined || !hasToolCalls) {
+      const item: ResponsesMessage = {
+        role: msg.role as "user" | "assistant",
+        content,
+      };
+      input.push(item);
+    }
 
     // Assistant tool calls → function_call items
-    if (msg.role === "assistant" && msg.tool_calls) {
-      const calls = extractFunctionCalls(msg.tool_calls);
+    if (hasToolCalls) {
+      const calls = extractFunctionCalls(msg.tool_calls!);
       input.push(...calls);
     }
   }
