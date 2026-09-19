@@ -114,6 +114,15 @@ export class ConversationManager {
 
     await this.store.deleteConversation(cid);
 
+    // The memory indices for this conversation live in the memory DB (a
+    // different database), so clean them up here to avoid orphan index rows
+    // pointing at a deleted conversation.
+    try {
+      this.memoryConsolidator?.removeConversationIndices(cid);
+    } catch (e) {
+      console.warn(`[ConversationManager] Failed to remove memory indices for conversation ${cid}:`, e);
+    }
+
     const currentSession = await this.store.getSessionConversation(umo);
     if (currentSession === cid) {
       await this.store.deleteSessionConversation(umo);

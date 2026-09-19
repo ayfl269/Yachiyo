@@ -128,6 +128,18 @@ export class MemoryConsolidator {
   private consolidating = false;
   /** Active timer configuration to prevent redundant restarts */
   private activeTimerConfig: { interval: string; enabled: boolean; memoryEnabled?: boolean } | null = null;
+  /**
+   * Set by stop(). Checked in runConsolidateSafe's `finally` so a stop() that
+   * lands while a run is in flight is not undone by the reschedule.
+   */
+  private stopped = false;
+
+  /**
+   * How many unindexed conversations to pull per run. Each run advances the
+   * watermark of every conversation it inspects (including below-threshold
+   * ones), so a larger batch drains the backlog without starving older rows.
+   */
+  private static readonly CONVERSATION_INDEX_BATCH_SIZE = 20;
 
   constructor(
     store: SqliteMemoryStore,
@@ -208,15 +220,9 @@ export class MemoryConsolidator {
         extractionFailed: false,
       };
 
-      let extractionSkipped = false;
-      // Whether real extraction work was attempted this run. Used to decide if
-      // the attempt timestamp should be written (see recordConsolidateAttempt).
-      let extractionAttempted = false;
-
       // Step 1: Extract memories from recent conversations (if provider available)
       // On failure, skip extraction and preserve short-term buffer for retry
       if (this.provider) {
-        extractionAttempted = true;
         const extractionResult = await this.extractFromConversations(options?.force);
         if (extractionResult.failed) {
           result.extractionFailed = true;
@@ -238,12 +244,10 @@ export class MemoryConsolidator {
           this.consecutiveFailures = 0;
         } else {
           result.extracted = extractionResult.count;
-          extractionSkipped = !!extractionResult.skipped;
           this.consecutiveFailures = 0;
         }
       } else {
         console.warn("[MemoryConsolidator] Skipping extraction: No LLM provider is configured on the consolidator.");
-        extractionSkipped = true;
       }
 
       // Step 2: Deduplicate and merge similar memories
@@ -264,14 +268,14 @@ export class MemoryConsolidator {
         (result.extractionFailed ? " (extraction failed, buffer preserved)" : "")
       );
 
-      // Record the attempt timestamp whenever extraction actually ran and the
-      // outcome was not a no-op skip. This must include failures: a missing
-      // timestamp is treated by checkAndConsolidate() as "never consolidated",
-      // so a persistently failing provider would otherwise be retried on every
-      // single message with no backoff.
-      if (extractionAttempted && !extractionSkipped) {
-        this.recordConsolidateAttempt();
-      }
+      // Always record the attempt timestamp once the pipeline completes.
+      // checkAndConsolidate() treats a missing timestamp as "never
+      // consolidated" (condition 1 is true when lastTimeMs === 0), so any run
+      // that did not record — a skip (no unindexed conversations) or a failure
+      // — would be retried on every single incoming message, re-running the
+      // expensive dedup/aging pass each time. Recording here throttles the
+      // whole pipeline (including dedup/aging) to the configured interval.
+      this.recordConsolidateAttempt();
 
       return result;
     } finally {
@@ -317,6 +321,16 @@ export class MemoryConsolidator {
   }
 
   /**
+   * Remove the memory indices belonging to a conversation. Called when the
+   * conversation is deleted so no index rows are left dangling. The index
+   * table lives in the memory DB, separate from the conversation store, which
+   * is why this is routed through the consolidator (which owns the store).
+   */
+  removeConversationIndices(conversationId: string): number {
+    return this.store.deleteConversationIndicesByConversation(conversationId);
+  }
+
+  /**
    * Extract memories from conversation history using LLM.
    * Prioritizes full conversation logs via conversationSource, falling back to legacy short-term buffer.
    * Returns extraction count and failure status.
@@ -329,70 +343,92 @@ export class MemoryConsolidator {
 
     // 1. 优先尝试从真实会话数据源（ConversationStore）处理未建立索引的会话
     if (this.conversationSource) {
+      let unindexed: Awaited<ReturnType<ConversationSourceProvider["getUnindexedConversations"]>>;
       try {
-        const unindexed = await this.conversationSource.getUnindexedConversations(5);
-        if (unindexed.length > 0) {
-          let totalExtracted = 0;
-          let anyFailed = false;
+        unindexed = await this.conversationSource.getUnindexedConversations(
+          MemoryConsolidator.CONVERSATION_INDEX_BATCH_SIZE,
+        );
+      } catch (e) {
+        // A failure to even read the conversation source is an extraction
+        // failure: report it as such so the caller backs off (records the
+        // attempt) instead of silently degrading to the legacy path and
+        // returning `skipped`, which retried on every single message.
+        console.error("[MemoryConsolidator] Failed to read conversationSource:", e);
+        return { count: 0, failed: true };
+      }
 
-          for (const conv of unindexed) {
-            let messages: Array<{ role: string; content?: string }> = [];
-            try {
-              messages = JSON.parse(conv.history);
-            } catch {
-              messages = [];
-            }
-            if (!Array.isArray(messages) || messages.length === 0) {
-              await this.conversationSource.updateLastIndexedAt(conv.id, new Date());
-              continue;
-            }
+      if (unindexed.length > 0) {
+        let totalExtracted = 0;
+        let anyFailed = false;
 
-            const bufferTexts: string[] = [];
-            for (const msg of messages) {
-              if (msg.role === "system") continue;
-              const content = typeof msg.content === "string" ? msg.content.trim() : "";
-              if (!content) continue;
-              const roleName = msg.role === "user" ? "用户" : "AI";
-              bufferTexts.push(`${roleName}：${content}`);
-            }
+        for (const conv of unindexed) {
+          // Advance the watermark to the SNAPSHOT's updatedAt, not `now`.
+          // Using `now` could skip messages written while the LLM call was in
+          // flight (their updated_at lies between the snapshot and now), so
+          // they would never be indexed. Snapshot time guarantees any later
+          // write still satisfies `updated_at > last_indexed_at`.
+          const snapshotAt = conv.updatedAt ?? new Date();
 
-            const minMessages = force ? 1 : this.config.bufferMinMessages;
-            if (bufferTexts.length < minMessages) {
-              continue;
-            }
-
-            console.log(`[MemoryConsolidator] Extracting memory index from conversation ${conv.id} (${bufferTexts.length} messages)`);
-
-            const res = await this.extractMemoriesAndIndexFromTexts(bufferTexts, {
-              conversationId: conv.id,
-              startTime: conv.createdAt ? new Date(conv.createdAt).toISOString() : undefined,
-              endTime: conv.updatedAt ? new Date(conv.updatedAt).toISOString() : undefined,
-              messageCount: bufferTexts.length,
-            });
-
-            if (res.failed) {
-              anyFailed = true;
-              break;
-            } else {
-              totalExtracted += res.count;
-              await this.conversationSource.updateLastIndexedAt(conv.id, new Date());
-            }
+          let messages: Array<{ role: string; content?: string }> = [];
+          try {
+            messages = JSON.parse(conv.history);
+          } catch {
+            messages = [];
+          }
+          if (!Array.isArray(messages) || messages.length === 0) {
+            await this.conversationSource.updateLastIndexedAt(conv.id, snapshotAt);
+            continue;
           }
 
-          // Report the outcome unconditionally. Previously a first-conversation
-          // failure (totalExtracted === 0 && anyFailed) fell through to the
-          // legacy short-term buffer path below, which returned
-          // `{failed:false, skipped:true}` — masking the failure, resetting
-          // consecutiveFailures and scheduling an immediate (unthrottled)
-          // retry on the next message.
-          return {
-            count: totalExtracted,
-            failed: anyFailed,
-            skipped: totalExtracted === 0 && !anyFailed,
-          };
+          const bufferTexts: string[] = [];
+          for (const msg of messages) {
+            if (msg.role === "system") continue;
+            const content = typeof msg.content === "string" ? msg.content.trim() : "";
+            if (!content) continue;
+            const roleName = msg.role === "user" ? "用户" : "AI";
+            bufferTexts.push(`${roleName}：${content}`);
+          }
+
+          const minMessages = force ? 1 : this.config.bufferMinMessages;
+          if (bufferTexts.length < minMessages) {
+            // Advance the watermark for below-threshold conversations too.
+            // Otherwise they are returned as "unindexed" on every run and fill
+            // the batch, starving older-but-qualifying conversations forever
+            // (the query orders by updated_at ASC). They are re-considered once
+            // they grow, since updated_at then advances past this watermark.
+            await this.conversationSource.updateLastIndexedAt(conv.id, snapshotAt);
+            continue;
+          }
+
+          console.log(`[MemoryConsolidator] Extracting memory index from conversation ${conv.id} (${bufferTexts.length} messages)`);
+
+          const res = await this.extractMemoriesAndIndexFromTexts(bufferTexts, {
+            conversationId: conv.id,
+            startTime: conv.createdAt ? new Date(conv.createdAt).toISOString() : undefined,
+            endTime: conv.updatedAt ? new Date(conv.updatedAt).toISOString() : undefined,
+            messageCount: bufferTexts.length,
+          });
+
+          if (res.failed) {
+            anyFailed = true;
+            break;
+          } else {
+            totalExtracted += res.count;
+            await this.conversationSource.updateLastIndexedAt(conv.id, snapshotAt);
+          }
         }
-      } catch (e) {
-        console.warn("[MemoryConsolidator] Failed to extract from conversationSource, checking legacy fallback:", e);
+
+        // Report the outcome unconditionally. Previously a first-conversation
+        // failure (totalExtracted === 0 && anyFailed) fell through to the
+        // legacy short-term buffer path below, which returned
+        // `{failed:false, skipped:true}` — masking the failure, resetting
+        // consecutiveFailures and scheduling an immediate (unthrottled)
+        // retry on the next message.
+        return {
+          count: totalExtracted,
+          failed: anyFailed,
+          skipped: totalExtracted === 0 && !anyFailed,
+        };
       }
     }
 
@@ -869,6 +905,7 @@ ${bufferTexts.join("\n")}
 
   /** 启动周期性记忆整理，使用 config.interval 控制频率（幂等，重复调用安全） */
   startPeriodic(): void {
+    this.stopped = false;
     const wasRunning = this.isRunning();
     const currentTimerConfig = {
       interval: this.config.interval,
@@ -895,6 +932,7 @@ ${bufferTexts.join("\n")}
 
   /** 停止周期性记忆整理 */
   stop(): void {
+    this.stopped = true;
     if (this.timerHandle) {
       clearTimeout(this.timerHandle);
       this.timerHandle = null;
@@ -920,7 +958,9 @@ ${bufferTexts.join("\n")}
     } catch (e) {
       console.error("[MemoryConsolidator] 整理异常:", e);
     } finally {
-      this.scheduleNextCheck();
+      // Do not reschedule if stop() was called while this run was in flight —
+      // otherwise the stop is silently undone and the timer keeps firing.
+      if (!this.stopped) this.scheduleNextCheck();
     }
   }
 

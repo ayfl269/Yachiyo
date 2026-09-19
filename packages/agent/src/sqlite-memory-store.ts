@@ -1302,21 +1302,33 @@ export class SqliteMemoryStore {
     messageCount?: number;
   }): number {
     const now = new Date().toISOString();
-    const result = this.db.prepare(`
-      INSERT INTO conversation_indices (title, topics, conversation_id, timestamp, summary, start_time, end_time, message_count, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      entry.title,
-      JSON.stringify(entry.topics),
-      entry.conversationId ?? "",
-      entry.timestamp ?? now,
-      entry.summary ?? "",
-      entry.startTime ?? null,
-      entry.endTime ?? null,
-      entry.messageCount ?? 0,
-      now,
-    );
-    return Number(result.lastInsertRowid);
+    // A conversation is re-indexed whenever it changes after its last index
+    // (getUnindexedConversations compares updated_at vs last_indexed_at), so a
+    // plain INSERT accumulated one stale row per update forever. Replace the
+    // conversation's existing index instead — one current row per conversation.
+    // Rows with no conversationId (legacy short-term path) have no identity to
+    // replace and are always inserted.
+    return this.db.transaction(() => {
+      const conversationId = entry.conversationId ?? "";
+      if (conversationId) {
+        this.db.prepare("DELETE FROM conversation_indices WHERE conversation_id = ?").run(conversationId);
+      }
+      const result = this.db.prepare(`
+        INSERT INTO conversation_indices (title, topics, conversation_id, timestamp, summary, start_time, end_time, message_count, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        entry.title,
+        JSON.stringify(entry.topics),
+        conversationId,
+        entry.timestamp ?? now,
+        entry.summary ?? "",
+        entry.startTime ?? null,
+        entry.endTime ?? null,
+        entry.messageCount ?? 0,
+        now,
+      );
+      return Number(result.lastInsertRowid);
+    })();
   }
 
   /**
@@ -1373,6 +1385,17 @@ export class SqliteMemoryStore {
   deleteConversationIndex(id: number): boolean {
     const result = this.db.prepare("DELETE FROM conversation_indices WHERE id = ?").run(id);
     return result.changes > 0;
+  }
+
+  /**
+   * Delete all indices for a conversation. Called when the conversation itself
+   * is deleted, so no index rows are left pointing at a conversation that no
+   * longer exists.
+   */
+  deleteConversationIndicesByConversation(conversationId: string): number {
+    if (!conversationId) return 0;
+    const result = this.db.prepare("DELETE FROM conversation_indices WHERE conversation_id = ?").run(conversationId);
+    return result.changes;
   }
 
   /**

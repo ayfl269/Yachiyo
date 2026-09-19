@@ -2422,6 +2422,13 @@ export class DashboardServer {
       if (store) {
         await store.deleteConversation(id);
       }
+      // Clean up this conversation's memory indices (separate memory DB) so no
+      // index rows are left pointing at a deleted conversation.
+      try {
+        this.ctx.memoryConsolidator.removeConversationIndices(id);
+      } catch (e) {
+        console.warn(`[Dashboard] Failed to remove memory indices for conversation ${id}:`, e);
+      }
       res.writeHead(200);
       res.end(JSON.stringify({ success: true }));
       return;
