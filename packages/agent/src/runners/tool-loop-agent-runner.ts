@@ -175,6 +175,8 @@ export interface ToolLoopResetParams<TContext = unknown> {
   toolExecutor: BaseFunctionToolExecutor<TContext>;
   agentHooks: BaseAgentRunHooks<TContext>;
   streaming?: boolean;
+  /** 是否启用提供商级提示缓存（透传给 ProviderChatParams.enableCaching）。 */
+  providerCaching?: boolean;
   enforceMaxTurns?: number;
   llmCompressInstruction?: string;
   llmCompressKeepRecent?: number;
@@ -197,6 +199,8 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
   /** 记录原始（首次选择的）provider，用于统计和日志，fallback 切换后仍保留 */
   private originalProvider!: Provider;
   private streaming = false;
+  /** 提供商级提示缓存开关，透传到每次 LLM 调用的 enableCaching。 */
+  private providerCaching = false;
   private toolExecutor!: BaseFunctionToolExecutor<TContext>;
   private agentHooks!: BaseAgentRunHooks<TContext>;
   private runContext!: ContextWrapper<TContext>;
@@ -277,6 +281,7 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
 
     this.req = params.request;
     this.streaming = params.streaming ?? false;
+    this.providerCaching = params.providerCaching ?? false;
     this.provider = params.provider;
     this.originalProvider = params.provider; // 记录原始 provider，fallback 后不丢失
     this.finalLlmResp = null;
@@ -1264,6 +1269,7 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
         extraUserContentParts: this.req.extraUserContentParts,
         abortSignal: this.abortController.signal,
         temperature: this.req.temperature,
+        enableCaching: this.providerCaching,
       };
       if (options.includeModel) {
         payload.model = this.req.model;
@@ -2028,6 +2034,7 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
           sessionId: this.req.sessionId,
           extraUserContentParts: this.req.extraUserContentParts,
           abortSignal: this.abortController.signal,
+          enableCaching: this.providerCaching,
         });
 
         if (requeryResp) llmResp = requeryResp;
@@ -2045,6 +2052,7 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
             sessionId: this.req.sessionId,
             extraUserContentParts: this.req.extraUserContentParts,
             abortSignal: this.abortController.signal,
+            enableCaching: this.providerCaching,
           });
           if (repairResp) llmResp = repairResp;
         }

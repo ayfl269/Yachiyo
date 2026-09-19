@@ -1196,6 +1196,77 @@ async function testEmptyStreamRetry(): Promise<void> {
 }
 
 // ============================================================
+// 17. 测试: 提供商提示缓存开关透传（regression）
+// ============================================================
+
+async function testProviderCachingPlumbing(): Promise<void> {
+  console.log("\n=== 测试: 提供商提示缓存开关透传 ===");
+
+  // 主链路此前从不传 enableCaching，导致缓存功能对日常对话不可达。
+  // 验证 providerCaching 开关会被透传到每一次 LLM 调用的 enableCaching。
+  const seen: Array<boolean | undefined> = [];
+  const provider: Provider = {
+    type: "chat_completion",
+    providerConfig: { id: "caching-plumbing", maxContextTokens: 4096, modalities: ["text", "tool_use"] },
+    async textChat(params: ProviderChatParams): Promise<LLMResponse> {
+      seen.push(params.enableCaching);
+      return { role: "assistant", completionText: "ok", isChunk: false };
+    },
+  };
+
+  const runner = new ToolLoopAgentRunner();
+  const runContext = createContextWrapper<null>(null);
+  const hooks = new EmptyAgentHooks();
+  const executor = new FunctionToolExecutor();
+
+  await runner.reset(runContext, hooks, {
+    provider,
+    request: {
+      prompt: "hello",
+      imageUrls: [],
+      audioUrls: [],
+      contexts: [],
+      extraUserContentParts: [],
+    },
+    toolExecutor: executor,
+    agentHooks: hooks,
+    streaming: false,
+    providerCaching: true,
+  });
+  (runner as any).req.funcTool = new ToolSet([]);
+
+  for await (const _ of runner.stepUntilDone(5)) { void _; }
+
+  assert(seen.length > 0 && seen.every((v) => v === true), `providerCaching=true 透传 enableCaching=true（seen=${JSON.stringify(seen)}）`);
+
+  // 关闭时不得开启
+  const seen2: Array<boolean | undefined> = [];
+  const provider2: Provider = {
+    type: "chat_completion",
+    providerConfig: { id: "caching-off", maxContextTokens: 4096, modalities: ["text", "tool_use"] },
+    async textChat(params: ProviderChatParams): Promise<LLMResponse> {
+      seen2.push(params.enableCaching);
+      return { role: "assistant", completionText: "ok", isChunk: false };
+    },
+  };
+  const runner2 = new ToolLoopAgentRunner();
+  await runner2.reset(createContextWrapper<null>(null), hooks, {
+    provider: provider2,
+    request: { prompt: "hello", imageUrls: [], audioUrls: [], contexts: [], extraUserContentParts: [] },
+    toolExecutor: executor,
+    agentHooks: hooks,
+    streaming: false,
+    providerCaching: false,
+  });
+  (runner2 as any).req.funcTool = new ToolSet([]);
+  for await (const _ of runner2.stepUntilDone(5)) { void _; }
+
+  assert(seen2.length > 0 && seen2.every((v) => v === false), `providerCaching=false 透传 enableCaching=false（seen=${JSON.stringify(seen2)}）`);
+
+  console.log("  ✅ 提供商提示缓存开关透传测试通过");
+}
+
+// ============================================================
 // 运行所有测试
 // ============================================================
 
@@ -1224,6 +1295,7 @@ async function main(): Promise<void> {
     await testDynamicSubAgentCreate();
     await testInMemoryVectorStoreDimensionValidation();
     await testEmptyStreamRetry();
+    await testProviderCachingPlumbing();
 
     console.log("\n╔══════════════════════════════════════════╗");
     console.log(`║   通过: ${passCount}  失败: ${failCount}  跳过: ${skipCount}`.padEnd(46) + "║");

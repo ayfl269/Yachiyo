@@ -391,6 +391,11 @@ export class ProcessStage extends PipelineStage {
       }
 
       const providerRequest = event.requestLlm(prompt, {
+        // Session id is used by provider-side prompt caching (Gemini keys its
+        // server-side cachedContents by it). Without this every conversation
+        // fell back to the literal "default" key, so enabling caching would
+        // make all sessions share (and constantly evict) one cache.
+        sessionId: conv?.id ?? event.unifiedMsgOrigin,
         imageUrls: event.messageObj.components
           .filter((c): c is ImageComponent => c.type === ComponentType.Image)
           .map(c => c.url ?? c.file)
@@ -435,18 +440,23 @@ export class ProcessStage extends PipelineStage {
       const enableStreaming = event.getExtra<boolean>("enable_streaming") ?? true;
       const modelStreaming = this.ctx.config.modelStreaming ?? true;
       const useStreaming = enableStreaming && modelStreaming;
-    const result = await buildMainAgent({
-      provider,
-      request: providerRequest,
-      context: event,
-      toolManager: this.ctx.toolManager,
-      fallbackProviders,
-      config: {
-        streaming: useStreaming,
-      },
-    });
+      // 提供商级提示缓存，默认开启。对 OpenAI/Responses 无影响（服务端自动
+      // 缓存）；仅 Anthropic/Gemini 会改变请求体。存量 config blob 无该字段
+      // 时按开启处理，用户可在 Dashboard 关闭。
+      const providerCaching = this.ctx.config.providerCachingEnabled ?? true;
+      const result = await buildMainAgent({
+        provider,
+        request: providerRequest,
+        context: event,
+        toolManager: this.ctx.toolManager,
+        fallbackProviders,
+        config: {
+          streaming: useStreaming,
+          providerCaching,
+        },
+      });
 
-    return result;
+      return result;
     } catch (e) {
       // Real errors must NOT be collapsed into "no provider available" (null) —
       // that misleads debugging into blaming provider configuration (#89).

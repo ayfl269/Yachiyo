@@ -18,6 +18,7 @@ interface AgentConfig {
   pathMappings: [string, string][]
   sttEnabled: boolean
   modelStreaming: boolean
+  providerCachingEnabled: boolean
   maxStep: number
   maxContextLength: number
   toolCallTimeout: number
@@ -752,6 +753,20 @@ export default function ConfigManager() {
                   id="modelStreaming"
                 />
                 <label htmlFor="modelStreaming">启用模型流式输出 (Model Stream)</label>
+              </div>
+              <div className="form-group row-checkbox">
+                <input
+                  type="checkbox"
+                  checked={config.providerCachingEnabled ?? true}
+                  onChange={(e) => updateField('providerCachingEnabled', e.target.checked)}
+                  id="providerCachingEnabled"
+                />
+                <label htmlFor="providerCachingEnabled">
+                  启用提示缓存 (Prompt Caching)
+                  <span className="text-muted text-xs" style={{ display: 'block' }}>
+                    仅对 Anthropic（cache_control）与 Gemini（上下文缓存）生效；OpenAI 服务端自动缓存
+                  </span>
+                </label>
               </div>
             </div>
           )}

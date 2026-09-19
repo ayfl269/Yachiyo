@@ -16,6 +16,13 @@ export interface AgentConfig {
   pathMappings: [string, string][];
   sttEnabled: boolean;
   modelStreaming: boolean;
+  /**
+   * 是否为主对话链路启用提供商级提示缓存。
+   * - Anthropic: 在 system/工具/消息块上添加 cache_control（ephemeral）
+   * - Gemini: 超过 cacheThreshold 时创建服务端上下文缓存
+   * - OpenAI / Responses: 服务端自动缓存，此开关无影响（仅影响统计读取）
+   */
+  providerCachingEnabled: boolean;
   maxStep: number;
   maxContextLength: number;
   toolCallTimeout: number;
@@ -229,6 +236,7 @@ export class ConfigManager {
       pathMappings: [],
       sttEnabled: false,
       modelStreaming: true,
+      providerCachingEnabled: true,
       maxStep: 30,
       maxContextLength: 8000,
       toolCallTimeout: 120000,

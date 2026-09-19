@@ -17,6 +17,8 @@ export interface MainAgentBuildConfig {
   providerWakePrefix?: string;
   /** LLM 调用本身是否流式（textChatStream vs textChat）。默认 true。 */
   streaming?: boolean;
+  /** 是否启用提供商级提示缓存（Anthropic cache_control / Gemini context cache）。 */
+  providerCaching?: boolean;
   sanitizeContextByModalities?: boolean;
   kbAgenticMode?: boolean;
   contextLimitReachedStrategy?: "truncate_by_turns" | "llm_compress";
@@ -173,6 +175,7 @@ export async function buildMainAgent<TContext = unknown>(
     toolExecutor: toolExecutor ?? new FunctionToolExecutor(),
     agentHooks: agentHooks ?? new EmptyAgentHooks(),
     streaming: config.streaming ?? true,
+    providerCaching: config.providerCaching ?? false,
     enforceMaxTurns: config.enforceMaxTurns ?? -1,
     llmCompressInstruction: config.llmCompressInstruction,
     llmCompressKeepRecent: config.llmCompressKeepRecent,
