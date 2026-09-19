@@ -905,7 +905,6 @@ ${bufferTexts.join("\n")}
 
   /** 启动周期性记忆整理，使用 config.interval 控制频率（幂等，重复调用安全） */
   startPeriodic(): void {
-    this.stopped = false;
     const wasRunning = this.isRunning();
     const currentTimerConfig = {
       interval: this.config.interval,
@@ -921,6 +920,10 @@ ${bufferTexts.join("\n")}
     }
 
     this.stop();
+    // Must come AFTER stop(): stop() sets stopped=true, and leaving it set
+    // would make runConsolidateSafe's finally skip the reschedule — the timer
+    // would fire exactly once and then never again.
+    this.stopped = false;
     this.activeTimerConfig = currentTimerConfig;
 
     if (!this.config.enabled || this.config.memoryEnabled === false) return;
