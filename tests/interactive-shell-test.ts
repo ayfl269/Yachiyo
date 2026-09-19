@@ -98,6 +98,12 @@ async function readUntilFound(
     } else {
       if (pattern.test(accumulated)) return accumulated;
     }
+    // Once the since-read buffer is non-empty, interactiveShellRead resolves
+    // without awaiting a timer, so this loop would otherwise only await
+    // already-resolved promises. That starves Node's I/O phase (the child's
+    // stdout 'data' events stop firing mid-stream). Yield to the macrotask
+    // queue so output keeps flowing.
+    await sleep(20);
   }
   throw new Error(`readUntilFound: 在 ${timeoutMs}ms 内未找到模式 ${pattern}, 已读取: ${JSON.stringify(accumulated.slice(-200))}`);
 }

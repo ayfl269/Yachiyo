@@ -13,7 +13,7 @@
 
 import type Database from "better-sqlite3";
 import type { Migration } from "@yachiyo/common/database.js";
-import type { AdapterConfigBase } from "@yachiyo/platform/config.js";
+import type { AdapterConfigBase } from "./config.js";
 
 // ── Migrations ──
 

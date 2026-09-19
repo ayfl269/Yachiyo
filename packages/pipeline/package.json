@@ -27,6 +27,7 @@
     "@yachiyo/knowledge-base": "workspace:*",
     "@yachiyo/message": "workspace:*",
     "@yachiyo/persona": "workspace:*",
+    "@yachiyo/platform": "workspace:*",
     "@yachiyo/plugin": "workspace:*",
     "@yachiyo/provider": "workspace:*",
     "@yachiyo/skill": "workspace:*",

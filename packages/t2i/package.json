@@ -17,6 +17,9 @@
   "scripts": {
     "build": "tsc"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@yachiyo/common": "workspace:*",
+    "playwright": "^1.60.0"
+  },
   "devDependencies": {}
 }
