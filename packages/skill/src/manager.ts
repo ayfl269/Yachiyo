@@ -1,6 +1,6 @@
 import type { SqliteSkillStore } from "@yachiyo/config/sqlite-config-extras-store.js";
 import { readdir, readFile } from "fs/promises";
-import { join, dirname, resolve, relative, isAbsolute } from "path";
+import { join, resolve, relative, isAbsolute } from "path";
 import { existsSync } from "fs";
 import type { SkillInfo } from "@yachiyo/common/skill-types.js";
 
@@ -74,37 +74,37 @@ export class SkillManager {
   }
 
   private async scanRootSkillsMd(): Promise<void> {
-    const candidates = [this.skillsRoot, dirname(this.skillsRoot)];
-    for (const base of candidates) {
-      if (!base || !existsSync(base)) continue;
-      const mdPath = join(base, SKILLS_MD_FILENAME);
-      if (!existsSync(mdPath)) continue;
+    // Only scan the configured skills root. Previously this also scanned
+    // `dirname(skillsRoot)`, pulling a `skills.md` from the data directory's
+    // parent — outside the declared skill root and surprising for operators.
+    const base = this.skillsRoot;
+    if (!base || !existsSync(base)) return;
+    const mdPath = join(base, SKILLS_MD_FILENAME);
+    if (!existsSync(mdPath)) return;
 
-      try {
-        const content = await readFile(mdPath, "utf-8");
-        const parsed = this.parseSkillsMdContent(content);
-        for (const skill of parsed) {
-          const existing = this.skills.get(skill.name);
-          const info: SkillInfo = {
-            name: skill.name,
-            description: skill.description,
-            path: mdPath,
-            active: existing?.active ?? (skill.active ?? true),
-            sourceType: "local",
-            sourceLabel: "Local Skills",
-            localExists: true,
-            sandboxExists: false,
-            pluginName: "",
-            readonly: skill.readonly ?? false,
-          };
-          this.skills.set(info.name, info);
-          this.sqliteStore?.saveSkill(info);
-        }
-        console.log(`[SkillManager] Loaded ${parsed.length} skills from ${mdPath}`);
-        return;
-      } catch (e) {
-        console.warn(`[SkillManager] Failed to parse ${mdPath}: ${e}`);
+    try {
+      const content = await readFile(mdPath, "utf-8");
+      const parsed = this.parseSkillsMdContent(content);
+      for (const skill of parsed) {
+        const existing = this.skills.get(skill.name);
+        const info: SkillInfo = {
+          name: skill.name,
+          description: skill.description,
+          path: mdPath,
+          active: existing?.active ?? (skill.active ?? true),
+          sourceType: "local",
+          sourceLabel: "Local Skills",
+          localExists: true,
+          sandboxExists: false,
+          pluginName: "",
+          readonly: skill.readonly ?? false,
+        };
+        this.skills.set(info.name, info);
+        this.sqliteStore?.saveSkill(info);
       }
+      console.log(`[SkillManager] Loaded ${parsed.length} skills from ${mdPath}`);
+    } catch (e) {
+      console.warn(`[SkillManager] Failed to parse ${mdPath}: ${e}`);
     }
   }
 
@@ -113,13 +113,18 @@ export class SkillManager {
     const lines = content.split(/\r?\n/);
     let i = 0;
 
+    // Allow leading blank lines before the YAML frontmatter delimiter; a file
+    // starting with "\n---" previously failed frontmatter detection entirely.
+    const firstContentIdx = lines.findIndex((l) => l.trim() !== "");
+    if (firstContentIdx > 0) i = firstContentIdx;
+
     while (i < lines.length) {
       const line = lines[i].trim();
 
-      if (line.startsWith("---") && i === 0) {
-        const endIdx = lines.indexOf("---", 1);
-        if (endIdx > 0) {
-          const frontmatter = lines.slice(1, endIdx).join("\n");
+      if (line.startsWith("---") && i === firstContentIdx) {
+        const endIdx = lines.indexOf("---", firstContentIdx + 1);
+        if (endIdx > firstContentIdx) {
+          const frontmatter = lines.slice(firstContentIdx + 1, endIdx).join("\n");
           const bodyStart = endIdx + 1;
           const body = lines.slice(bodyStart).join("\n").trim();
 
@@ -360,12 +365,17 @@ export class SkillManager {
   private parseSkillMdContent(content: string, fallbackName: string): Partial<SkillManifest> {
     const lines = content.split(/\r?\n/);
     let hasFrontmatter = false;
+    let frontmatterStart = -1;
     let frontmatterEnd = -1;
 
-    if (lines[0]?.trim() === "---") {
-      const endIdx = lines.indexOf("---", 1);
-      if (endIdx > 0) {
+    // Allow leading blank lines before the opening `---`: files that begin
+    // with a blank line previously had their frontmatter ignored entirely.
+    const firstContentIdx = lines.findIndex((l) => l.trim() !== "");
+    if (firstContentIdx >= 0 && lines[firstContentIdx].trim() === "---") {
+      const endIdx = lines.indexOf("---", firstContentIdx + 1);
+      if (endIdx > firstContentIdx) {
         hasFrontmatter = true;
+        frontmatterStart = firstContentIdx;
         frontmatterEnd = endIdx;
       }
     }
@@ -373,7 +383,7 @@ export class SkillManager {
     const result: Partial<SkillManifest> = {};
 
     if (hasFrontmatter) {
-      const yamlText = lines.slice(1, frontmatterEnd).join("\n");
+      const yamlText = lines.slice(frontmatterStart + 1, frontmatterEnd).join("\n");
       const fm = this.parseYamlFrontmatter(yamlText);
       if (fm.name) result.name = String(fm.name);
       if (fm.description) result.description = String(fm.description);
@@ -411,11 +421,7 @@ export class SkillManager {
     return result;
   }
 
-  listSkills(options?: {
-    activeOnly?: boolean;
-    runtime?: string;
-    showSandboxPath?: boolean;
-  }): SkillInfo[] {
+  listSkills(options?: { activeOnly?: boolean }): SkillInfo[] {
     let results = [...this.skills.values()];
     if (options?.activeOnly) {
       results = results.filter(s => s.active);
@@ -442,8 +448,24 @@ export class SkillManager {
   }
 }
 
+/**
+ * Collapse a skill name/description into a single line and neutralize list
+ * markers, so skill metadata (which can originate from an uploaded SKILL.md or
+ * manifest.json) cannot inject additional prompt lines or fake skill entries.
+ */
+function sanitizePromptField(value: string): string {
+  return value
+    .replace(/[\r\n\u2028\u2029]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function buildSkillsPrompt(skills: SkillInfo[]): string {
   if (skills.length === 0) return "";
-  const lines = skills.map(s => `- ${s.name}: ${s.description}`);
+  const lines = skills.map(s => {
+    const name = sanitizePromptField(s.name);
+    const description = sanitizePromptField(s.description);
+    return `- ${name}: ${description}`;
+  });
   return `Available skills:\n${lines.join("\n")}`;
 }

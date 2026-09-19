@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "http";
-import { join, extname, resolve, relative, isAbsolute } from "path";
-import { readFile, stat, writeFile, mkdir, unlink, readdir } from "fs/promises";
+import { join, extname, resolve, relative, isAbsolute, dirname } from "path";
+import { readFile, stat, writeFile, mkdir, unlink, readdir, rm } from "fs/promises";
 import { cpus, tmpdir, totalmem } from "os";
 import { timingSafeEqual, randomBytes, scryptSync, createHash } from "crypto";
 import { inflateRawSync } from "zlib";
@@ -113,6 +113,7 @@ interface ProviderRuntimeConfig {
 interface ZipEntry {
   name: string;
   entryName: string;
+  isDirectory?: boolean;
   /** Uncompressed size in bytes (adm-zip `header.size`); best-effort. */
   header?: { size?: number; method?: number };
   /** Compressed bytes as stored in the archive. */
@@ -127,6 +128,10 @@ interface ZipReader {
 /** Per-entry decompression cap for text metadata read from uploaded ZIPs. */
 const MAX_ZIP_READ_BYTES = 20 * 1024 * 1024;
 
+/** Per-entry and total uncompressed caps for uploaded skill ZIPs. */
+const MAX_ZIP_ENTRY_BYTES = 20 * 1024 * 1024; // 20 MB per entry
+const MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES = 100 * 1024 * 1024; // 100 MB total
+
 /**
  * Decompress a ZIP entry's text with a HARD output-size cap.
  *
@@ -136,25 +141,27 @@ const MAX_ZIP_READ_BYTES = 20 * 1024 * 1024;
  * so an oversized entry fails fast instead of exhausting memory. STORED
  * (method 0) entries are returned as-is after a length check.
  */
-function safeReadZipText(entry: ZipEntry): string {
+function safeReadZipBytes(entry: ZipEntry, maxBytes: number): Buffer {
   const method = entry.header?.method ?? 8;
   const compressed = entry.getCompressedData ? entry.getCompressedData() : null;
   if (!compressed) {
     throw new Error(`ZIP entry "${entry.entryName}" has no readable data`);
   }
   if (method === 0) {
-    if (compressed.length > MAX_ZIP_READ_BYTES) {
-      throw new Error(`ZIP entry "${entry.entryName}" exceeds the ${MAX_ZIP_READ_BYTES} byte read limit`);
+    if (compressed.length > maxBytes) {
+      throw new Error(`ZIP entry "${entry.entryName}" exceeds the ${maxBytes} byte read limit`);
     }
-    return compressed.toString("utf-8");
+    return compressed;
   }
-  let inflated: Buffer;
   try {
-    inflated = inflateRawSync(compressed, { maxOutputLength: MAX_ZIP_READ_BYTES });
+    return inflateRawSync(compressed, { maxOutputLength: maxBytes });
   } catch (e) {
     throw new Error(`ZIP entry "${entry.entryName}" failed to decompress within the size limit: ${e instanceof Error ? e.message : String(e)}`);
   }
-  return inflated.toString("utf-8");
+}
+
+function safeReadZipText(entry: ZipEntry): string {
+  return safeReadZipBytes(entry, MAX_ZIP_READ_BYTES).toString("utf-8");
 }
 
 export function isPathSafe(basePath: string, targetPath: string): boolean {
@@ -1613,8 +1620,16 @@ export class DashboardServer {
     }
 
     if (pathname.startsWith("/api/skills/") && req.method === "DELETE") {
-      const name = pathname.substring("/api/skills/".length);
-      this.ctx.skillManager.deleteSkill(decodeURIComponent(name));
+      const name = decodeURIComponent(pathname.substring("/api/skills/".length));
+      // Enforce readonly server-side: the UI hides the delete button, but a
+      // direct API call must not be able to remove a read-only skill.
+      const skill = this.ctx.skillManager.listSkills().find(s => s.name === name);
+      if (skill?.readonly) {
+        res.writeHead(403);
+        res.end(JSON.stringify({ error: "只读技能不可删除" }));
+        return;
+      }
+      this.ctx.skillManager.deleteSkill(name);
       res.writeHead(200);
       res.end(JSON.stringify({ success: true }));
       return;
@@ -3520,10 +3535,20 @@ export class DashboardServer {
         }
         const dirPath = join(skill.path, subPath);
         const entries = await readdir(dirPath, { withFileTypes: true });
-        const files = entries.map((e: { name: string; isDirectory: () => boolean }) => ({
-          name: e.name,
-          isDirectory: e.isDirectory(),
-          path: subPath ? `${subPath}/${e.name}` : e.name,
+        // Response contract consumed by the frontend file browser:
+        // `is_dir` (not `isDirectory`) and `size` for files. Keep them in sync.
+        const files = await Promise.all(entries.map(async (e) => {
+          const isDir = e.isDirectory();
+          let size: number | undefined;
+          if (!isDir) {
+            size = await stat(join(dirPath, e.name)).then((s) => s.size).catch(() => undefined);
+          }
+          return {
+            name: e.name,
+            is_dir: isDir,
+            size,
+            path: subPath ? `${subPath}/${e.name}` : e.name,
+          };
         }));
         res.writeHead(200);
         res.end(JSON.stringify(files));
@@ -3917,6 +3942,13 @@ export class DashboardServer {
         if (!skill?.path) {
           res.writeHead(404);
           res.end(JSON.stringify({ error: "Skill not found" }));
+          return;
+        }
+        // Enforce readonly server-side: the UI disables the editor, but a
+        // direct API call must not be able to modify a read-only skill's files.
+        if (skill.readonly) {
+          res.writeHead(403);
+          res.end(JSON.stringify({ error: "只读技能不可修改" }));
           return;
         }
         if (!isPathSafe(skill.path, filePath)) {
@@ -4978,8 +5010,8 @@ export class DashboardServer {
         // Decompression-bomb guard: check per-entry and total uncompressed
         // sizes (from the ZIP central directory) BEFORE any entry is
         // decompressed. A small .zip can otherwise expand to gigabytes.
-        const MAX_ZIP_ENTRY_BYTES = 20 * 1024 * 1024; // 20 MB per entry
-        const MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES = 100 * 1024 * 1024; // 100 MB total
+        // The per-entry cap is re-enforced during extraction (safeReadZipBytes)
+        // because these declared sizes are attacker-controlled.
         let totalUncompressed = 0;
         let oversizedEntry: string | null = null;
         for (const entry of entries) {
@@ -5031,13 +5063,31 @@ export class DashboardServer {
 
           if (hasSkillMd) {
             const parsed = this.parseZipRootSkills(zip, rootEntries);
-            for (const ps of parsed) {
-              const existing = this.ctx.skillManager.listSkills().find(s => s.name === ps.name);
-              if (existing) {
+            // Only extract when at least one skill is actually new; otherwise a
+            // duplicate upload would create an orphan directory on disk.
+            const newSkills = parsed.filter(ps => !this.ctx.skillManager.listSkills().some(s => s.name === ps.name));
+            if (newSkills.length > 0) {
+              const targetDir = await this.uniqueSkillDir(sanitizeSkillPathSegment(newSkills[0].name) || "uploaded-skill");
+              try {
+                await this.extractZipSkill(rootEntries, "", targetDir);
+              } catch (e) {
+                await rm(targetDir, { recursive: true, force: true }).catch(() => {});
+                throw e;
+              }
+              for (const ps of parsed) {
+                const existing = this.ctx.skillManager.listSkills().find(s => s.name === ps.name);
+                if (existing) {
+                  zipResult.skills.push({ name: ps.name, status: "skipped_duplicate", message: `已存在同名技能（描述: "${existing.description}"）` });
+                } else {
+                  ps.path = targetDir;
+                  this.ctx.skillManager.registerSkill(ps);
+                  zipResult.skills.push({ name: ps.name, status: "registered", message: `成功注册 - ${ps.description}` });
+                }
+              }
+            } else {
+              for (const ps of parsed) {
+                const existing = this.ctx.skillManager.listSkills().find(s => s.name === ps.name)!;
                 zipResult.skills.push({ name: ps.name, status: "skipped_duplicate", message: `已存在同名技能（描述: "${existing.description}"）` });
-              } else {
-                this.ctx.skillManager.registerSkill(ps);
-                zipResult.skills.push({ name: ps.name, status: "registered", message: `成功注册 - ${ps.description}` });
               }
             }
           } else {
@@ -5082,6 +5132,14 @@ export class DashboardServer {
             if (existing) {
               zipResult.skills.push({ name: parsed.name, status: "skipped_duplicate", message: `已存在同名技能（描述: "${existing.description}"）` });
             } else {
+              const targetDir = await this.uniqueSkillDir(dirName);
+              try {
+                await this.extractZipSkill(dirEntries, dirPrefix, targetDir);
+              } catch (e) {
+                await rm(targetDir, { recursive: true, force: true }).catch(() => {});
+                throw e;
+              }
+              parsed.path = targetDir;
               this.ctx.skillManager.registerSkill(parsed);
               zipResult.skills.push({ name: parsed.name, status: "registered", message: `${parsed.description || "注册成功"}` });
             }
@@ -5099,6 +5157,57 @@ export class DashboardServer {
     }
 
     return results;
+  }
+
+  /**
+   * Extract a skill's files from an uploaded ZIP into a directory on disk.
+   *
+   * Registered skills must have an ABSOLUTE `path` under `skillsRoot`: the
+   * dashboard file routes use it as a directory base, and the previous
+   * relative paths (e.g. `"skills.md"` / `"dir/"`) resolved against CWD, were
+   * rejected by isPathWithinRoots(), and had no files behind them anyway — so
+   * uploaded skills could never be browsed, edited or downloaded.
+   *
+   * `dirPrefix` is the ZIP entry prefix to strip ("" for root-level archives).
+   * Returns the number of files written.
+   */
+  private async extractZipSkill(
+    entries: ZipEntry[],
+    dirPrefix: string,
+    targetDir: string,
+  ): Promise<number> {
+    let written = 0;
+    for (const entry of entries) {
+      if (entry.isDirectory) continue;
+      const entryName = entry.entryName.replace(/\\/g, "/");
+      if (!entryName.startsWith(dirPrefix)) continue;
+      const rel = entryName.substring(dirPrefix.length);
+      if (!rel) continue;
+      const parts = rel.split("/").filter(Boolean);
+      if (parts.length === 0 || parts.some((p) => p === "." || p === "..")) continue;
+      const relPath = parts.join("/");
+      // Defense in depth: never write outside targetDir even if a segment
+      // slipped through the traversal check above.
+      if (!isPathSafe(targetDir, relPath)) continue;
+      const dest = join(targetDir, ...parts);
+      await mkdir(dirname(dest), { recursive: true });
+      const data = safeReadZipBytes(entry, MAX_ZIP_ENTRY_BYTES);
+      await writeFile(dest, data);
+      written++;
+    }
+    return written;
+  }
+
+  /** Pick a not-yet-existing directory under skillsRoot for a root-level upload. */
+  private async uniqueSkillDir(baseName: string): Promise<string> {
+    const root = this.ctx.skillManager.skillsRoot;
+    for (let i = 0; i < 10_000; i++) {
+      const candidate = i === 0 ? baseName : `${baseName}-${i}`;
+      const candidatePath = join(root, candidate);
+      const exists = await stat(candidatePath).then(() => true).catch(() => false);
+      if (!exists) return candidatePath;
+    }
+    throw new Error("无法为上传的技能分配目录");
   }
 
   private parseZipRootSkills(
