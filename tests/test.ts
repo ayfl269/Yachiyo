@@ -1141,6 +1141,61 @@ async function testInMemoryVectorStoreDimensionValidation(): Promise<void> {
 }
 
 // ============================================================
+// 16. 测试: 空流式输出的重试（regression）
+// ============================================================
+
+async function testEmptyStreamRetry(): Promise<void> {
+  console.log("\n=== 测试: 空流式输出重试 ===");
+
+  // 模拟 include_usage 下"空补全"的流：只有一个 usage-only chunk + 空终结响应，
+  // 没有任何正文/思考/工具调用。这曾导致 runner 把 usage chunk 当成最终响应，
+  // 提前结束并跳过 EmptyModelOutputError 重试。
+  let streamCalls = 0;
+  const provider: Provider = {
+    type: "chat_completion",
+    providerConfig: { id: "empty-stream", maxContextTokens: 4096, modalities: ["text", "tool_use"] },
+    async textChat(): Promise<LLMResponse> {
+      return { role: "assistant", completionText: "", isChunk: false };
+    },
+    async *textChatStream(): AsyncGenerator<LLMResponse, void, unknown> {
+      streamCalls++;
+      yield { role: "assistant", isChunk: true, usage: { promptTokens: 0, completionTokens: 0, total: 0, cacheReadInputTokens: 0 } };
+      yield { role: "assistant", isChunk: false };
+    },
+  };
+
+  const runner = new ToolLoopAgentRunner();
+  const runContext = createContextWrapper<null>(null);
+  const hooks = new EmptyAgentHooks();
+  const executor = new FunctionToolExecutor();
+
+  await runner.reset(runContext, hooks, {
+    provider,
+    request: {
+      prompt: "hello",
+      imageUrls: [],
+      audioUrls: [],
+      contexts: [],
+      extraUserContentParts: [],
+    },
+    toolExecutor: executor,
+    agentHooks: hooks,
+    streaming: true,
+  });
+  (runner as any).req.funcTool = new ToolSet([]);
+
+  const responses: AgentResponse[] = [];
+  for await (const response of runner.stepUntilDone(10)) {
+    responses.push(response);
+  }
+
+  assert(streamCalls > 1, `空流触发重试（streamCalls=${streamCalls}）`);
+  assert(runner.getFinalLlmResp()?.role === "err", "全部重试失败后返回 err 响应，而非伪造空回复");
+
+  console.log("  ✅ 空流式输出重试测试通过");
+}
+
+// ============================================================
 // 运行所有测试
 // ============================================================
 
@@ -1168,6 +1223,7 @@ async function main(): Promise<void> {
     await testCodeSearchTool();
     await testDynamicSubAgentCreate();
     await testInMemoryVectorStoreDimensionValidation();
+    await testEmptyStreamRetry();
 
     console.log("\n╔══════════════════════════════════════════╗");
     console.log(`║   通过: ${passCount}  失败: ${failCount}  跳过: ${skipCount}`.padEnd(46) + "║");

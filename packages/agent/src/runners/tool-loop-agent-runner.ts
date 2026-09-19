@@ -583,22 +583,31 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
           };
         }
 
-        // If this chunk contains tool calls or usage info, treat it as the final response
-        if (llmResponse.toolsCallName?.length || llmResponse.usage) {
-          if (llmResponse.usage) {
-            this.stats.tokenUsage.promptTokens += llmResponse.usage.promptTokens;
-            this.stats.tokenUsage.completionTokens += llmResponse.usage.completionTokens;
-            this.stats.tokenUsage.total += llmResponse.usage.total;
-            if (llmResponse.usage.cacheCreationInputTokens) {
-              this.stats.tokenUsage.cacheCreationInputTokens = (this.stats.tokenUsage.cacheCreationInputTokens ?? 0) + llmResponse.usage.cacheCreationInputTokens;
-            }
-            if (llmResponse.usage.cacheReadInputTokens) {
-              this.stats.tokenUsage.cacheReadInputTokens = (this.stats.tokenUsage.cacheReadInputTokens ?? 0) + llmResponse.usage.cacheReadInputTokens;
-            }
-            if (this.req.conversation) {
-              this.req.conversation.tokenUsage = llmResponse.usage.total;
-            }
+        // Accumulate usage from ANY chunk, but do NOT finalize the step on a
+        // usage-only chunk. Providers differ: OpenAI/Anthropic attach usage to
+        // a dedicated chunk, Gemini to the terminal. Finalizing here discarded
+        // the accumulated text and, worse, made a contentless usage-only chunk
+        // look like a valid final response — which masked empty completions and
+        // bypassed the empty-output retry (the consumer returns as soon as it
+        // sees a non-chunk/usage response, closing the generator before
+        // iterLlmResponses can raise EmptyModelOutputError). Only tool calls
+        // are a hard stop, because the tools must be executed.
+        if (llmResponse.usage) {
+          this.stats.tokenUsage.promptTokens += llmResponse.usage.promptTokens;
+          this.stats.tokenUsage.completionTokens += llmResponse.usage.completionTokens;
+          this.stats.tokenUsage.total += llmResponse.usage.total;
+          if (llmResponse.usage.cacheCreationInputTokens) {
+            this.stats.tokenUsage.cacheCreationInputTokens = (this.stats.tokenUsage.cacheCreationInputTokens ?? 0) + llmResponse.usage.cacheCreationInputTokens;
           }
+          if (llmResponse.usage.cacheReadInputTokens) {
+            this.stats.tokenUsage.cacheReadInputTokens = (this.stats.tokenUsage.cacheReadInputTokens ?? 0) + llmResponse.usage.cacheReadInputTokens;
+          }
+          if (this.req.conversation) {
+            this.req.conversation.tokenUsage = llmResponse.usage.total;
+          }
+        }
+
+        if (llmResponse.toolsCallName?.length) {
           // Merge accumulated content into final result so text isn't lost
           llmRespResult = {
             ...llmResponse,
@@ -1264,16 +1273,40 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
       try {
         if (this.streaming && this.provider.textChatStream) {
           let hasMeaningfulContent = false;
+          // Content-free responses — usage-only chunks and the terminal emitted
+          // by every parser — are buffered instead of streamed. If the whole
+          // stream is empty they are discarded and EmptyModelOutputError is
+          // thrown so the caller retries / falls back. Yielding them first made
+          // the consumer finalize the step on a contentless usage chunk (or the
+          // empty terminal) and close this generator before the check below
+          // could run, which silently disabled the empty-output retry.
+          const buffered: LLMResponse[] = [];
           for await (const resp of this.provider.textChatStream(payload)) {
             if (resp.completionText || resp.reasoningContent || resp.toolsCallName?.length) {
               hasMeaningfulContent = true;
+              yieldedAnything = true;
+              yield resp;
+            } else {
+              buffered.push(resp);
             }
+          }
+          // If the entire stream produced no meaningful content, throw to
+          // trigger retry — unless the user aborted, in which case flush the
+          // buffered responses so the step finalizes the abort immediately
+          // instead of waiting out the retry backoff.
+          if (!hasMeaningfulContent) {
+            if (!this.abortController.signal.aborted) {
+              throw new EmptyModelOutputError();
+            }
+            for (const resp of buffered) {
+              yieldedAnything = true;
+              yield resp;
+            }
+            return;
+          }
+          for (const resp of buffered) {
             yieldedAnything = true;
             yield resp;
-          }
-          // If the entire stream produced no meaningful content, throw to trigger retry
-          if (!hasMeaningfulContent) {
-            throw new EmptyModelOutputError();
           }
         } else {
           const resp = await this.provider.textChat(payload);
