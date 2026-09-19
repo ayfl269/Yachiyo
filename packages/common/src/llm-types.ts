@@ -107,6 +107,16 @@ export interface ProviderConfig {
    */
   modalities?: string[];
   enableCaching?: boolean;
+  /**
+   * Extra fields merged into the upstream request body. Only NEW keys are
+   * added — fields the provider manages (model/messages/stream/tools/…) always
+   * win. See `applyCustomExtraBody` in @yachiyo/provider.
+   */
+  custom_extra_body?: Record<string, unknown>;
+  /** Gemini only: estimated-token threshold below which no server cache is built. */
+  cacheThreshold?: number;
+  /** Gemini only: server-side cache TTL in seconds. */
+  cacheTtlSeconds?: number;
   [key: string]: unknown;
 }
 

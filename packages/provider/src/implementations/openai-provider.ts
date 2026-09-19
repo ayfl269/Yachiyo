@@ -8,6 +8,7 @@ import { withRetry } from "../retry.js";
 import { ProviderAPIError, RateLimitError, safeParseJsonResponse } from "../errors.js";
 import { EstimateTokenCounter } from "@yachiyo/common/token-counter.js";
 import { getProxyAgent } from "@yachiyo/common";
+import { applyCustomExtraBody } from "../extra-body.js";
 
 export interface OpenAIProviderConfig extends ProviderConfig {
   apiKey: string;
@@ -61,6 +62,8 @@ export class OpenAIProvider implements Provider {
       body.tools = funcTool.openaiSchema(true);
     }
 
+    const finalBody = applyCustomExtraBody(body, this.providerConfig.custom_extra_body);
+
     const url = `${this.baseUrl}/chat/completions`;
     const headers = this.buildHeaders();
     const dispatcher = await getProxyAgent(this.proxy);
@@ -70,7 +73,7 @@ export class OpenAIProvider implements Provider {
         const res = await fetch(url, {
           method: "POST",
           headers,
-          body: JSON.stringify(body),
+          body: JSON.stringify(finalBody),
           signal: abortSignal,
           ...(dispatcher ? { dispatcher } : {}),
         } as RequestInit);
@@ -122,6 +125,8 @@ export class OpenAIProvider implements Provider {
       body.tools = funcTool.openaiSchema(true);
     }
 
+    const finalBody = applyCustomExtraBody(body, this.providerConfig.custom_extra_body);
+
     const url = `${this.baseUrl}/chat/completions`;
     const headers = this.buildHeaders();
     const dispatcher = await getProxyAgent(this.proxy);
@@ -131,7 +136,7 @@ export class OpenAIProvider implements Provider {
         const res = await fetch(url, {
           method: "POST",
           headers,
-          body: JSON.stringify(body),
+          body: JSON.stringify(finalBody),
           signal: abortSignal,
           ...(dispatcher ? { dispatcher } : {}),
         } as RequestInit);

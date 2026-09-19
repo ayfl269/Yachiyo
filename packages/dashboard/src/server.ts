@@ -2605,6 +2605,9 @@ export class DashboardServer {
             custom_extra_body: cfg.custom_extra_body || {},
             max_context_tokens: cfg.max_context_tokens || 0,
             reasoning: cfg.reasoning || false,
+            // Gemini context-cache tuning (only meaningful for type "gemini").
+            ...(cfg.cacheThreshold !== undefined ? { cacheThreshold: cfg.cacheThreshold } : {}),
+            ...(cfg.cacheTtlSeconds !== undefined ? { cacheTtlSeconds: cfg.cacheTtlSeconds } : {}),
             // Masked key — real key only returned via reveal_key endpoint
             key: maskSecret(cfg.apiKey),
             api_base: cfg.baseUrl || "",
@@ -2857,6 +2860,8 @@ export class DashboardServer {
           max_context_tokens?: number;
           reasoning?: boolean;
           enable?: boolean;
+          cacheThreshold?: number;
+          cacheTtlSeconds?: number;
           [key: string]: unknown;
         };
         if (!providerConfig.id) {
@@ -2916,6 +2921,8 @@ export class DashboardServer {
               max_context_tokens: providerConfig.max_context_tokens || 0,
               reasoning: providerConfig.reasoning || false,
               enable: providerConfig.enable !== false,
+              ...(providerConfig.cacheThreshold !== undefined ? { cacheThreshold: providerConfig.cacheThreshold } : {}),
+              ...(providerConfig.cacheTtlSeconds !== undefined ? { cacheTtlSeconds: providerConfig.cacheTtlSeconds } : {}),
             };
 
         // 合并 source 的额外配置（保留显式配置的字段）

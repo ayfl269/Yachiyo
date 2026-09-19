@@ -10,6 +10,7 @@ import { EstimateTokenCounter } from "@yachiyo/common/token-counter.js";
 import { safeFetch } from "@yachiyo/common/ssrf-guard.js";
 import { resolveImageToDataUrl, resolveAudioToDataUrl } from "@yachiyo/common/download-utils.js";
 import { getProxyAgent } from "@yachiyo/common";
+import { applyCustomExtraBody } from "../extra-body.js";
 
 async function resolveRemoteMediaInContexts(
   contexts: Record<string, unknown>[]
@@ -286,7 +287,9 @@ export class GeminiProvider implements Provider {
     await this.cleanExpiredCaches();
 
     if (enableCaching && contents.length > 1) {
-      const ttl = (this.providerConfig.cacheTtlSeconds as number | undefined) ?? 300;
+      // TTL must be a positive integer (the API rejects 0/negative/non-finite).
+      const rawTtl = Number(this.providerConfig.cacheTtlSeconds);
+      const ttl = Number.isFinite(rawTtl) && rawTtl > 0 ? Math.floor(rawTtl) : 300;
       const ttlStr = `${ttl}s`;
 
       const prefixContents = contents.slice(0, -1);
@@ -337,8 +340,13 @@ export class GeminiProvider implements Provider {
           })) as unknown as Message[];
           const estimatedTokens = tokenCounter.countTokens(prefixMessages);
 
-          const rawThreshold = this.providerConfig.cacheThreshold as number | undefined;
-          const cacheThreshold = rawThreshold ?? 32768;
+          // Gemini's minimum cacheable prefix is model-dependent (typically
+          // 1024–4096 tokens). The previous 32768 default was so high that
+          // ordinary conversations never reached it, so caching silently never
+          // engaged. Default to 4096 and ignore non-positive/non-finite values.
+          const rawThreshold = Number(this.providerConfig.cacheThreshold);
+          const cacheThreshold =
+            Number.isFinite(rawThreshold) && rawThreshold > 0 ? rawThreshold : 4096;
 
           if (estimatedTokens >= cacheThreshold) {
             try {
@@ -377,7 +385,17 @@ export class GeminiProvider implements Provider {
     const action = isStream ? "streamGenerateContent?alt=sse" : "generateContent";
     const url = `${this.baseUrl}/models/${useModel}:${action}`;
 
-    return { body, url, sanitized };
+    // `systemInstruction`/`tools` are deliberately removed from the body when
+    // `cachedContent` is used (Gemini rejects them alongside a cache), so they
+    // must be reserved: otherwise a custom_extra_body entry would re-add them
+    // and break the request.
+    const finalBody = applyCustomExtraBody(
+      body,
+      this.providerConfig.custom_extra_body,
+      ["contents", "systemInstruction", "tools", "cachedContent"],
+    );
+
+    return { body: finalBody, url, sanitized };
   }
 
   async textChat(params: ProviderChatParams): Promise<LLMResponse> {

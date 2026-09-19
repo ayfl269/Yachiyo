@@ -254,6 +254,87 @@ async function runTests() {
     assert(responsesResp.usage?.promptTokens === 100, "OpenAI Responses promptTokens parsed");
     assert(responsesResp.usage?.cacheReadInputTokens === 45, "OpenAI Responses cacheReadInputTokens parsed");
 
+    // 4. custom_extra_body 透传
+    // 此前 dashboard 存储了该字段但没有任何 provider 读取它（死配置）。
+    console.log("\n--- Testing custom_extra_body passthrough ---");
+    const { OpenAIProvider } = await import("@yachiyo/provider/implementations/openai-provider.js");
+
+    requestLog = [];
+    // Use JSON.parse so `__proto__` becomes an OWN enumerable key (an object
+    // literal would instead mutate the prototype, never reaching the merge).
+    const openaiExtraBody = JSON.parse(
+      '{"top_k":40,"min_p":0.05,"messages":"SHOULD_NOT_OVERRIDE","__proto__":{"polluted":true}}'
+    );
+    const openaiExtra = new OpenAIProvider({
+      apiKey: "test-openai-key",
+      model: "gpt-4o",
+      custom_extra_body: openaiExtraBody,
+    } as any);
+    await openaiExtra.textChat({ contexts: [{ role: "user", content: "hi" }] as Message[] });
+    const openaiBody = requestLog.find((r) => r.url.includes("chat/completions"))?.body;
+    assert(openaiBody?.top_k === 40, "OpenAI custom_extra_body 新增 top_k");
+    assert(openaiBody?.min_p === 0.05, "OpenAI custom_extra_body 新增 min_p");
+    assert(Array.isArray(openaiBody?.messages), "OpenAI custom_extra_body 不覆盖 messages（系统字段优先）");
+    assert(({} as any).polluted === undefined, "OpenAI custom_extra_body 的 __proto__ 被忽略");
+
+    requestLog = [];
+    const anthropicExtra = new AnthropicProvider({
+      apiKey: "test-anthropic-key",
+      model: "claude-3-5-sonnet-20240620",
+      custom_extra_body: { top_k: 7 },
+    } as any);
+    await anthropicExtra.textChat({ contexts: [{ role: "user", content: "hi" }] as Message[] });
+    const anthropicBody = requestLog.find((r) => r.url.includes("/v1/messages"))?.body;
+    assert(anthropicBody?.top_k === 7, "Anthropic custom_extra_body 新增 top_k");
+    assert(anthropicBody?.messages !== undefined, "Anthropic custom_extra_body 不破坏 messages");
+
+    requestLog = [];
+    const geminiExtra = new GeminiProvider({
+      apiKey: "test-gemini-key",
+      model: "gemini-1.5-flash",
+      custom_extra_body: { top_k: 3, tools: "SHOULD_NOT_OVERRIDE", cachedContent: "SHOULD_NOT_OVERRIDE" },
+    } as any);
+    await geminiExtra.textChat({ contexts: [{ role: "user", content: "hi" }] as Message[] });
+    const geminiBody = requestLog.find((r) => r.url.includes("generateContent"))?.body;
+    assert(geminiBody?.top_k === 3, "Gemini custom_extra_body 新增 top_k");
+    assert(geminiBody?.tools !== "SHOULD_NOT_OVERRIDE", "Gemini custom_extra_body 不覆盖保留字段 tools");
+    assert(geminiBody?.cachedContent !== "SHOULD_NOT_OVERRIDE", "Gemini custom_extra_body 不覆盖保留字段 cachedContent");
+
+    // 5. Gemini 缓存默认阈值：未配置时小上下文不应触发缓存
+    // 旧默认 32768 过高，普通对话永远不会建缓存；现默认 4096。
+    console.log("\n--- Testing Gemini default cache threshold ---");
+    requestLog = [];
+    cacheCreateCount = 0;
+    const geminiDefault = new GeminiProvider({
+      apiKey: "test-gemini-key",
+      model: "gemini-1.5-flash",
+      enableCaching: true,
+    } as any);
+    await geminiDefault.textChat({
+      contexts: [systemMsg, u1, a1, u2],
+      enableCaching: true,
+      sessionId: "default-threshold-session",
+    });
+    assert(cacheCreateCount === 0, "Gemini 未配置阈值时，小上下文不创建缓存（默认 4096）");
+
+    // 非法 TTL 回退到 300s
+    requestLog = [];
+    cacheCreateCount = 0;
+    const geminiBadTtl = new GeminiProvider({
+      apiKey: "test-gemini-key",
+      model: "gemini-1.5-flash",
+      enableCaching: true,
+      cacheThreshold: 10,
+      cacheTtlSeconds: -5,
+    } as any);
+    await geminiBadTtl.textChat({
+      contexts: [systemMsg, u1, a1, u2],
+      enableCaching: true,
+      sessionId: "bad-ttl-session",
+    });
+    const createReqBadTtl = requestLog.find((r) => r.url.includes("/cachedContents") && r.method === "POST");
+    assert(createReqBadTtl?.body?.ttl === "300s", "Gemini 非法 TTL 回退为 300s");
+
     console.log(`\n结果: ${passCount} 通过, ${failCount} 失败`);
     if (failCount > 0) {
       process.exit(1);

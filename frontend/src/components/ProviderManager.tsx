@@ -35,6 +35,10 @@ interface Provider {
   max_context_tokens?: number
   reasoning?: boolean
   temperature?: number
+  /** Gemini 上下文缓存触发阈值（估算 tokens），低于该值不创建缓存。 */
+  cacheThreshold?: number
+  /** Gemini 上下文缓存 TTL（秒）。 */
+  cacheTtlSeconds?: number
   [key: string]: any
 }
 
@@ -301,6 +305,9 @@ export default function ProviderManager() {
   // 高级配置 JSON textarea 中尚未成功解析的原始文本（key -> raw text）。
   // 解析失败时不回滚结构化 state，保留用户输入的中间态；保存时以解析结果为准。
   const [rawJsonText, setRawJsonText] = useState<Record<string, string>>({})
+  // 模型提供商编辑对话框中的 custom_extra_body JSON 文本。与 rawJsonText 同理，
+  // 解析失败时保留原始文本以允许中间态，保存时校验。
+  const [providerExtraBodyText, setProviderExtraBodyText] = useState('')
   const [modelSearch, setModelSearch] = useState('')
 
   // Dialog states
@@ -832,6 +839,11 @@ export default function ProviderManager() {
     } else if (!data.modalities.includes('tool_use')) {
       data.modalities = [...data.modalities, 'tool_use']
     }
+    setProviderExtraBodyText(
+      data.custom_extra_body && Object.keys(data.custom_extra_body).length > 0
+        ? JSON.stringify(data.custom_extra_body, null, 2)
+        : ''
+    )
     setProviderEditData(data)
     setProviderEditOriginalId(provider.id)
     setProviderEditMode('edit')
@@ -843,6 +855,7 @@ export default function ProviderManager() {
     if (existingModelsForSelectedSource.has(modelName)) { showMessage('该模型已配置', 'error'); return }
     const newConfig = buildModelProviderConfig(modelName)
     if (!newConfig) return
+    setProviderExtraBodyText('')
     setProviderEditData(newConfig)
     setProviderEditOriginalId('')
     setProviderEditMode('add')
@@ -852,6 +865,27 @@ export default function ProviderManager() {
   async function saveEditedProvider() {
     if (!providerEditData) return
     const targetId = providerEditData.id
+
+    // Parse the custom_extra_body JSON textarea. Empty means "no extras".
+    // Invalid JSON blocks the save so a malformed entry never reaches the
+    // provider (it would otherwise be silently dropped server-side).
+    let extraBody: Record<string, unknown> = {}
+    const trimmedExtra = providerExtraBodyText.trim()
+    if (trimmedExtra) {
+      try {
+        const parsed = JSON.parse(trimmedExtra)
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          showMessage('自定义请求体 (custom_extra_body) 必须是 JSON 对象', 'error')
+          return
+        }
+        extraBody = parsed
+      } catch {
+        showMessage('自定义请求体 (custom_extra_body) 不是合法的 JSON，请修正后再保存', 'error')
+        return
+      }
+    }
+
+    const payload: Provider = { ...providerEditData, custom_extra_body: extraBody }
     setSavingProviders(prev => [...prev, targetId])
     try {
       const isAdding = providerEditMode === 'add'
@@ -859,23 +893,23 @@ export default function ProviderManager() {
         ? await apiFetch('/api/config/provider/new', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(providerEditData)
+            body: JSON.stringify(payload)
           })
         : await apiFetch('/api/config/provider/update', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               id: providerEditOriginalId || providerEditData.id,
-              config: providerEditData
+              config: payload
             })
           })
       const json = await parseResponseJson(res)
       if (json.status === 'error') throw new Error(json.message)
       showMessage(json.message || (isAdding ? '添加成功' : '更新成功'))
       if (isAdding) {
-        setProviders(prev => [...prev, providerEditData])
+        setProviders(prev => [...prev, payload])
       } else {
-        setProviders(prev => prev.map(p => p.id === providerEditData.id ? providerEditData : p))
+        setProviders(prev => prev.map(p => p.id === payload.id ? payload : p))
       }
       setShowProviderEditDialog(false)
     } catch (error: any) {
@@ -1645,6 +1679,49 @@ export default function ProviderManager() {
               />
               <span className="help-text">留空则自动继承所属提供商源的代理地址</span>
             </div>
+            <div className="form-group span-2">
+              <label>
+                自定义请求体 (custom_extra_body)
+                <span className="text-muted text-xs"> 透传给上游 API 的额外参数</span>
+              </label>
+              <textarea
+                value={providerExtraBodyText}
+                onChange={e => setProviderExtraBodyText(e.target.value)}
+                className="form-control font-mono textarea-sm"
+                rows={4}
+                placeholder={'{\n  "top_k": 40,\n  "repetition_penalty": 1.05\n}'}
+              />
+              <span className="help-text">
+                必须是 JSON 对象，例如 {'{"top_k": 40, "min_p": 0.05}'}。仅新增上游请求体字段，
+                不会覆盖模型、消息、工具等由系统管理的字段。
+              </span>
+            </div>
+            {providerEditData.type === 'gemini' && (
+              <>
+                <div className="form-group">
+                  <label>缓存触发阈值 (tokens)</label>
+                  <input
+                    type="number"
+                    value={providerEditData.cacheThreshold ?? 4096}
+                    onChange={e => setProviderEditField('cacheThreshold', Number(e.target.value))}
+                    className="form-control font-mono"
+                    min={0}
+                  />
+                  <span className="help-text">上下文估算超过该值才创建 Gemini 服务端缓存，默认 4096</span>
+                </div>
+                <div className="form-group">
+                  <label>缓存 TTL（秒）</label>
+                  <input
+                    type="number"
+                    value={providerEditData.cacheTtlSeconds ?? 300}
+                    onChange={e => setProviderEditField('cacheTtlSeconds', Number(e.target.value))}
+                    className="form-control font-mono"
+                    min={1}
+                  />
+                  <span className="help-text">Gemini 缓存存活时间，默认 300 秒</span>
+                </div>
+              </>
+            )}
           </div>
         )}
       </Modal>

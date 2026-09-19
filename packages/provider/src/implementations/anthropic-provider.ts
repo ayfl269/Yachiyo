@@ -8,6 +8,7 @@ import { withRetry } from "../retry.js";
 import { ProviderAPIError, RateLimitError, safeParseJsonResponse } from "../errors.js";
 import { EstimateTokenCounter } from "@yachiyo/common/token-counter.js";
 import { getProxyAgent } from "@yachiyo/common";
+import { applyCustomExtraBody } from "../extra-body.js";
 
 export interface AnthropicProviderConfig extends ProviderConfig {
   apiKey: string;
@@ -167,7 +168,7 @@ export class AnthropicProvider implements Provider {
 
     const headers = this.buildHeaders(enableCaching);
 
-    return { body, headers, sanitized };
+    return { body: applyCustomExtraBody(body, this.providerConfig.custom_extra_body), headers, sanitized };
   }
 
   private buildHeaders(enableCaching = false): Record<string, string> {
