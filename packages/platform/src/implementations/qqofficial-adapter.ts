@@ -1211,6 +1211,10 @@ export class QQOfficialAdapter extends PlatformAdapter {
         clearTimeout(this.tokenRefreshTimer);
         this.tokenRefreshTimer = null;
       }
+      // Do not reschedule after stop(): a failure racing stop() previously
+      // installed a fresh 30s retry timer that outlived shutdown and retried
+      // forever.
+      if (this._status !== "running") return;
       // Retry after 30 seconds
       this.tokenRefreshTimer = setTimeout(() => {
         this.refreshToken().catch(() => { /* will retry again */ });

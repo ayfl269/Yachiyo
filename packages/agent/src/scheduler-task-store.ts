@@ -501,8 +501,14 @@ export function computeNextFireAt(recurrence: string, from: Date): Date | null {
     return new Date(from.getTime() + 7 * 24 * 3600_000);
   }
   if (trimmed === "monthly") {
+    // Clamp the day so Jan 31 + 1 month yields Feb 28/29, not Mar 3
+    // (setMonth overflows when the target month has fewer days).
+    const day = from.getDate();
     const d = new Date(from);
+    d.setDate(1);
     d.setMonth(d.getMonth() + 1);
+    const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+    d.setDate(Math.min(day, lastDay));
     return d;
   }
 

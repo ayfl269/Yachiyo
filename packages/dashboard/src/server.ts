@@ -3,6 +3,7 @@ import { join, extname, resolve, relative, isAbsolute } from "path";
 import { readFile, stat, writeFile, mkdir, unlink, readdir } from "fs/promises";
 import { cpus, tmpdir, totalmem } from "os";
 import { timingSafeEqual, randomBytes, scryptSync, createHash } from "crypto";
+import { inflateRawSync } from "zlib";
 
 /**
  * Helper to generate an scrypt password hash.
@@ -113,12 +114,47 @@ interface ZipEntry {
   name: string;
   entryName: string;
   /** Uncompressed size in bytes (adm-zip `header.size`); best-effort. */
-  header?: { size?: number };
+  header?: { size?: number; method?: number };
+  /** Compressed bytes as stored in the archive. */
+  getCompressedData?: () => Buffer;
 }
 
 /** Minimal zip reader shape used by skill-parsing helpers. */
 interface ZipReader {
   readAsText(entry: unknown): string;
+}
+
+/** Per-entry decompression cap for text metadata read from uploaded ZIPs. */
+const MAX_ZIP_READ_BYTES = 20 * 1024 * 1024;
+
+/**
+ * Decompress a ZIP entry's text with a HARD output-size cap.
+ *
+ * The central-directory `header.size` is attacker-controlled, so the
+ * pre-decompression bomb guard can be bypassed by declaring a small size.
+ * This reads the compressed bytes and inflates them under `maxOutputLength`,
+ * so an oversized entry fails fast instead of exhausting memory. STORED
+ * (method 0) entries are returned as-is after a length check.
+ */
+function safeReadZipText(entry: ZipEntry): string {
+  const method = entry.header?.method ?? 8;
+  const compressed = entry.getCompressedData ? entry.getCompressedData() : null;
+  if (!compressed) {
+    throw new Error(`ZIP entry "${entry.entryName}" has no readable data`);
+  }
+  if (method === 0) {
+    if (compressed.length > MAX_ZIP_READ_BYTES) {
+      throw new Error(`ZIP entry "${entry.entryName}" exceeds the ${MAX_ZIP_READ_BYTES} byte read limit`);
+    }
+    return compressed.toString("utf-8");
+  }
+  let inflated: Buffer;
+  try {
+    inflated = inflateRawSync(compressed, { maxOutputLength: MAX_ZIP_READ_BYTES });
+  } catch (e) {
+    throw new Error(`ZIP entry "${entry.entryName}" failed to decompress within the size limit: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  return inflated.toString("utf-8");
 }
 
 export function isPathSafe(basePath: string, targetPath: string): boolean {
@@ -236,14 +272,16 @@ function maskSecret(value: unknown): string {
 }
 
 /**
- * Replace any secret fields (`key`, `apiKey`) on a provider config object
- * with the masked sentinel. Returns a shallow copy so the caller's original
- * object (which may hold the real key for internal use) is untouched.
+ * Replace secret-bearing fields on a provider config object with the masked
+ * sentinel. Returns a shallow copy so the caller's original object (which may
+ * hold the real key for internal use) is untouched. `proxy` is included
+ * because it can embed credentials (`user:pass@host`).
  */
 function maskProviderSecrets<T extends Record<string, unknown>>(config: T): T {
   const out: Record<string, unknown> = { ...config };
   if ("key" in out) out.key = maskSecret(out.key);
   if ("apiKey" in out) out.apiKey = maskSecret(out.apiKey);
+  if ("proxy" in out) out.proxy = maskSecret(out.proxy);
   return out as T;
 }
 
@@ -640,7 +678,11 @@ export class DashboardServer {
 
   async stop(): Promise<void> {
     if (this.server) {
-      await new Promise<void>((resolve) => this.server!.close(() => resolve()));
+      const server = this.server;
+      // Force-close keep-alive connections so close() cannot hang forever
+      // waiting for idle clients to disconnect.
+      server.closeAllConnections?.();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
       this.server = null;
       console.log("[DashboardServer] Stopped.");
     }
@@ -771,7 +813,17 @@ export class DashboardServer {
       return;
     }
 
-    const url = new URL(req.url ?? "/", `http://${req.headers.host || "localhost"}`);
+    // A malformed Host header makes `new URL` throw; handle it here (this
+    // runs outside the route try/catch) so the client gets a 400 instead of
+    // an unhandled rejection and no response.
+    let url: URL;
+    try {
+      url = new URL(req.url ?? "/", `http://${req.headers.host || "localhost"}`);
+    } catch {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Bad Request", message: "Invalid Host header or URL." }));
+      return;
+    }
     const pathname = url.pathname;
 
     // Authenticate all API routes. Static assets (the SPA shell) are served
@@ -2534,7 +2586,8 @@ export class DashboardServer {
             // Masked key — real key only returned via reveal_key endpoint
             key: maskSecret(cfg.apiKey),
             api_base: cfg.baseUrl || "",
-            proxy: (cfg as any).proxy || "",
+            // proxy may embed credentials (user:pass@host) — mask like the key.
+            proxy: maskSecret((cfg as ProviderRuntimeConfig).proxy),
           });
         }
 
@@ -2951,6 +3004,13 @@ export class DashboardServer {
           if (existingConfig) {
             apiKey = String(existingConfig.apiKey || existingConfig.key || "");
           }
+        }
+
+        // 同理：proxy 在列表响应中被掩码，若客户端回传掩码占位符则保留已存储值
+        // （否则会把真实代理地址覆盖成 "********"，且可能丢失其中的凭据）。
+        if (proxy === MASKED_SECRET) {
+          const existingConfig = this.ctx.providerManager.getProviderConfigById(id, true, true);
+          proxy = existingConfig ? String(existingConfig.proxy || "") : "";
         }
 
         const loadConfig: Record<string, unknown> = {
@@ -5042,7 +5102,7 @@ export class DashboardServer {
   }
 
   private parseZipRootSkills(
-    zip: ZipReader,
+    _zip: ZipReader,
     entries: ZipEntry[]
   ): Array<{ name: string; description: string; path: string; active: boolean; sourceType: string; sourceLabel: string; localExists: boolean; sandboxExists: boolean; pluginName: string; readonly: boolean }> {
     const results: Array<{ name: string; description: string; path: string; active: boolean; sourceType: string; sourceLabel: string; localExists: boolean; sandboxExists: boolean; pluginName: string; readonly: boolean }> = [];
@@ -5052,7 +5112,7 @@ export class DashboardServer {
     const skillsMdEntry = entries.find(e => e.name.toLowerCase() === "skills.md");
 
     if (skillsMdEntry) {
-      const content = zip.readAsText(skillsMdEntry);
+      const content = safeReadZipText(skillsMdEntry);
       const lines = content.split("\n");
       let i = 0;
       while (i < lines.length) {
@@ -5085,7 +5145,7 @@ export class DashboardServer {
         i++;
       }
     } else if (manifestEntry) {
-      const content = zip.readAsText(manifestEntry);
+      const content = safeReadZipText(manifestEntry);
       try {
         const parsed = JSON.parse(content);
         results.push({
@@ -5102,7 +5162,7 @@ export class DashboardServer {
         });
       }
     } else if (skillMdEntry) {
-      const content = zip.readAsText(skillMdEntry);
+      const content = safeReadZipText(skillMdEntry);
       const lines = content.split("\n");
       let name = "";
       let description = "";
@@ -5136,7 +5196,7 @@ export class DashboardServer {
   }
 
   private parseZipSkillDir(
-    zip: ZipReader,
+    _zip: ZipReader,
     dirPrefix: string,
     _entries: ZipEntry[],
     dirName: string
@@ -5156,7 +5216,7 @@ export class DashboardServer {
     let readonly = false;
 
     if (skillMdEntry) {
-      const content = zip.readAsText(skillMdEntry);
+      const content = safeReadZipText(skillMdEntry);
       const lines = content.split("\n");
 
       if (lines[0]?.trim()?.startsWith("---")) {
@@ -5180,7 +5240,7 @@ export class DashboardServer {
       }
     } else if (manifestEntry) {
       try {
-        const content = zip.readAsText(manifestEntry);
+        const content = safeReadZipText(manifestEntry);
         const parsed = JSON.parse(content);
         const parsedName = sanitizeSkillPathSegment(parsed.name ?? "");
         if (parsedName) name = parsedName;

@@ -208,7 +208,16 @@ export function interactiveShellStart(
 
   child.on("error", (err) => {
     session.stderrAll = clampBuffer(session.stderrAll + `\n[spawn error: ${err.message}]\n`, MAX_BUFFER_SIZE);
-    session.stderrSinceRead += `\n[spawn error: ${err.message}]\n`;
+    session.stderrSinceRead = clampBuffer(session.stderrSinceRead + `\n[spawn error: ${err.message}]\n`, MAX_BUFFER_SIZE);
+    session.closed = true;
+  });
+
+  // Single persistent stdin error handler. Attaching one per send() leaked a
+  // listener on every successful write (they only fire on error), eventually
+  // triggering MaxListenersExceededWarning. A stdin write failure (EPIPE etc.)
+  // means the child is gone — record it rather than letting the unhandled
+  // 'error' event crash the process.
+  child.stdin?.on("error", () => {
     session.closed = true;
   });
 
@@ -245,11 +254,8 @@ export function interactiveShellSend(
 
   const text = options.addNewline === false ? input : input + "\n";
   session.lastActivityAt = Date.now();
-  // A stdin write failure (EPIPE etc.) means the child is gone — record it
-  // instead of letting the unhandled 'error' event crash the process.
-  stdin.once("error", () => {
-    session.closed = true;
-  });
+  // stdin has a single persistent 'error' handler attached at spawn (see
+  // createInteractiveShell), so no per-send listener is needed here.
   stdin.write(text);
   return true;
 }

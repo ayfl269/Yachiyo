@@ -763,10 +763,14 @@ export class SqliteMemoryStore {
             || [...newTags].some((t) => !existingTags.has(t));
         }
 
+        // Only touch last_accessed_at when the content actually changed:
+        // unconditionally stamping it on every save reset the access-recency
+        // field used by applyAging, making repeatedly-saved memories immune
+        // to aging/demotion.
         this.db.prepare(`
           UPDATE memories SET
             value = ?, updated_at = ?, memory_type = ?, scope = ?, scope_id = ?,
-            priority = ?, last_accessed_at = ?, expires_at = ?,
+            priority = ?, last_accessed_at = CASE WHEN ? = 1 THEN ? ELSE last_accessed_at END, expires_at = ?,
             memory_version = memory_version + ?,
             status = CASE WHEN ? = 1 THEN 'active' ELSE status END,
             superseded_by = CASE WHEN ? = 1 THEN NULL ELSE superseded_by END,
@@ -776,7 +780,7 @@ export class SqliteMemoryStore {
           WHERE key = ?
         `).run(
           value, now, memoryType, scope, scopeId,
-          priority, now, expiresAt,
+          priority, contentChanged ? 1 : 0, now, expiresAt,
           contentChanged ? 1 : 0,
           contentChanged ? 1 : 0,
           contentChanged ? 1 : 0,
@@ -1081,12 +1085,20 @@ export class SqliteMemoryStore {
 
       const rows = this.db.prepare(query).all(...params) as MemoryKeyDateRow[];
 
+      // memory_embeddings has no FK to memories, so deleting a memory row
+      // leaves its cached embedding orphaned. Remove the embedding first.
+      const deleteEmbeddingByKey = this.db.prepare(
+        "DELETE FROM memory_embeddings WHERE memory_id IN (SELECT id FROM memories WHERE key = ?)"
+      );
+      const deleteByKey = this.db.prepare("DELETE FROM memories WHERE key = ?");
+
       for (const row of rows) {
         // Check age-based deletion
         if (maxAge) {
           const age = now.getTime() - new Date(row.created_at).getTime();
           if (age > maxAge) {
-            this.db.prepare("DELETE FROM memories WHERE key = ?").run(row.key);
+            deleteEmbeddingByKey.run(row.key);
+            deleteByKey.run(row.key);
             deleted++;
             continue;
           }
@@ -1102,7 +1114,8 @@ export class SqliteMemoryStore {
           `).run(now.toISOString(), row.key);
           promoted++;
         } else {
-          this.db.prepare("DELETE FROM memories WHERE key = ?").run(row.key);
+          deleteEmbeddingByKey.run(row.key);
+          deleteByKey.run(row.key);
           deleted++;
         }
       }

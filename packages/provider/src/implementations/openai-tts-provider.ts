@@ -112,7 +112,11 @@ export class OpenAITTSProvider extends TTSProvider {
       return res.arrayBuffer();
     });
 
-    const ext = this.responseFormat === "mp3" ? "mp3" : this.responseFormat;
+    // Sanitize the extension: responseFormat is user/config controlled and was
+    // previously interpolated verbatim into the temp filename, so a value like
+    // "../../evil" escaped tmpdir() and wrote an arbitrary path.
+    const rawExt = this.responseFormat.trim().toLowerCase();
+    const ext = /^[a-z0-9]+$/.test(rawExt) ? rawExt : "mp3";
     const fileName = `tts_${randomUUID()}.${ext}`;
     const filePath = join(tmpdir(), fileName);
     writeFileSync(filePath, Buffer.from(arrayBuffer));

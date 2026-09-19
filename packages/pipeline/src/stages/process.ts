@@ -150,7 +150,7 @@ export class ProcessStage extends PipelineStage {
             // Renew the session lock TTL on each step so the watchdog
             // does not force-release it during long multi-step tool
             // execution.
-            onStepStart: () => this.ctx.sessionLockManager.renewLock(event.unifiedMsgOrigin),
+            onStepStart: () => releaseLock.renew(),
           });
 
           // Record provider token stats after agent run completes

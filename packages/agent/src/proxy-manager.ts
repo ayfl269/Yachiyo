@@ -123,15 +123,13 @@ class ProxyManager {
     const target = testUrl ?? "https://httpbin.org/get";
     const start = Date.now();
 
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-
       const response = await fetch(target, {
         signal: controller.signal,
         redirect: "follow",
       });
-      clearTimeout(timer);
 
       const elapsedMs = Date.now() - start;
       return {
@@ -151,6 +149,8 @@ class ProxyManager {
         elapsedMs,
         error: msg,
       };
+    } finally {
+      clearTimeout(timer);
     }
   }
 

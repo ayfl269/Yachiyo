@@ -34,7 +34,11 @@ export async function assertSafeUrl(rawUrl: string): Promise<void> {
   if (!ALLOWED_SCHEMES.has(parsed.protocol)) {
     throw new Error(`Disallowed URL scheme: ${parsed.protocol}`);
   }
-  if (BLOCKED_METADATA_HOSTS.has(parsed.hostname.toLowerCase())) {
+  // Strip a single trailing dot: DNS treats "host." as the same name as "host",
+  // so without normalization "169.254.169.254." / "metadata.google.internal."
+  // bypass the exact-match blocklist below.
+  const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
+  if (BLOCKED_METADATA_HOSTS.has(host)) {
     throw new Error(`Blocked metadata host: ${parsed.hostname}`);
   }
 }

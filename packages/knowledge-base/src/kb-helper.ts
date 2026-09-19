@@ -127,6 +127,16 @@ export class KBHelper {
       });
     }
 
+    // Guard against a provider returning fewer vectors than chunks: the
+    // per-index lookup below would otherwise store `undefined` embeddings
+    // silently, corrupting the vector store.
+    if (!Array.isArray(embeddings) || embeddings.length !== chunks.length) {
+      throw new KnowledgeBaseUploadError({
+        stage: "embedding",
+        userMessage: `Embedding count mismatch: got ${Array.isArray(embeddings) ? embeddings.length : "non-array"}, expected ${chunks.length}`,
+      });
+    }
+
     const docId = generateId();
     const items = chunks.map((content, index) => ({
       chunkId: generateId(),

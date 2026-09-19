@@ -43,6 +43,7 @@ function getProxyLaunchOption(): { proxy?: { server: string } } {
 
 let sharedBrowser: Browser | null = null;
 let browserLaunchPromise: Promise<Browser> | null = null;
+let browserExitHookInstalled = false;
 
 async function getSharedBrowser(): Promise<Browser> {
   if (sharedBrowser && sharedBrowser.isConnected()) return sharedBrowser;
@@ -56,8 +57,13 @@ async function getSharedBrowser(): Promise<Browser> {
       });
       sharedBrowser = browser;
       browserLaunchPromise = null;
-      // Auto-cleanup on process exit.
-      process.once("exit", () => { try { browser.close(); } catch { /* ignore */ } });
+      // Auto-cleanup on process exit. Installed once (not per launch) and
+      // closes whatever the current shared browser is, so relaunches do not
+      // accumulate stale exit listeners.
+      if (!browserExitHookInstalled) {
+        browserExitHookInstalled = true;
+        process.once("exit", () => { try { sharedBrowser?.close(); } catch { /* ignore */ } });
+      }
       return browser;
     } catch (e) {
       // Reset the promise on failure so subsequent calls can retry instead
@@ -205,10 +211,9 @@ export function createWebFetchTool(): FunctionTool<WebToolContext> {
         return { content: [{ type: "text", text: `error: Domain not allowed by sandbox policy for URL: ${url}` }], isError: true };
       }
 
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeout * 1000);
       try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), timeout * 1000);
-
         const fetchOptions: RequestInit = {
           method,
           headers: { "User-Agent": SYSTEM_USER_AGENT, ...headers },
@@ -221,7 +226,6 @@ export function createWebFetchTool(): FunctionTool<WebToolContext> {
         // safeFetch validates URL scheme to prevent non-HTTP protocols, and limits response
         // size and redirect loops (LAN access is allowed per business requirements).
         const response = await safeFetch(url, fetchOptions);
-        clearTimeout(timeoutId);
 
         let text = await response.text();
 
@@ -281,6 +285,8 @@ export function createWebFetchTool(): FunctionTool<WebToolContext> {
           return { content: [{ type: "text", text: `error: Request timed out after ${timeout} seconds.` }], isError: true };
         }
         return { content: [{ type: "text", text: `error: Fetch failed: ${msg}` }], isError: true };
+      } finally {
+        clearTimeout(timeoutId);
       }
     },
   });
@@ -863,10 +869,9 @@ export function createHttpRequestTool(): FunctionTool<WebToolContext> {
         return { content: [{ type: "text", text: `error: Domain not allowed by sandbox policy for URL: ${url}` }], isError: true };
       }
 
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeout * 1000);
       try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), timeout * 1000);
-
         const requestHeaders: Record<string, string> = {
           "User-Agent": SYSTEM_USER_AGENT,
           ...headers,
@@ -892,7 +897,6 @@ export function createHttpRequestTool(): FunctionTool<WebToolContext> {
         // When the caller disabled redirect following, pass maxRedirects=0
         // so the initial URL is still validated but no hops occur.
         const response = await safeFetch(url, fetchOptions, followRedirects ? 5 : 0);
-        clearTimeout(timeoutId);
 
         // Collect response headers
         const respHeaders: Record<string, string> = {};
@@ -930,6 +934,8 @@ export function createHttpRequestTool(): FunctionTool<WebToolContext> {
           return { content: [{ type: "text", text: `error: Request timed out after ${timeout} seconds.` }], isError: true };
         }
         return { content: [{ type: "text", text: `error: HTTP request failed: ${msg}` }], isError: true };
+      } finally {
+        clearTimeout(timeoutId);
       }
     },
   });
@@ -1055,22 +1061,24 @@ export function createBrowserNavigateTool(): FunctionTool<WebToolContext> {
         }
       }
 
+      let context: BrowserContext | null = null;
       try {
         await assertSafeUrl(url);
         const browser = await getSharedBrowser();
-        const context = await browser.newContext({
+        const ctx = await browser.newContext({
           userAgent: BROWSER_USER_AGENT,
           viewport: { width: 1280, height: 720 },
           locale: "en-US",
         });
-        const page = await context.newPage();
+        context = ctx;
+        const page = await ctx.newPage();
         await page.goto(url, { waitUntil, timeout: timeout * 1000 });
 
         const pageId = generatePageId();
         const title = await page.title().catch(() => "");
         pageRegistry.set(pageId, {
           page,
-          context,
+          context: ctx,
           openedAt: new Date().toISOString(),
           url,
           title,
@@ -1081,7 +1089,9 @@ export function createBrowserNavigateTool(): FunctionTool<WebToolContext> {
         page.on("close", () => {
           pageRegistry.delete(pageId);
           // Context is closed with the page; no separate cleanup needed.
-          try { context.close(); } catch { /* ignore */ }
+          // Await + catch so a rejected close doesn't become an unhandled
+          // rejection (the handler itself is synchronous).
+          void ctx.close().catch(() => { /* ignore */ });
         });
 
         return {
@@ -1091,6 +1101,11 @@ export function createBrowserNavigateTool(): FunctionTool<WebToolContext> {
           }],
         };
       } catch (e) {
+        // Close the context created for this attempt so a failed goto/title
+        // doesn't leak a Chromium context for the process lifetime.
+        if (context) {
+          try { await context.close(); } catch { /* ignore */ }
+        }
         const msg = e instanceof Error ? e.message : String(e);
         return { content: [{ type: "text", text: `error: Navigation failed: ${msg}` }], isError: true };
       }

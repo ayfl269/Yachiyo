@@ -630,6 +630,8 @@ export class OneBot11Adapter extends PlatformAdapter {
     resolve: (data: unknown) => void;
     reject: (error: Error) => void;
     timer: ReturnType<typeof setTimeout>;
+    /** Socket that sent the request; echoes on a different socket are ignored. */
+    ws: WebSocket;
   }>();
   /** Default timeout for API calls (30s) */
   static readonly API_TIMEOUT_MS = 30_000;
@@ -834,7 +836,7 @@ export class OneBot11Adapter extends PlatformAdapter {
         reject(new Error(`API call '${action}' timed out after ${timeoutMs}ms`));
       }, timeoutMs);
 
-      this.pendingRequests.set(echo, { resolve, reject, timer });
+      this.pendingRequests.set(echo, { resolve, reject, timer, ws });
 
       try {
         ws.send(JSON.stringify(payload));
@@ -865,13 +867,28 @@ export class OneBot11Adapter extends PlatformAdapter {
     }
   }
 
-  /** 拒绝所有等待中的 API 请求（在断开连接/停止时调用） */
+  /** 拒绝所有等待中的 API 请求（在停止时调用） */
   private rejectAllPending(reason: string): void {
     for (const [, pending] of this.pendingRequests) {
       clearTimeout(pending.timer);
       pending.reject(new Error(reason));
     }
     this.pendingRequests.clear();
+  }
+
+  /**
+   * Reject only the pending requests that were issued on `ws`. Used when a
+   * single socket closes: in forward mode multiple clients share this
+   * adapter, so one client disconnecting must not reject another live
+   * client's in-flight API calls.
+   */
+  private rejectPendingForSocket(ws: WebSocket, reason: string): void {
+    for (const [echo, pending] of this.pendingRequests) {
+      if (pending.ws !== ws) continue;
+      clearTimeout(pending.timer);
+      this.pendingRequests.delete(echo);
+      pending.reject(new Error(reason));
+    }
   }
 
   // ── OneBot 11 Standard API Methods ──
@@ -1022,17 +1039,23 @@ export class OneBot11Adapter extends PlatformAdapter {
 
       console.info(`[OneBot11] Reverse WS: connecting to ${url}...`);
       const ws = new WebSocket(url, { headers });
+      // Resolve at most once. `close` without a prior `open` (e.g. connection
+      // refused) must also settle the promise, otherwise startReverseWs()
+      // hangs forever and the caller never proceeds.
+      let settled = false;
+      const settle = (): void => { if (!settled) { settled = true; resolve(); } };
 
       ws.on("open", () => {
         console.info(`[OneBot11] Reverse WS: connected to ${url}`);
         this.reverseWs = ws;
         this.setupWsHandler(ws);
-        resolve();
+        settle();
       });
 
       ws.on("close", (code: number, reason: Buffer) => {
         console.warn(`[OneBot11] Reverse WS: disconnected (code=${code}, reason=${reason})`);
         this.reverseWs = null;
+        settle();
         this.scheduleReconnect();
       });
 
@@ -1040,16 +1063,24 @@ export class OneBot11Adapter extends PlatformAdapter {
         console.error(`[OneBot11] Reverse WS: connection error:`, err.message);
         this.reverseWs = null;
         // Don't reject - we want to retry
-        resolve();
+        settle();
       });
     });
   }
 
   private scheduleReconnect(): void {
     if (this._status !== "running") return;
+    // Clear any armed timer first: without this, a second schedule (e.g.
+    // close + error firing together) left the old timer running and spawned
+    // duplicate concurrent connections.
+    if (this.reverseReconnectTimer) {
+      clearTimeout(this.reverseReconnectTimer);
+      this.reverseReconnectTimer = null;
+    }
     const delay = this.config.reconnectInterval ?? 5000;
     console.info(`[OneBot11] Reverse WS: reconnecting in ${delay}ms...`);
     this.reverseReconnectTimer = setTimeout(() => {
+      this.reverseReconnectTimer = null;
       if (this._status === "running") {
         this.connectReverseWs();
       }
@@ -1073,10 +1104,11 @@ export class OneBot11Adapter extends PlatformAdapter {
 
     ws.on("close", () => {
       console.info("[OneBot11] WS client disconnected");
-      // Fail in-flight API calls immediately instead of letting each one
-      // hang until its 30s timeout — the echo responses can never arrive
-      // on a closed socket.
-      this.rejectAllPending("WS connection closed");
+      // Fail this socket's in-flight API calls immediately instead of letting
+      // each one hang until its 30s timeout — the echo responses can never
+      // arrive on a closed socket. Scoped to `ws` so a disconnecting forward
+      // client does not reject other live clients' pending calls.
+      this.rejectPendingForSocket(ws, "WS connection closed");
     });
 
     ws.on("error", (err: Error) => {
@@ -1085,11 +1117,18 @@ export class OneBot11Adapter extends PlatformAdapter {
   }
 
   private handleOb11Data(data: Record<string, unknown>, ws: WebSocket): void {
-    // Handle API responses (echo) — resolve pending requests
+    // Handle API responses (echo) — resolve pending requests. Correlation is
+    // by echo string AND originating socket: a different (possibly
+    // unauthenticated) client must not be able to resolve/reject another
+    // client's pending API call by guessing/replaying an echo.
     if (data.echo && data.retcode !== undefined) {
       const echo = data.echo as string;
       const pending = this.pendingRequests.get(echo);
       if (pending) {
+        if (pending.ws !== ws) {
+          console.warn(`[OneBot11] Ignoring echo '${echo}' from a different socket.`);
+          return;
+        }
         clearTimeout(pending.timer);
         this.pendingRequests.delete(echo);
         if (data.retcode === 0) {

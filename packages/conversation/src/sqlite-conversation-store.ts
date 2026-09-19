@@ -678,7 +678,7 @@ export class SqliteConversationStore extends ConversationStore {
   async getCommandConfig(commandName: string): Promise<CommandConfig | null> {
     const row = this.db.prepare("SELECT command_name, config FROM command_configs WHERE command_name = ?").get(commandName) as CommandConfigRow;
     if (!row) return null;
-    return { commandName: row.command_name, config: JSON.parse(row.config) };
+    return { commandName: row.command_name, config: this.parseJsonObject(row.config, "command_configs.config") };
   }
 
   async upsertCommandConfig(config: CommandConfig): Promise<void> {
@@ -713,7 +713,7 @@ export class SqliteConversationStore extends ConversationStore {
       sessionId: row.session_id,
       providerId: row.provider_id,
       personaId: row.persona_id,
-      config: JSON.parse(row.config),
+      config: this.parseJsonObject(row.config, "platform_sessions.config"),
     };
   }
 
@@ -910,6 +910,28 @@ export class SqliteConversationStore extends ConversationStore {
     };
   }
 
+  /**
+   * Parse a JSON column, degrading to null on corruption instead of throwing.
+   * A single malformed row must not break reads of the whole table.
+   */
+  private parseJson(raw: string | null, field: string): unknown {
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw);
+    } catch (e) {
+      console.warn(`[SqliteConversationStore] Failed to parse ${field}; ignoring:`, e);
+      return null;
+    }
+  }
+
+  /** Like parseJson but coerces to a plain object (defaults to {} on corruption). */
+  private parseJsonObject(raw: string | null, field: string): Record<string, unknown> {
+    const parsed = this.parseJson(raw, field);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  }
+
   private rowToConversation(row: ConversationRow): ConversationRecord {
     return {
       id: row.id,
@@ -931,7 +953,10 @@ export class SqliteConversationStore extends ConversationStore {
       keyHash: row.key_hash,
       keyPrefix: row.key_prefix,
       name: row.name,
-      scopes: row.scopes ? JSON.parse(row.scopes) : null,
+      scopes: (() => {
+        const parsed = this.parseJson(row.scopes, "api_keys.scopes");
+        return Array.isArray(parsed) ? parsed as string[] : null;
+      })(),
       createdBy: row.created_by,
       createdAt: new Date(row.created_at),
       lastUsedAt: row.last_used_at ? new Date(row.last_used_at) : null,

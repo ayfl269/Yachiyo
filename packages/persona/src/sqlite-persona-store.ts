@@ -5,6 +5,7 @@
  */
 
 import type Database from "better-sqlite3";
+import type { Message } from "@yachiyo/agent/message.js";
 import { PersonaStore, type Personality, type PersonaFolder } from "./manager.js";
 import type { Migration } from "@yachiyo/common/database.js";
 
@@ -142,12 +143,39 @@ export class SqlitePersonaStore extends PersonaStore {
     return {
       name: row.name,
       prompt: row.prompt,
-      beginDialogs: row.begin_dialogs ? JSON.parse(row.begin_dialogs) : [],
-      moodImitationDialogs: row.mood_imitation_dialogs ? JSON.parse(row.mood_imitation_dialogs) : [],
-      tools: row.tools ? JSON.parse(row.tools) : null,
-      skills: row.skills ? JSON.parse(row.skills) : null,
+      beginDialogs: this.parseJsonArray<Message>(row.begin_dialogs, "begin_dialogs"),
+      moodImitationDialogs: this.parseJsonArray<Message>(row.mood_imitation_dialogs, "mood_imitation_dialogs"),
+      tools: this.parseStringArray(row.tools, "tools"),
+      skills: this.parseStringArray(row.skills, "skills"),
       customErrorMessage: row.custom_error_message,
     };
+  }
+
+  /**
+   * Parse a JSON column, degrading to null on corruption instead of throwing
+   * (one bad row previously made getPersona/getAllPersonas fail, breaking all
+   * persona loading).
+   */
+  private parseJson(raw: string | null, field: string): unknown {
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw);
+    } catch (e) {
+      console.warn(`[SqlitePersonaStore] Failed to parse persona.${field}; ignoring:`, e);
+      return null;
+    }
+  }
+
+  /** Like parseJson but coerces to an array (defaults to [] on corruption). */
+  private parseJsonArray<T>(raw: string | null, field: string): T[] {
+    const parsed = this.parseJson(raw, field);
+    return Array.isArray(parsed) ? parsed as T[] : [];
+  }
+
+  /** Parse a JSON string-array column, defaulting to null on corruption. */
+  private parseStringArray(raw: string | null, field: string): string[] | null {
+    const parsed = this.parseJson(raw, field);
+    return Array.isArray(parsed) ? parsed as string[] : null;
   }
 
   private rowToFolder(row: PersonaFolderRow): PersonaFolder {

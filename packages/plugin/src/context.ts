@@ -243,6 +243,9 @@ export class PluginContext {
   getAgentConfig(): AgentConfig | null {
     if (!this.configManager) return null;
     const confInfo = this.configManager.getConfInfo("");
-    return confInfo.config;
+    // Return a masked copy, consistent with getConfig(): the raw config may
+    // hold secret-looking fields, and handing out the live reference also let
+    // callers mutate the ConfigManager's internal state.
+    return this.maskSecretFields({ ...confInfo.config } as unknown as Record<string, unknown>) as unknown as AgentConfig;
   }
 }

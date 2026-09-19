@@ -18,6 +18,17 @@
  * delete B's lock and let consumer C in, producing exactly the concurrent
  * session access the lock exists to prevent.
  */
+/**
+ * Release handle returned by {@link SessionLockManager.acquireLock}.
+ * Callable (releases the lock, identity-bound) and exposes `renew()` which
+ * extends only THIS acquisition's TTL — a stale holder cannot extend a lock
+ * that expired and was re-acquired by someone else.
+ */
+export interface SessionLockHandle {
+  (): void;
+  renew(): boolean;
+}
+
 export class SessionLockManager {
   private locks: Map<string, {
     promise: Promise<void>;
@@ -36,7 +47,7 @@ export class SessionLockManager {
     this.watchdogIntervalMs = options?.watchdogIntervalMs ?? 30 * 1000; // check every 30s
   }
 
-  async acquireLock(umo: string): Promise<() => void> {
+  async acquireLock(umo: string): Promise<SessionLockHandle> {
     // Wait for any existing lock to be released.
     while (this.locks.has(umo)) {
       await this.locks.get(umo)!.promise;
@@ -68,9 +79,14 @@ export class SessionLockManager {
     // still owns the lock. A stale holder's release is a no-op (its own
     // lock was already force-released and possibly re-acquired by someone
     // else — deleting the new holder's entry here would be catastrophic).
-    return () => {
+    const handle = (() => {
       this.forceRelease(umo, token);
-    };
+    }) as SessionLockHandle;
+    // Identity-bound renew: only extends the TTL when this acquisition still
+    // owns the lock. Without the token check a stale holder could renew the
+    // NEW holder's lock indefinitely, defeating the watchdog.
+    handle.renew = () => this.renewLock(umo, token);
+    return handle;
   }
 
   /**
@@ -83,11 +99,16 @@ export class SessionLockManager {
    * 30 seconds — to prevent the lock from expiring mid-operation.
    *
    * Returns `true` if the lock was successfully renewed, `false` if no
-   * lock exists for the given `umo` (already released or never acquired).
+   * lock exists for the given `umo` (already released or never acquired) or
+   * if `token` is supplied and does not match the current holder.
+   *
+   * Prefer `handle.renew()` from {@link acquireLock}; passing a token here
+   * ensures a stale holder cannot extend a lock it no longer owns.
    */
-  renewLock(umo: string): boolean {
+  renewLock(umo: string, token?: object): boolean {
     const entry = this.locks.get(umo);
     if (!entry) return false;
+    if (token !== undefined && entry.token !== token) return false;
     entry.acquiredAt = Date.now();
     return true;
   }

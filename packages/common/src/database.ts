@@ -54,14 +54,26 @@ export class DatabaseManager {
       mkdirSync(this.dataDir, { recursive: true });
     }
 
-    // Open all databases
+    // Open all databases. If any open/pragma/migration step throws, close the
+    // handles opened so far so a failed initialize() does not leak connections
+    // (previously they stayed open while `initialized` remained false).
     const dbNames: DatabaseName[] = ["chat", "memory", "config", "knowledge", "scheduler"];
-    for (const name of dbNames) {
-      const dbPath = join(this.dataDir, `${name}.db`);
-      const db = new Database(dbPath);
-      this.applyPragmas(db);
-      this.ensureMigrationTable(db);
-      this.dbs.set(name, db);
+    try {
+      for (const name of dbNames) {
+        const dbPath = join(this.dataDir, `${name}.db`);
+        const db = new Database(dbPath);
+        try {
+          this.applyPragmas(db);
+          this.ensureMigrationTable(db);
+        } catch (e) {
+          try { db.close(); } catch { /* ignore */ }
+          throw e;
+        }
+        this.dbs.set(name, db);
+      }
+    } catch (e) {
+      this.close();
+      throw e;
     }
 
     this.initialized = true;

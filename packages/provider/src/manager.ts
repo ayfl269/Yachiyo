@@ -518,10 +518,14 @@ export class ProviderManager {
         // instance and config stay consistent: remove both the instance
         // and the config entry we just added, otherwise a dangling
         // providerConfigs entry survives (it would even be merged into
-        // getMergedProviderConfig lookups for this ID).
+        // getMergedProviderConfig lookups for this ID). Dispose the
+        // instance too, otherwise a successfully constructed provider
+        // (e.g. Gemini server-side caches) leaks.
         console.warn(`[ProviderManager] Failed to persist config for ${id}, rolling back: ${e}`);
+        const created = this.instMap.get(id);
         this.removeProviderInstance(id);
         this.providerConfigs.delete(id);
+        await this.disposeInstance(created);
         throw e;
       }
     }
@@ -588,7 +592,14 @@ export class ProviderManager {
       this.notifyChange(id, this.guessProviderType(type), "reload");
       console.info(`[ProviderManager] Reloaded provider ${id} (type: ${type}).`);
     } catch (e) {
-      // Rollback: restore the old instance and config.
+      // Rollback: discard the partially-created new instance (it may have
+      // been registered by createAndRegisterProvider before the failure) so
+      // it doesn't linger in the typed arrays/instMap, then restore the old.
+      const created = this.instMap.get(id);
+      if (created && created !== oldInstance) {
+        this.removeProviderInstance(id);
+        await this.disposeInstance(created);
+      }
       if (oldInstance && oldConfig) {
         this.restoreProviderInstance(id, oldInstance, oldConfig);
       }
@@ -730,7 +741,14 @@ export class ProviderManager {
 
       this.notifyChange(newId, this.guessProviderType(config.type), "update");
     } catch (e) {
-      // Rollback: restore the old instance and config.
+      // Rollback: discard the new instance if loadProvider registered it
+      // under the new ID before failing (it is not the old instance, which
+      // was removed from the registry above and kept alive for restore).
+      const created = this.instMap.get(newId);
+      if (created && created !== oldInstance) {
+        this.removeProviderInstance(newId);
+        await this.disposeInstance(created);
+      }
       if (oldInstance && oldConfig) {
         this.restoreProviderInstance(originProviderId, oldInstance, oldConfig);
       }
@@ -778,6 +796,20 @@ export class ProviderManager {
         }
       })
     );
+  }
+
+  /**
+   * Best-effort dispose of a provider instance, logging (not throwing) on
+   * failure. Used by rollback paths to release resources of an instance that
+   * is being discarded.
+   */
+  private async disposeInstance(instance: AnyProvider | undefined): Promise<void> {
+    if (!instance?.dispose) return;
+    try {
+      await instance.dispose();
+    } catch (e) {
+      console.warn("[ProviderManager] Error disposing provider during rollback:", e);
+    }
   }
 
   /**

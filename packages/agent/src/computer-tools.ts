@@ -85,19 +85,17 @@ export function normalizeRwPath(
     throw new Error(`Path '${p}' is outside the workspace root '${root}'`);
   }
 
-  // Apply sandbox policy path restrictions (allowedPaths / deniedPaths).
-  // This enforces the SandboxPolicy that was previously defined but never
-  // checked at the tool execution layer.
-  if (options.sandboxPolicy) {
-    if (!isPathAllowed(p, options.sandboxPolicy)) {
-      throw new Error(`Path '${p}' is denied by sandbox policy`);
-    }
-  }
-
   // Resolve symlinks so a link inside the workspace cannot point outside of
   // it (e.g. a symlink created by execute_shell or file_move_tool). For a
   // not-yet-existing path (new file), resolve the nearest existing ancestor
   // and keep the remaining non-existent suffix appended verbatim.
+  //
+  // `realPath` is computed first so BOTH the workspace-root containment and
+  // the sandbox allowedPaths/deniedPaths checks run against the symlink-
+  // resolved target. Checking the sandbox policy only against the lexical
+  // path let a symlink inside an allowed dir point elsewhere in the workspace
+  // and escape `allowedPaths`.
+  let realPath = p;
   try {
     const realRoot = realpathSync(root);
     let probe = p;
@@ -108,7 +106,7 @@ export function normalizeRwPath(
       suffix = join(basename(probe), suffix);
       probe = parent;
     }
-    const realPath = suffix ? join(realpathSync(probe), suffix) : realpathSync(probe);
+    realPath = suffix ? join(realpathSync(probe), suffix) : realpathSync(probe);
     const realCmp = process.platform === "win32" ? realPath.toLowerCase() : realPath;
     const realRootCmp = process.platform === "win32" ? realRoot.toLowerCase() : realRoot;
     if (realCmp !== realRootCmp && !realCmp.startsWith(realRootCmp + sep)) {
@@ -120,6 +118,16 @@ export function normalizeRwPath(
     // anything else is an unexpected FS error worth surfacing.
     if (e instanceof Error && e.message.includes("outside the workspace root")) throw e;
     if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") throw e;
+  }
+
+  // Apply sandbox policy path restrictions (allowedPaths / deniedPaths).
+  // This enforces the SandboxPolicy that was previously defined but never
+  // checked at the tool execution layer. Evaluate against the resolved target
+  // so symlinks cannot sidestep `allowedPaths`.
+  if (options.sandboxPolicy) {
+    if (!isPathAllowed(p, options.sandboxPolicy) || !isPathAllowed(realPath, options.sandboxPolicy)) {
+      throw new Error(`Path '${p}' is denied by sandbox policy`);
+    }
   }
 
   return p;

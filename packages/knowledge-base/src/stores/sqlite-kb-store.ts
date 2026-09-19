@@ -128,11 +128,25 @@ export class SqliteKBMetadataStore {
   // === Knowledge Bases ===
 
   saveKb(kb: KnowledgeBase): void {
+    // Upsert in place. INSERT OR REPLACE deletes the existing row first, which
+    // (with `foreign_keys = ON`) cascades through kb_documents/kb_chunks/
+    // kb_vectors and wipes all documents of an already-persisted KB.
     this.db.prepare(`
-      INSERT OR REPLACE INTO knowledge_bases
+      INSERT INTO knowledge_bases
         (id, name, description, emoji, embedding_provider_id, rerank_provider_id,
          chunk_size, chunk_overlap, top_k_dense, top_k_sparse, top_m_final)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        description = excluded.description,
+        emoji = excluded.emoji,
+        embedding_provider_id = excluded.embedding_provider_id,
+        rerank_provider_id = excluded.rerank_provider_id,
+        chunk_size = excluded.chunk_size,
+        chunk_overlap = excluded.chunk_overlap,
+        top_k_dense = excluded.top_k_dense,
+        top_k_sparse = excluded.top_k_sparse,
+        top_m_final = excluded.top_m_final
     `).run(
       kb.id, kb.name, kb.description, kb.emoji,
       kb.embeddingProviderId, kb.rerankProviderId,

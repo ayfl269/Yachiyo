@@ -653,7 +653,8 @@ ${JSON.stringify(memoryList, null, 2)}
     if (!value.trim()) return null;
     value = this.sanitizeValue(value);
     if (this.config.maxMemoryLength > 0 && value.length > this.config.maxMemoryLength) {
-      value = value.slice(0, this.config.maxMemoryLength - 3) + "...";
+      // Guard against maxMemoryLength < 3 (negative slice index).
+      value = value.slice(0, Math.max(0, this.config.maxMemoryLength - 3)) + "...";
     }
 
     const tags = Array.isArray(m.tags)

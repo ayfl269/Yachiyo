@@ -608,10 +608,9 @@ export async function quickTestMcpConnection(
   const transportType =
     (cfg.transport as string) ?? (cfg.type as string) ?? "streamable_http";
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout * 1000);
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout * 1000);
-
     if (transportType === "streamable_http") {
       const testPayload = {
         jsonrpc: "2.0",
@@ -635,7 +634,6 @@ export async function quickTestMcpConnection(
         body: JSON.stringify(testPayload),
         signal: controller.signal,
       });
-      clearTimeout(timeoutId);
       if (response.ok) return [true, ""];
       return [false, `HTTP ${response.status}: ${response.statusText}`];
     } else {
@@ -647,7 +645,6 @@ export async function quickTestMcpConnection(
         },
         signal: controller.signal,
       });
-      clearTimeout(timeoutId);
       if (response.ok) return [true, ""];
       return [false, `HTTP ${response.status}: ${response.statusText}`];
     }
@@ -656,5 +653,7 @@ export async function quickTestMcpConnection(
       return [false, `Connection timeout: ${timeout} seconds`];
     }
     return [false, String(e)];
+  } finally {
+    clearTimeout(timeoutId);
   }
 }

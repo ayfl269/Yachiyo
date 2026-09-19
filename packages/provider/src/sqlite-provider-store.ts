@@ -331,7 +331,7 @@ export class SqliteProviderStore {
     const rows = this.db.prepare("SELECT server_name, config, created_at, updated_at FROM mcp_server_configs").all() as McpServerConfigRow[];
     return rows.map((r) => ({
       serverName: r.server_name,
-      config: JSON.parse(this.decryptMcpConfig(r.config)),
+      config: this.parseJsonObject(this.decryptMcpConfig(r.config), `mcp_server_configs(${r.server_name})`),
       createdAt: r.created_at,
       updatedAt: r.updated_at,
     }));
@@ -383,7 +383,7 @@ export class SqliteProviderStore {
       this.encryptKey(source.key),
       source.api_base,
       source.enable ? 1 : 0,
-      JSON.stringify(source.extra_config),
+      this.encryptExtraConfig(source.extra_config),
       source.createdAt,
       source.updatedAt,
     );
@@ -415,7 +415,7 @@ export class SqliteProviderStore {
       key: this.decryptKey(row.key),
       api_base: row.api_base,
       enable: row.enable === 1,
-      extra_config: JSON.parse(row.extra_config),
+      extra_config: this.parseExtraConfig(row.extra_config),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -423,11 +423,61 @@ export class SqliteProviderStore {
 
   // ── Helpers ──
 
+  /**
+   * Parse a stored JSON object column, degrading to `{}` on malformed/legacy
+   * rows instead of throwing and aborting startup (e.g. `getAllProviderConfigs`).
+   */
+  private parseJsonObject(raw: string, label: string): Record<string, unknown> {
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : {};
+    } catch (e) {
+      console.error(`[SqliteProviderStore] Failed to parse ${label}; returning empty config:`, e);
+      return {};
+    }
+  }
+
+  /**
+   * `extra_config` can carry credentials (e.g. a proxy URL with user:pass).
+   * Encrypt the whole JSON blob like MCP configs so it is not stored in
+   * plaintext; legacy plaintext rows stay readable via decryptSecret's
+   * pass-through for non-`enc:` values.
+   */
+  private encryptExtraConfig(extra: Record<string, unknown>): string {
+    const serialized = JSON.stringify(extra ?? {});
+    if (this.encKey) return encryptSecret(serialized, this.encKey);
+    return serialized;
+  }
+
+  /** Decrypt + parse `extra_config`, degrading to `{}` on corruption. */
+  private parseExtraConfig(raw: string): Record<string, unknown> {
+    let json = raw;
+    if (raw.startsWith("enc:v1:") || raw.startsWith("enc:v2:")) {
+      if (!this.encKey) {
+        console.error("[SqliteProviderStore] provider_sources.extra_config is encrypted but no key is available; returning empty config.");
+        return {};
+      }
+      const decrypted = decryptSecret(raw, this.encKey);
+      if (decrypted === null) {
+        console.error("[SqliteProviderStore] Failed to decrypt provider_sources.extra_config; returning empty config.");
+        return {};
+      }
+      json = decrypted;
+    }
+    try {
+      const parsed = JSON.parse(json);
+      return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : {};
+    } catch (e) {
+      console.error("[SqliteProviderStore] Failed to parse provider_sources.extra_config; returning empty config:", e);
+      return {};
+    }
+  }
+
   private rowToProviderConfig(row: ProviderConfigRow): StoredProviderConfig {
     return {
       id: row.id,
       type: row.type,
-      config: this.decryptConfigSecrets(JSON.parse(row.config)),
+      config: this.decryptConfigSecrets(this.parseJsonObject(row.config, `provider_configs(${row.id})`)),
       isDefault: row.is_default === 1,
       isFallback: row.is_fallback === 1,
       sortOrder: row.sort_order,

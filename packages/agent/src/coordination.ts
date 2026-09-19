@@ -564,13 +564,20 @@ export class SubAgentTaskManager extends EventEmitter {
     // listening to the terminal events directly makes the wait resolve
     // exactly when the last task transitions.
     await new Promise<void>((resolve) => {
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+      // Tear down listeners + the deadline timer exactly once, whether the
+      // wait resolves via terminal event or via deadline. Previously the
+      // event-driven path left the timer re-arming every 100ms until the
+      // full deadline.
+      const settle = (): void => {
+        this.removeListener("task_completed", onTerminal);
+        this.removeListener("task_failed", onTerminal);
+        this.removeListener("task_cancelled", onTerminal);
+        if (deadlineTimer) clearTimeout(deadlineTimer);
+        resolve();
+      };
       const onTerminal = (): void => {
-        if (isAllDone()) {
-          this.removeListener("task_completed", onTerminal);
-          this.removeListener("task_failed", onTerminal);
-          this.removeListener("task_cancelled", onTerminal);
-          resolve();
-        }
+        if (isAllDone()) settle();
       };
       this.addListener("task_completed", onTerminal);
       this.addListener("task_failed", onTerminal);
@@ -583,10 +590,7 @@ export class SubAgentTaskManager extends EventEmitter {
       // timer never fires (`Infinity` deadline + `unref`).
       const checkDeadline = (): void => {
         if (Date.now() >= deadline) {
-          this.removeListener("task_completed", onTerminal);
-          this.removeListener("task_failed", onTerminal);
-          this.removeListener("task_cancelled", onTerminal);
-          resolve();
+          settle();
           return;
         }
         // Re-arm the periodic check. Use unref so the timer doesn't keep
@@ -596,7 +600,6 @@ export class SubAgentTaskManager extends EventEmitter {
           deadlineTimer.unref();
         }
       };
-      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
       if (timeoutMs) {
         deadlineTimer = setTimeout(checkDeadline, WAIT_FOR_ALL_POLL_INTERVAL_MS);
         if (deadlineTimer && typeof deadlineTimer === "object" && "unref" in deadlineTimer) {
@@ -722,13 +725,18 @@ export async function executeParallelSubAgents(
         if (manager.hasCapacity) continue; // retry immediately if a slot opened
 
         await new Promise<void>((resolve) => {
+          // Also listen for task_cancelled: a cancelled running task frees a
+          // slot without emitting completed/failed, so without this a waiter
+          // would never wake.
           const onSlotFree = (): void => {
             manager.removeListener("task_completed", onSlotFree);
             manager.removeListener("task_failed", onSlotFree);
+            manager.removeListener("task_cancelled", onSlotFree);
             resolve();
           };
           manager.addListener("task_completed", onSlotFree);
           manager.addListener("task_failed", onSlotFree);
+          manager.addListener("task_cancelled", onSlotFree);
         });
       }
 

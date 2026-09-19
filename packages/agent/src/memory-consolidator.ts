@@ -637,7 +637,10 @@ ${bufferTexts.join("\n")}
   private truncateValue(value: string): string {
     const maxLen = this.config.maxMemoryLength;
     if (maxLen > 0 && value.length > maxLen) {
-      return value.slice(0, maxLen - 3) + "...";
+      // Guard against maxLen < 3, which made `maxLen - 3` negative and
+      // slice() return an empty prefix (dropping the whole value).
+      const keep = Math.max(0, maxLen - 3);
+      return value.slice(0, keep) + "...";
     }
     return value;
   }

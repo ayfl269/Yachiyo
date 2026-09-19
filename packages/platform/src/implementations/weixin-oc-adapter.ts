@@ -699,6 +699,14 @@ export class WeixinOCAdapter extends PlatformAdapter {
       this.persistConfig();
       this.contextTokensDirty = false;
     }
+
+    // If the endpoint returned successfully but immediately (no messages),
+    // avoid a hot request loop by yielding briefly. The long-poll normally
+    // blocks for `longPollTimeout`, so this only triggers when the server
+    // answers early.
+    if (!Array.isArray(msgs) || msgs.length === 0) {
+      await this.sleep(this.qrPollInterval);
+    }
   }
 
   // ── Inbound Message Handling ──
@@ -1017,7 +1025,15 @@ export class WeixinOCAdapter extends PlatformAdapter {
         try {
           await this.sendTypingState(userId, ticket, true);
         } catch (e) { console.warn(`[WeixinOC] cancel typing failed for ${userId}:`, e); }
+        // Drop the now-idle entry so the map does not grow unbounded across
+        // the process lifetime (a new startTyping re-creates it).
+        if (this.typingStates.get(userId) === state && state.owners.size === 0) {
+          this.typingStates.delete(userId);
+        }
       }, 300);
+    } else {
+      // No cancel to send — remove the idle entry immediately.
+      this.typingStates.delete(userId);
     }
   }
 
@@ -1085,6 +1101,9 @@ export class WeixinOCAdapter extends PlatformAdapter {
     this.contextTokens.clear();
     this.contextTokensDirty = false;
     this.loginSession = null;
+    // Clear typing keepalive/cancel timers too: they would otherwise keep
+    // issuing unauthenticated API calls after the token was cleared.
+    this.cleanupTypingStates();
     this.client.updateToken(null);
     this.persistConfig();
   }

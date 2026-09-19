@@ -1174,6 +1174,11 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
         // Retry on empty output
         for (let attempt = 1; attempt <= EMPTY_OUTPUT_RETRY_ATTEMPTS; attempt++) {
           let hasStreamOutput = false;
+          // An error response from a non-last candidate should move to the
+          // next candidate immediately, not re-run the same failing provider
+          // EMPTY_OUTPUT_RETRY_ATTEMPTS times (which contradicted the
+          // "trying fallback" log and delayed recovery).
+          let fallbackNow = false;
           try {
             for await (const resp of this.iterLlmResponses({ includeModel: idx === 0 })) {
               if (resp.isChunk) {
@@ -1184,6 +1189,7 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
 
               if (resp.role === "err" && !hasStreamOutput && !isLastCandidate) {
                 lastErrResponse = resp;
+                fallbackNow = true;
                 console.warn(
                   `Chat Model ${candidate.providerConfig.id} returns error, trying fallback.`
                 );
@@ -1193,6 +1199,7 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
               yield resp;
               return;
             }
+            if (fallbackNow) break;
             if (hasStreamOutput) return;
           } catch (e) {
             if (e instanceof EmptyModelOutputError) {

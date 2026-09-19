@@ -944,16 +944,21 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
           timedOut = true;
           break;
         }
+        // Each race must clear its losing timeout, otherwise every yielded
+        // step leaks a timer that can live up to the full (1h) deadline.
+        let stepTimer: ReturnType<typeof setTimeout> | undefined;
         const step = await Promise.race([
           iter.next(),
           new Promise<"timeout">((resolve) => {
-            const timer = setTimeout(() => resolve("timeout"), remaining);
+            stepTimer = setTimeout(() => resolve("timeout"), remaining);
             // Don't keep the process alive just for the timeout race.
-            if (typeof timer === "object" && timer && "unref" in timer) {
-              (timer as { unref(): void }).unref();
+            if (typeof stepTimer === "object" && stepTimer && "unref" in stepTimer) {
+              (stepTimer as { unref(): void }).unref();
             }
           }),
-        ]);
+        ]).finally(() => {
+          if (stepTimer) clearTimeout(stepTimer);
+        });
         if (step === "timeout") {
           timedOut = true;
           break;

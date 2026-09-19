@@ -19,29 +19,40 @@ export class Condition {
       let timerId: ReturnType<typeof setTimeout> | undefined;
       let onAbort: (() => void) | undefined;
 
+      // Detach from the waiters list, clear the timer and remove the abort
+      // listener exactly once. The timeout/abort paths previously rejected
+      // without removing the listener, leaking one listener per timed-out wait
+      // on a long-lived AbortSignal.
+      const cleanup = (): void => {
+        const idx = this.waiters.indexOf(entry);
+        if (idx >= 0) this.waiters.splice(idx, 1);
+        if (timerId) clearTimeout(timerId);
+        if (onAbort && options?.abortSignal) options.abortSignal.removeEventListener("abort", onAbort);
+      };
+
       const entry = {
         resolve: () => {
           if (settled) return;
           settled = true;
-          if (timerId) clearTimeout(timerId);
-          if (onAbort && options?.abortSignal) options.abortSignal.removeEventListener("abort", onAbort);
+          cleanup();
           resolve();
         },
       };
 
       if (options?.timeoutMs !== undefined) {
         timerId = setTimeout(() => {
-          const idx = this.waiters.indexOf(entry);
-          if (idx >= 0) this.waiters.splice(idx, 1);
+          if (settled) return;
+          settled = true;
+          cleanup();
           reject(new Error(`Condition.wait timed out after ${options.timeoutMs}ms`));
         }, options.timeoutMs);
       }
 
       if (options?.abortSignal) {
         onAbort = () => {
-          const idx = this.waiters.indexOf(entry);
-          if (idx >= 0) this.waiters.splice(idx, 1);
-          if (timerId) clearTimeout(timerId);
+          if (settled) return;
+          settled = true;
+          cleanup();
           reject(new Error("Aborted"));
         };
         options.abortSignal.addEventListener("abort", onAbort, { once: true });
