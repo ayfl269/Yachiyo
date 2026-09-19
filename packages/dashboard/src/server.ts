@@ -56,7 +56,7 @@ import type { MemoryConsolidator } from "@yachiyo/agent/memory-consolidator.js";
 import type { LongTermMemoryConsolidationJob } from "@yachiyo/agent/long-term-consolidation-job.js";
 import type { SqliteMemoryStore, MemoryEntry, ConversationIndexEntry, MemoryType, MemoryScope } from "@yachiyo/agent/sqlite-memory-store.js";
 import type { SqliteSchedulerTaskStore, SchedulerTask, TaskType, TaskStatus } from "@yachiyo/agent/scheduler-task-store.js";
-import type { SkillManager } from "@yachiyo/skill/index.js";
+import type { SkillManager, SkillInfo } from "@yachiyo/skill/index.js";
 import { safeFetch } from "@yachiyo/common/ssrf-guard.js";
 import { getProxyAgent } from "@yachiyo/common";
 import { proxyManager } from "@yachiyo/agent/proxy-manager.js";
@@ -797,6 +797,22 @@ export class DashboardServer {
     }
   }
 
+  /**
+   * Resolve a registered skill by name, refusing entries whose base path is
+   * not contained within the configured skill/plugin roots. Guards the
+   * skill-file read/write/download routes against legacy or persisted
+   * registrations whose `path` points outside the roots (arbitrary FS access).
+   */
+  private getSafeSkill(name: string): SkillInfo | null {
+    const skill = this.ctx.skillManager.listSkills().find((s) => s.name === name);
+    if (!skill?.path) return null;
+    if (!this.ctx.skillManager.isPathWithinRoots(skill.path)) {
+      console.warn(`[DashboardServer] Refusing skill "${name}" with out-of-root path: ${skill.path}`);
+      return null;
+    }
+    return skill;
+  }
+
   private async handleApiRequest(
     req: IncomingMessage,
     res: ServerResponse,
@@ -1513,7 +1529,21 @@ export class DashboardServer {
     if (pathname === "/api/skills" && req.method === "POST") {
       const parsed = await this.readJsonObjectOr400(req, res);
       if (!parsed) return;
-      this.ctx.skillManager.registerSkill(parsed as unknown as Parameters<typeof this.ctx.skillManager.registerSkill>[0]);
+      const skill = parsed as unknown as SkillInfo;
+      if (!skill.name || typeof skill.name !== "string") {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Missing skill name" }));
+        return;
+      }
+      // An API-supplied `path` becomes the base directory for the skill-file
+      // read/write/download routes, so it must stay within the configured
+      // skill/plugin roots. Otherwise registration yields arbitrary FS access.
+      if (skill.path && !this.ctx.skillManager.isPathWithinRoots(skill.path)) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Invalid skill path: must be within the skills directory" }));
+        return;
+      }
+      this.ctx.skillManager.registerSkill(skill);
       res.writeHead(200);
       res.end(JSON.stringify({ success: true }));
       return;
@@ -3367,8 +3397,7 @@ export class DashboardServer {
           res.end(JSON.stringify({ error: "Missing name parameter" }));
           return;
         }
-        const skills = this.ctx.skillManager.listSkills();
-        const skill = skills.find((s) => s.name === skillName);
+        const skill = this.getSafeSkill(skillName);
         if (!skill?.path) {
           res.writeHead(404);
           res.end(JSON.stringify({ error: "Skill not found or no path" }));
@@ -3418,8 +3447,7 @@ export class DashboardServer {
           res.end(JSON.stringify({ error: "Missing name" }));
           return;
         }
-        const skills = this.ctx.skillManager.listSkills();
-        const skill = skills.find((s) => s.name === skillName);
+        const skill = this.getSafeSkill(skillName);
         if (!skill?.path) {
           res.writeHead(404);
           res.end(JSON.stringify({ error: "Skill not found" }));
@@ -3792,8 +3820,7 @@ export class DashboardServer {
           res.end(JSON.stringify({ error: "Missing name or path" }));
           return;
         }
-        const skills = this.ctx.skillManager.listSkills();
-        const skill = skills.find((s) => s.name === skillName);
+        const skill = this.getSafeSkill(skillName);
         if (!skill?.path) {
           res.writeHead(404);
           res.end(JSON.stringify({ error: "Skill not found" }));
@@ -3826,8 +3853,7 @@ export class DashboardServer {
           res.end(JSON.stringify({ error: "Missing name, path or content" }));
           return;
         }
-        const skills = this.ctx.skillManager.listSkills();
-        const skill = skills.find((s) => s.name === name);
+        const skill = this.getSafeSkill(name);
         if (!skill?.path) {
           res.writeHead(404);
           res.end(JSON.stringify({ error: "Skill not found" }));

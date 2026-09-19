@@ -1,6 +1,6 @@
 import type { SqliteSkillStore } from "@yachiyo/config/sqlite-config-extras-store.js";
 import { readdir, readFile } from "fs/promises";
-import { join, dirname } from "path";
+import { join, dirname, resolve, relative, isAbsolute } from "path";
 import { existsSync } from "fs";
 import type { SkillInfo } from "@yachiyo/common/skill-types.js";
 
@@ -37,6 +37,25 @@ export class SkillManager {
 
   setSqliteStore(store: SqliteSkillStore): void {
     this.sqliteStore = store;
+  }
+
+  /**
+   * Whether `target` resolves inside one of the configured skill/plugin roots.
+   *
+   * The dashboard skill-file routes use a skill's `path` as their base
+   * directory for reads, writes and ZIP downloads. An API-supplied `path`
+   * pointing anywhere else (e.g. the filesystem root) would turn those routes
+   * into arbitrary file read/write, so registration validates against this.
+   */
+  isPathWithinRoots(target: string): boolean {
+    if (!target) return false;
+    const resolvedTarget = resolve(target);
+    for (const root of [this.skillsRoot, this.pluginsRoot]) {
+      if (!root) continue;
+      const rel = relative(resolve(root), resolvedTarget);
+      if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) return true;
+    }
+    return false;
   }
 
   async restoreFromStore(): Promise<void> {

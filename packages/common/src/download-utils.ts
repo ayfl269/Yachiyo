@@ -7,7 +7,14 @@
 import { readFile, writeFile, mkdir, unlink } from "fs/promises";
 import { join, extname } from "path";
 import { tmpdir } from "os";
+import { fileURLToPath } from "url";
+import { createRequire } from "module";
 import { safeFetch } from "./ssrf-guard.js";
+
+// This package is ESM ("type": "module"); a bare `require` is undefined in the
+// emitted output. createRequire provides a module-scoped CJS loader so optional
+// native deps (sharp) can still be loaded lazily.
+const nodeRequire = createRequire(import.meta.url);
 
 // 图片压缩阈值（字节）：超过此大小的图片会被压缩
 const IMAGE_COMPRESS_THRESHOLD = 60 * 1024; // 60KB
@@ -39,7 +46,7 @@ interface SharpModule {
  */
 async function compressImage(filePath: string): Promise<{ buffer: Buffer; mimeType: string } | null> {
   try {
-    const sharp = require("sharp") as SharpModule;
+    const sharp = nodeRequire("sharp") as SharpModule;
     const bytes = await readFile(filePath);
     if (bytes.length < IMAGE_COMPRESS_THRESHOLD) return null;
 
@@ -178,7 +185,7 @@ export async function encodeImageToBase64(imageRef: string): Promise<string> {
   // Transcode unsupported formats (like gif, bmp) to jpeg using sharp
   if (mimeType !== "image/jpeg" && mimeType !== "image/png" && mimeType !== "image/webp") {
     try {
-      const sharp = require("sharp") as SharpModule;
+      const sharp = nodeRequire("sharp") as SharpModule;
       const transcodedBuffer = await sharp(bytes).jpeg().toBuffer();
       const base64 = transcodedBuffer.toString("base64");
       return `data:image/jpeg;base64,${base64}`;
@@ -272,7 +279,6 @@ export async function resolveAudioToDataUrl(audioRef: string): Promise<string | 
 
 function resolveFileUriPath(uri: string): string {
   try {
-    const { fileURLToPath } = require("url") as typeof import("url");
     return fileURLToPath(uri);
   } catch {
     // Strip the scheme but keep one leading slash so POSIX absolute paths

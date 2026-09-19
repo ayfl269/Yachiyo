@@ -1,6 +1,11 @@
 import { spawn } from "child_process";
 import { existsSync } from "fs";
 import { extname } from "path";
+import { createRequire } from "module";
+
+// ESM package: bare `require` is undefined in emitted output. sharp is an
+// optional native dep loaded lazily via a module-scoped CJS loader.
+const nodeRequire = createRequire(import.meta.url);
 
 export const IMAGE_COMPRESS_DEFAULT_MAX_SIZE = 1280;
 export const IMAGE_COMPRESS_DEFAULT_QUALITY = 95;
@@ -102,7 +107,7 @@ export async function compressImage(
   quality: number = IMAGE_COMPRESS_DEFAULT_QUALITY,
 ): Promise<string> {
   try {
-    const sharp = require("sharp");
+    const sharp = nodeRequire("sharp");
     const inputPath = urlOrPath;
     if (!existsSync(inputPath)) return urlOrPath;
 

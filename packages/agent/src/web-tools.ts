@@ -1513,7 +1513,7 @@ export function createBrowserListPagesTool(): FunctionTool<WebToolContext> {
       }
 
       const lines: string[] = [`Open browser pages (${owned.length}/${MAX_BROWSER_PAGES}):`];
-      for (const [id, entry] of pageRegistry) {
+      for (const [id, entry] of owned) {
         const title = entry.title || "(untitled)";
         const url = entry.url || "(no url)";
         lines.push(`- page_id: ${id} | ${title} | ${url} | opened: ${entry.openedAt}`);

@@ -340,27 +340,30 @@ export class MarkdownToImageRenderer {
   private ensureBrowser(): Promise<Browser> {
     if (this.browser && this.browser.isConnected()) return Promise.resolve(this.browser);
     if (this.launchPromise) return this.launchPromise;
-    this.launchPromise = (async () => {
-      try {
-        const browser = await chromium.launch({
-          headless: true,
-          args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-gpu",
-            "--font-render-hinting=none",
-          ],
-        });
-        this.browser = browser;
-        return browser;
-      } catch (e) {
-        // Reset on failure so later calls can retry instead of awaiting a
-        // permanently rejected promise.
-        this.launchPromise = null;
-        throw e;
-      }
+    const launch = (async () => {
+      const browser = await chromium.launch({
+        headless: true,
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-gpu",
+          "--font-render-hinting=none",
+        ],
+      });
+      this.browser = browser;
+      return browser;
     })();
-    return this.launchPromise;
+    this.launchPromise = launch;
+    // Clear the shared promise once it settles (success or failure) so a later
+    // browser disconnect triggers a fresh launch. Previously the resolved
+    // promise was retained forever, so after a disconnect every call returned
+    // the stale promise pointing at the dead browser and rendering never
+    // recovered until close() was called explicitly.
+    launch.then(
+      () => { if (this.launchPromise === launch) this.launchPromise = null; },
+      () => { if (this.launchPromise === launch) this.launchPromise = null; },
+    );
+    return launch;
   }
 
   /**
