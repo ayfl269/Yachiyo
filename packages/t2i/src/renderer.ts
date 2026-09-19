@@ -427,9 +427,13 @@ export class MarkdownToImageRenderer {
     }
 
     const template = TEMPLATES[this.config.template] ?? TEMPLATES.default;
+    // Use a function replacer: a string replacement interprets `$&`, `$'`,
+    // `$\``, `$n` as substitution patterns, so model-controlled markdown
+    // containing those sequences would duplicate/inject template fragments
+    // instead of being inserted literally.
     const html = template
-      .replace("{{WIDTH}}", String(this.config.width))
-      .replace("{{CONTENT}}", escapeHtml(markdownText));
+      .replace("{{WIDTH}}", () => String(this.config.width))
+      .replace("{{CONTENT}}", () => escapeHtml(markdownText));
 
     // Ensure output directory exists
     const outputDir = join(tmpdir(), "yachiyo-t2i");

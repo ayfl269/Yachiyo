@@ -17,8 +17,6 @@ import { PlatformMessage } from "@yachiyo/message/platform-message.js";
 import { MessageType } from "@yachiyo/message/types.js";
 import { generateId } from "@yachiyo/common/id-generator.js";
 
-import { createCipheriv, createDecipheriv } from "crypto";
-
 // ── Config ──
 
 interface AdapterConfigBase {
@@ -74,72 +72,15 @@ function generateWechatUinHeader(): string {
   return Buffer.from(String(Math.floor(Math.random() * 0xffffffff))).toString("base64");
 }
 
-// ── AES-ECB Helpers ──
-//
-// SECURITY NOTE: AES-128-ECB is required by the WeChat iLink Bot media-download
-// protocol. The iLink gateway derives a per-bot media AES key and decrypts
-// uploaded media using AES-128-ECB with PKCS#7 padding, and there is no
-// negotiation of mode/IV on the wire. We cannot unilaterally switch to a
-// stronger mode (e.g. AES-GCM or AES-CBC) without breaking interop with the
-// official gateway. ECB here is acceptable because:
-//   1. It is used only for individual media-file encryption at rest on the
-//      WeChat CDN, not for general-purpose transport encryption (transport
-//      uses HTTPS).
-//   2. Plaintexts are high-entropy media bytes (already-compressed image/audio
-//      data), not structured data with low-entropy block patterns, so ECB's
-//      classic pattern-leakage weakness has minimal practical impact.
-//   3. Each media file uses the bot's single derived key; we never encrypt
-//      multiple distinct messages with ECB under the same key in a way that
-//      would enable known-plaintext attacks across files.
-// Do not "fix" this by changing the cipher mode without a protocol upgrade
-// from WeChat.
-
-function aesEcbEncrypt(plain: Buffer, key: Buffer): Buffer {
-  // PKCS#7 padding 由 Node autoPadding（默认开启）自动添加。
-  // 注意：不要在此手工 pad，否则会与 autoPadding 叠加成双重 padding。
-  const cipher = createCipheriv("aes-128-ecb", key, null);
-  return Buffer.concat([cipher.update(plain), cipher.final()]);
-}
-
-function aesEcbDecrypt(cipher: Buffer, key: Buffer): Buffer {
-  // 与加密侧对称：依赖 autoPadding 自动去除 PKCS#7 padding。
-  const decipher = createDecipheriv("aes-128-ecb", key, null);
-  return Buffer.concat([decipher.update(cipher), decipher.final()]);
-}
-
-function parseMediaAesKey(aesKeyValue: string): Buffer {
-  const normalized = aesKeyValue.trim();
-  if (!normalized) throw new Error("empty media aes key");
-
-  // 32 字符 hex 字符串优先按 hex 解码。
-  // 必须先判 hex：纯 hex 输入经 base64 解码会得到 24 字节垃圾数据，
-  // 永远无法命中 16 字节分支，导致 hex 形式的 aes_key 全部静默失败。
-  if (normalized.length === 32 && /^[0-9a-fA-F]+$/.test(normalized)) {
-    return Buffer.from(normalized, "hex");
-  }
-
-  // Try base64 decode — (4 - len % 4) % 4 yields 0/1/2/3, never negative.
-  // The old `-len % 4` produced -1/-2/-3 for non-multiple lengths, causing
-  // String.prototype.repeat() to throw RangeError on every non-aligned input.
-  const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
-  const decoded = Buffer.from(padded, "base64");
-
-  if (decoded.length === 16) return decoded;
-
-  throw new Error("unsupported media aes key format");
-}
-
 // ── iLink HTTP Client ──
 
 class ILinkClient {
   private baseUrl: string;
-  private cdnBaseUrl: string;
   private apiTimeout: number;
   private token: string | null;
 
-  constructor(baseUrl: string, cdnBaseUrl: string, apiTimeout: number, token: string | null) {
+  constructor(baseUrl: string, apiTimeout: number, token: string | null) {
     this.baseUrl = baseUrl;
-    this.cdnBaseUrl = cdnBaseUrl;
     this.apiTimeout = apiTimeout;
     this.token = token;
   }
@@ -213,82 +154,6 @@ class ILinkClient {
     }
   }
 
-  // ── CDN Operations ──
-
-  private buildCdnUploadUrl(uploadParam: string, fileKey: string): string {
-    return `${this.cdnBaseUrl}/upload?encrypted_query_param=${encodeURIComponent(uploadParam)}&filekey=${encodeURIComponent(fileKey)}`;
-  }
-
-  private buildCdnDownloadUrl(encryptedQueryParam: string): string {
-    return `${this.cdnBaseUrl}/download?encrypted_query_param=${encodeURIComponent(encryptedQueryParam)}`;
-  }
-
-  async uploadToCdn(
-    uploadFullUrl: string | undefined,
-    uploadParam: string,
-    fileKey: string,
-    aesKeyHex: string,
-    data: Buffer,
-  ): Promise<string> {
-    const cdnUrl = uploadFullUrl || this.buildCdnUploadUrl(uploadParam, fileKey);
-    if (!cdnUrl) throw new Error("CDN upload URL missing");
-
-    const key = Buffer.from(aesKeyHex, "hex");
-    const encrypted = aesEcbEncrypt(data, key);
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.apiTimeout);
-
-    try {
-      const response = await fetch(cdnUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: encrypted,
-        signal: controller.signal,
-      });
-
-      const body = await response.text();
-      if (response.status >= 400) {
-        throw new Error(`upload media to cdn failed: ${response.status} ${body}`);
-      }
-
-      const downloadParam = response.headers.get("x-encrypted-param");
-      if (!downloadParam) {
-        throw new Error("upload media to cdn failed: missing x-encrypted-param");
-      }
-      return downloadParam;
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  async downloadCdnBytes(encryptedQueryParam: string): Promise<Buffer> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.apiTimeout);
-
-    try {
-      const response = await fetch(this.buildCdnDownloadUrl(encryptedQueryParam), {
-        signal: controller.signal,
-      });
-      if (response.status >= 400) {
-        const text = await response.text();
-        throw new Error(`download media from cdn failed: ${response.status} ${text}`);
-      }
-      const arrayBuf = await response.arrayBuffer();
-      return Buffer.from(arrayBuf);
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  async downloadAndDecryptMedia(
-    encryptedQueryParam: string,
-    aesKeyValue: string,
-  ): Promise<Buffer> {
-    const encrypted = await this.downloadCdnBytes(encryptedQueryParam);
-    const key = parseMediaAesKey(aesKeyValue);
-    return aesEcbDecrypt(encrypted, key);
-  }
 }
 
 // ── Login Session ──
@@ -422,7 +287,7 @@ export class WeixinOCAdapter extends PlatformAdapter {
     this.accountId = config.accountId?.trim() || null;
     this.syncBuf = config.syncBuf?.trim() || "";
 
-    this.client = new ILinkClient(this.baseUrl, this.cdnBaseUrl, this.apiTimeout, this.token);
+    this.client = new ILinkClient(this.baseUrl, this.apiTimeout, this.token);
 
     if (this.token) {
       console.info(`[WeixinOC] Adapter ${this.config.id} loaded with existing token`);
@@ -1187,7 +1052,6 @@ export class WeixinOCAdapter extends PlatformAdapter {
   static async previewQrCode(): Promise<{ qrcode: string; qrcodeImgContent: string }> {
     const client = new ILinkClient(
       "https://ilinkai.weixin.qq.com",
-      "https://novac2c.cdn.weixin.qq.com/c2c",
       15000,
       null,
     );

@@ -1,26 +1,13 @@
 import type { AsyncQueue } from "@yachiyo/common/async-queue.js";
 import { MessageEvent } from "@yachiyo/message/event.js";
 import type { PlatformMetadata } from "./metadata.js";
-import { MessageSession } from "@yachiyo/message/message-session.js";
-import type { MessageComponent, PlainComponent } from "@yachiyo/message/components.js";
+import type { MessageComponent } from "@yachiyo/message/components.js";
 import { ComponentType } from "@yachiyo/message/components.js";
 import { PlatformMessage } from "@yachiyo/message/platform-message.js";
 import { generateId } from "@yachiyo/common/id-generator.js";
 import { MessageType } from "@yachiyo/message/types.js";
 
 export type AdapterStatus = "idle" | "initialized" | "running" | "stopping" | "stopped" | "error";
-
-class SyntheticMessageEvent extends MessageEvent {
-  private responseBuffer: MessageComponent[] = [];
-
-  async send(components: MessageComponent[]): Promise<void> {
-    this.responseBuffer.push(...components);
-  }
-
-  getResponse(): MessageComponent[] {
-    return this.responseBuffer;
-  }
-}
 
 /**
  * A system-generated event that flows through the pipeline like a normal
@@ -113,33 +100,6 @@ export abstract class PlatformAdapter {
 
   commitEvent(event: MessageEvent): void {
     this.eventQueue.put(event);
-  }
-
-  async sendBySession(session: MessageSession, components: MessageComponent[]): Promise<void> {
-    const platformMsg = new PlatformMessage();
-    platformMsg.type = session.messageType;
-    platformMsg.selfId = this.meta().id;
-    platformMsg.sessionId = session.sessionId;
-    platformMsg.messageId = generateId();
-    platformMsg.sender = { userId: "system", nickname: "System" };
-    platformMsg.components = components;
-    platformMsg.messageStr = components
-      .filter((c): c is PlainComponent => c.type === ComponentType.Plain)
-      .map(c => c.text ?? "")
-      .join("");
-    platformMsg.timestamp = Date.now();
-
-    const event = new SyntheticMessageEvent(
-      platformMsg.messageStr,
-      platformMsg,
-      this.meta(),
-      session.sessionId,
-    );
-    event.session.platformId = session.platformId;
-    event.session.messageType = session.messageType;
-    event.session.sessionId = session.sessionId;
-
-    this.commitEvent(event);
   }
 
   // --- 健康检查 ---

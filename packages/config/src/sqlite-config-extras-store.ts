@@ -39,18 +39,6 @@ export const CONFIG_EXTRAS_MIGRATIONS: Migration[] = [
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
 
-      CREATE TABLE IF NOT EXISTS plugin_handlers (
-        handler_full_name TEXT PRIMARY KEY,
-        handler_name TEXT NOT NULL DEFAULT '',
-        handler_module_path TEXT NOT NULL DEFAULT '',
-        event_type TEXT NOT NULL DEFAULT '',
-        event_filters JSON DEFAULT '[]',
-        description TEXT DEFAULT '',
-        extras_configs JSON DEFAULT '{}',
-        enabled INTEGER NOT NULL DEFAULT 1,
-        FOREIGN KEY (handler_module_path) REFERENCES plugin_stars(module_path) ON DELETE CASCADE
-      );
-
       CREATE TABLE IF NOT EXISTS skills (
         name TEXT PRIMARY KEY,
         description TEXT DEFAULT '',
