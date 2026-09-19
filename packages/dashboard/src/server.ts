@@ -173,7 +173,7 @@ export function isPathSafe(basePath: string, targetPath: string): boolean {
 
 /**
  * Sanitize a skill name / path segment derived from attacker-controlled ZIP
- * entry names or archive file content (SKILL.md frontmatter, manifest.json):
+ * entry names or archive file content (SKILL.md frontmatter, skills.md):
  *
  *  - take the basename (strip any directory components),
  *  - reject `.` / `..` traversal segments outright,
@@ -5057,8 +5057,7 @@ export class DashboardServer {
           const rootEntries = entries.filter((e: ZipEntry) => !e.entryName.includes("/"));
           const hasSkillMd = rootEntries.some((e: ZipEntry) =>
             e.name.toLowerCase() === "skill.md" ||
-            e.name.toLowerCase() === "skills.md" ||
-            e.name.toLowerCase() === "manifest.json"
+            e.name.toLowerCase() === "skills.md"
           );
 
           if (hasSkillMd) {
@@ -5094,7 +5093,7 @@ export class DashboardServer {
             zipResult.skills.push({
               name: "(root)",
               status: "error",
-              message: "ZIP 根目录未找到 SKILL.md / manifest.json / skills.md",
+              message: "ZIP 根目录未找到 SKILL.md / skills.md",
             });
           }
         } else {
@@ -5118,11 +5117,11 @@ export class DashboardServer {
 
             const hasSkillMd = dirEntries.some((e: ZipEntry) => {
               const name = e.entryName.substring(dirPrefix.length).toLowerCase();
-              return name === "skill.md" || name === "manifest.json" || name === "skills.md";
+              return name === "skill.md" || name === "skills.md";
             });
 
             if (!hasSkillMd) {
-              zipResult.skills.push({ name: dirName, status: "error", message: "缺少 SKILL.md 或 manifest.json" });
+              zipResult.skills.push({ name: dirName, status: "error", message: "缺少 SKILL.md" });
               continue;
             }
 
@@ -5217,7 +5216,6 @@ export class DashboardServer {
     const results: Array<{ name: string; description: string; path: string; active: boolean; sourceType: string; sourceLabel: string; localExists: boolean; sandboxExists: boolean; pluginName: string; readonly: boolean }> = [];
 
     const skillMdEntry = entries.find(e => e.name.toLowerCase() === "skill.md");
-    const manifestEntry = entries.find(e => e.name.toLowerCase() === "manifest.json");
     const skillsMdEntry = entries.find(e => e.name.toLowerCase() === "skills.md");
 
     if (skillsMdEntry) {
@@ -5252,23 +5250,6 @@ export class DashboardServer {
           });
         }
         i++;
-      }
-    } else if (manifestEntry) {
-      const content = safeReadZipText(manifestEntry);
-      try {
-        const parsed = JSON.parse(content);
-        results.push({
-          name: sanitizeSkillPathSegment(parsed.name ?? "") || "unnamed-skill",
-          description: parsed.description || "",
-          path: "manifest.json", active: parsed.active !== false, sourceType: "upload", sourceLabel: "ZIP上传",
-          localExists: false, sandboxExists: false, pluginName: "", readonly: !!parsed.readonly,
-        });
-      } catch {
-        results.push({
-          name: "unknown", description: "manifest.json 解析失败", path: "manifest.json",
-          active: true, sourceType: "upload", sourceLabel: "ZIP上传",
-          localExists: false, sandboxExists: false, pluginName: "", readonly: false,
-        });
       }
     } else if (skillMdEntry) {
       const content = safeReadZipText(skillMdEntry);
@@ -5314,10 +5295,6 @@ export class DashboardServer {
       const name = e.entryName.substring(dirPrefix.length).toLowerCase();
       return name === "skill.md";
     });
-    const manifestEntry = _entries.find(e => {
-      const name = e.entryName.substring(dirPrefix.length).toLowerCase();
-      return name === "manifest.json";
-    });
 
     let name = dirName;
     let description = "";
@@ -5347,16 +5324,6 @@ export class DashboardServer {
           if (name && l.trim() && !l.startsWith("#")) { description += (description ? " " : "") + l.trim(); }
         }
       }
-    } else if (manifestEntry) {
-      try {
-        const content = safeReadZipText(manifestEntry);
-        const parsed = JSON.parse(content);
-        const parsedName = sanitizeSkillPathSegment(parsed.name ?? "");
-        if (parsedName) name = parsedName;
-        if (parsed.description) description = parsed.description;
-        if (parsed.active === false) active = false;
-        if (parsed.readonly) readonly = true;
-      } catch { /* keep defaults */ }
     }
 
     return {

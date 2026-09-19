@@ -7,13 +7,6 @@ import type { SkillInfo } from "@yachiyo/common/skill-types.js";
 export type { SkillInfo };
 
 
-interface SkillManifest {
-  name: string;
-  description?: string;
-  active?: boolean;
-  readonly?: boolean;
-}
-
 interface ParsedSkillMd {
   name: string;
   description: string;
@@ -322,47 +315,41 @@ export class SkillManager {
     sourceLabel: string
   ): Promise<void> {
     const mdPath = join(dirPath, SKILL_MD_FILENAME);
-    const manifestPath = join(dirPath, "manifest.json");
 
-    let manifest: SkillManifest = { name: dirName, description: "", active: true };
-
+    // A skill directory is defined by its SKILL.md (frontmatter + body).
+    // `manifest.json` is intentionally NOT supported: it collides with the
+    // generic package-manifest name used by plugins/tooling and has no skill
+    // format spec. Use `skills.md` for a collection or `SKILL.md` per skill.
+    let parsed: Partial<ParsedSkillMd> = {};
     if (existsSync(mdPath)) {
       try {
         const content = await readFile(mdPath, "utf-8");
-        const parsed = this.parseSkillMdContent(content, dirName);
-        manifest = { ...manifest, ...parsed };
+        parsed = this.parseSkillMdContent(content, dirName);
       } catch (e) {
         console.warn(`[SkillManager] Failed to parse ${SKILL_MD_FILENAME} for skill "${dirName}": ${e}`);
       }
-    } else if (existsSync(manifestPath)) {
-      try {
-        const content = await readFile(manifestPath, "utf-8");
-        const parsed = JSON.parse(content);
-        manifest = { ...manifest, ...parsed };
-      } catch (e) {
-        console.warn(`[SkillManager] Failed to parse manifest.json for skill "${dirName}": ${e}`);
-      }
     }
 
-    const existing = this.skills.get(manifest.name);
+    const name = parsed.name ?? dirName;
+    const existing = this.skills.get(name);
     const skillInfo: SkillInfo = {
-      name: manifest.name,
-      description: manifest.description ?? "",
+      name,
+      description: parsed.description ?? "",
       path: dirPath,
-      active: existing?.active ?? (manifest.active ?? true),
+      active: existing?.active ?? (parsed.active ?? true),
       sourceType,
       sourceLabel,
       localExists: sourceType === "local",
       sandboxExists: sourceType === "plugin",
       pluginName: sourceType === "plugin" ? sourceLabel : "",
-      readonly: manifest.readonly ?? false,
+      readonly: parsed.readonly ?? false,
     };
 
     this.skills.set(skillInfo.name, skillInfo);
     this.sqliteStore?.saveSkill(skillInfo);
   }
 
-  private parseSkillMdContent(content: string, fallbackName: string): Partial<SkillManifest> {
+  private parseSkillMdContent(content: string, fallbackName: string): Partial<ParsedSkillMd> {
     const lines = content.split(/\r?\n/);
     let hasFrontmatter = false;
     let frontmatterStart = -1;
@@ -380,7 +367,7 @@ export class SkillManager {
       }
     }
 
-    const result: Partial<SkillManifest> = {};
+    const result: Partial<ParsedSkillMd> = {};
 
     if (hasFrontmatter) {
       const yamlText = lines.slice(frontmatterStart + 1, frontmatterEnd).join("\n");
@@ -451,7 +438,7 @@ export class SkillManager {
 /**
  * Collapse a skill name/description into a single line and neutralize list
  * markers, so skill metadata (which can originate from an uploaded SKILL.md or
- * manifest.json) cannot inject additional prompt lines or fake skill entries.
+ * skills.md) cannot inject additional prompt lines or fake skill entries.
  */
 function sanitizePromptField(value: string): string {
   return value

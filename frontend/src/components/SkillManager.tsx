@@ -586,15 +586,11 @@ export default function SkillManager() {
             <div className="no-data-card">
               <FileText size={48} className="empty-icon" />
               <h3>暂无已注册的技能</h3>
-              <p>在 <code>data/skills/</code> 目录下创建包含 <code>skill.md</code> 或 <code>manifest.json</code> 的子目录来定义技能，或使用下方按钮手动注册或批量上传 ZIP 包。</p>
+              <p>在 <code>data/skills/</code> 目录下创建包含 <code>skill.md</code> 的子目录来定义技能，或使用下方按钮手动注册或批量上传 ZIP 包。</p>
               <div className="format-hints">
                 <div className="format-hint">
                   <strong>skill.md</strong>
-                  <code>{'# 技能名\n---\nname: my-skill\ndescription: 描述\n---'}</code>
-                </div>
-                <div className="format-hint">
-                  <strong>manifest.json</strong>
-                  <code>{"{\"name\":\"my-skill\",\"description\":\"描述\"}"}</code>
+                  <code>{'---\nname: my-skill\ndescription: 描述\n---'}</code>
                 </div>
                 <div className="format-hint">
                   <strong>skills.md</strong>
