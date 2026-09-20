@@ -12,6 +12,7 @@ import { ProviderAPIError, RateLimitError, safeParseJsonResponse } from "../erro
 import { EstimateTokenCounter } from "@yachiyo/common/token-counter.js";
 import { getProxyAgent } from "@yachiyo/common";
 import { applyCustomExtraBody } from "../extra-body.js";
+import { responsesReasoningEffort, resolveReasoningEffort } from "../reasoning.js";
 
 export interface OpenAIResponsesProviderConfig extends ProviderConfig {
   apiKey: string;
@@ -92,6 +93,18 @@ export class OpenAIResponsesProvider implements Provider {
       body.tools = toResponsesTools(funcTool);
     }
 
+    // Reasoning effort + encrypted reasoning replay. `include` is what makes
+    // the API return `encrypted_content`, which the parser stores as
+    // `reasoningSignature` for verbatim replay in a tool-use loop.
+    const reasoningEffort = responsesReasoningEffort(
+      resolveReasoningEffort(params.reasoningEffort, this.providerConfig.reasoningEffort),
+      useModel,
+    );
+    if (reasoningEffort !== undefined) {
+      body.reasoning = { effort: reasoningEffort, summary: "auto" };
+      body.include = ["reasoning.encrypted_content"];
+    }
+
     const finalBody = applyCustomExtraBody(body, this.providerConfig.custom_extra_body);
 
     const url = `${this.baseUrl}/responses`;
@@ -148,6 +161,16 @@ export class OpenAIResponsesProvider implements Provider {
 
     if (funcTool && !funcTool.empty()) {
       body.tools = toResponsesTools(funcTool);
+    }
+
+    // Reasoning effort + encrypted reasoning replay (see textChat).
+    const reasoningEffort = responsesReasoningEffort(
+      resolveReasoningEffort(params.reasoningEffort, this.providerConfig.reasoningEffort),
+      useModel,
+    );
+    if (reasoningEffort !== undefined) {
+      body.reasoning = { effort: reasoningEffort, summary: "auto" };
+      body.include = ["reasoning.encrypted_content"];
     }
 
     const finalBody = applyCustomExtraBody(body, this.providerConfig.custom_extra_body);

@@ -87,6 +87,18 @@ export interface AgentConfig {
   memoryLongTermMaxBatchesPerRun: number;
   memoryLongTermMaxRetries: number;
   temperature?: number;
+  /**
+   * Global reasoning/thinking intensity for the main chat link. `"off"` disables
+   * thinking; undefined leaves the provider/model default. Mapped to each
+   * provider's native knob; ignored by non-reasoning models.
+   */
+  reasoningEffort?: "off" | "minimal" | "low" | "medium" | "high";
+  /**
+   * Automatically adjust reasoning intensity per step based on run signals
+   * (tool-loop depth, repeated-tool struggle, empty-output retries). When
+   * enabled it overrides {@link reasoningEffort}.
+   */
+  autoReasoningEffort?: boolean;
   // Session whitelist: when enabled, only whitelisted UMOs get responses
   sessionWhitelistEnabled: boolean;
   // Platform tools: expose sensitive group admin write operations (ban/kick/notice...) to the agent
@@ -251,6 +263,8 @@ export class ConfigManager {
       t2iFormat: "png",
       t2iTemplate: "default",
       displayReasoningText: false,
+      reasoningEffort: undefined,
+      autoReasoningEffort: false,
       defaultProviderId: "",
       fallbackProviderIds: [],
       defaultPersonaId: "",

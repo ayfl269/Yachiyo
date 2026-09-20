@@ -13,6 +13,7 @@ import type {
   EmbeddedResource,
   MessageChain,
 } from "../types.js";
+import type { ReasoningEffort } from "@yachiyo/common/llm-types.js";
 import { BaseAgentRunner } from "./base.js";
 import type { BaseAgentRunHooks } from "../hooks.js";
 import type { BaseFunctionToolExecutor } from "../tool-executor.js";
@@ -203,6 +204,12 @@ export interface ToolLoopResetParams<TContext = unknown> {
   fallbackProviders?: Provider[];
   toolResultOverflowDir?: string;
   readTool?: FunctionTool;
+  /**
+   * Reasoning/thinking intensity for this run. When set, every LLM call sends
+   * it to the provider (mapped to the native knob). `undefined` leaves the
+   * provider/model default. Ignored for non-reasoning models.
+   */
+  reasoningEffort?: ReasoningEffort;
 }
 
 export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TContext> {
@@ -215,6 +222,8 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
   private streaming = false;
   /** 提供商级提示缓存开关，透传到每次 LLM 调用的 enableCaching。 */
   private providerCaching = false;
+  /** Reasoning effort for the run (undefined = leave provider/model default). */
+  private reasoningEffort: ReasoningEffort | undefined = undefined;
   private toolExecutor!: BaseFunctionToolExecutor<TContext>;
   private agentHooks!: BaseAgentRunHooks<TContext>;
   private runContext!: ContextWrapper<TContext>;
@@ -296,6 +305,7 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
     this.req = params.request;
     this.streaming = params.streaming ?? false;
     this.providerCaching = params.providerCaching ?? false;
+    this.reasoningEffort = params.reasoningEffort;
     this.provider = params.provider;
     this.originalProvider = params.provider; // 记录原始 provider，fallback 后不丢失
     this.finalLlmResp = null;
@@ -303,6 +313,8 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
     this.toolExecutor = params.toolExecutor;
     this.agentHooks = params.agentHooks;
     this.runContext = runContext;
+    // Expose on the run context so sub-agent handoffs inherit the same effort.
+    this.runContext._reasoningEffort = params.reasoningEffort;
     if (this.req.funcTool) {
       this.runContext._funcToolSet = this.req.funcTool as ToolSet;
     }
@@ -1335,6 +1347,9 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
         temperature: this.req.temperature,
         enableCaching: this.providerCaching,
       };
+      if (this.reasoningEffort !== undefined) {
+        payload.reasoningEffort = this.reasoningEffort;
+      }
       if (options.includeModel) {
         payload.model = this.req.model;
       }

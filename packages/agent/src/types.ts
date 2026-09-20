@@ -102,6 +102,11 @@ export interface ContextWrapper<TContext = unknown> {
    */
   _sandboxPolicy?: import("./sandbox.js").SandboxPolicy;
   /**
+   * Reasoning/thinking intensity inherited from the parent run. Sub-agent
+   * handoffs read this so they honor the same effort as the main agent.
+   */
+  _reasoningEffort?: import("@yachiyo/common/llm-types.js").ReasoningEffort;
+  /**
    * Name of the agent owning the current run (sub-agent name for handoffs).
    * Undefined for the main agent. Used for diagnostics.
    */

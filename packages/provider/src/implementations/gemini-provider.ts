@@ -11,6 +11,7 @@ import { safeFetch } from "@yachiyo/common/ssrf-guard.js";
 import { resolveImageToDataUrl, resolveAudioToDataUrl } from "@yachiyo/common/download-utils.js";
 import { getProxyAgent } from "@yachiyo/common";
 import { applyCustomExtraBody } from "../extra-body.js";
+import { geminiThinkingConfig, resolveReasoningEffort } from "../reasoning.js";
 
 async function resolveRemoteMediaInContexts(
   contexts: Record<string, unknown>[]
@@ -288,6 +289,14 @@ export class GeminiProvider implements Provider {
       generationConfig.temperature = params.temperature;
     } else if (this.providerConfig.temperature !== undefined) {
       generationConfig.temperature = Number(this.providerConfig.temperature);
+    }
+    // Thinking budget, gated by model capability (Gemini 2.5+/3.x).
+    const thinkingConfig = geminiThinkingConfig(
+      resolveReasoningEffort(params.reasoningEffort, this.providerConfig.reasoningEffort),
+      useModel,
+    );
+    if (thinkingConfig) {
+      generationConfig.thinkingConfig = thinkingConfig;
     }
     if (Object.keys(generationConfig).length > 0) {
       body.generationConfig = generationConfig;

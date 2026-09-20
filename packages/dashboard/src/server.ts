@@ -106,6 +106,7 @@ interface ProviderRuntimeConfig {
   custom_extra_body?: Record<string, unknown>;
   max_context_tokens?: number;
   reasoning?: boolean;
+  reasoningEffort?: "off" | "minimal" | "low" | "medium" | "high";
   [key: string]: unknown;
 }
 
@@ -2923,6 +2924,7 @@ export class DashboardServer {
               enable: providerConfig.enable !== false,
               ...(providerConfig.cacheThreshold !== undefined ? { cacheThreshold: providerConfig.cacheThreshold } : {}),
               ...(providerConfig.cacheTtlSeconds !== undefined ? { cacheTtlSeconds: providerConfig.cacheTtlSeconds } : {}),
+              ...(providerConfig.reasoningEffort !== undefined ? { reasoningEffort: providerConfig.reasoningEffort } : {}),
             };
 
         // 合并 source 的额外配置（保留显式配置的字段）

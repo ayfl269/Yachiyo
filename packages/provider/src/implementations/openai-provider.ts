@@ -9,6 +9,7 @@ import { ProviderAPIError, RateLimitError, safeParseJsonResponse } from "../erro
 import { EstimateTokenCounter } from "@yachiyo/common/token-counter.js";
 import { getProxyAgent } from "@yachiyo/common";
 import { applyCustomExtraBody } from "../extra-body.js";
+import { openaiReasoningEffort, resolveReasoningEffort } from "../reasoning.js";
 
 export interface OpenAIProviderConfig extends ProviderConfig {
   apiKey: string;
@@ -60,6 +61,16 @@ export class OpenAIProvider implements Provider {
 
     if (funcTool && !funcTool.empty()) {
       body.tools = funcTool.openaiSchema(true);
+    }
+
+    // Reasoning effort (o-series / gpt-5). Gated by model capability; a
+    // non-reasoning model never receives the field (upstream 400).
+    const reasoningEffort = openaiReasoningEffort(
+      resolveReasoningEffort(params.reasoningEffort, this.providerConfig.reasoningEffort),
+      useModel,
+    );
+    if (reasoningEffort !== undefined) {
+      body.reasoning_effort = reasoningEffort;
     }
 
     const finalBody = applyCustomExtraBody(body, this.providerConfig.custom_extra_body);
@@ -123,6 +134,15 @@ export class OpenAIProvider implements Provider {
 
     if (funcTool && !funcTool.empty()) {
       body.tools = funcTool.openaiSchema(true);
+    }
+
+    // Reasoning effort (o-series / gpt-5), gated by model capability.
+    const reasoningEffort = openaiReasoningEffort(
+      resolveReasoningEffort(params.reasoningEffort, this.providerConfig.reasoningEffort),
+      useModel,
+    );
+    if (reasoningEffort !== undefined) {
+      body.reasoning_effort = reasoningEffort;
     }
 
     const finalBody = applyCustomExtraBody(body, this.providerConfig.custom_extra_body);

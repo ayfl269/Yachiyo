@@ -38,6 +38,8 @@ export interface MainAgentBuildConfig {
   toolResultOverflowDir?: string;
   readTool?: FunctionTool;
   fallbackProviderIds?: string[];
+  /** Reasoning/thinking intensity forwarded to every LLM call of this run. */
+  reasoningEffort?: import("@yachiyo/common/llm-types.js").ReasoningEffort;
 }
 
 export interface MainAgentBuildResult<TContext = unknown> {
@@ -193,6 +195,7 @@ export async function buildMainAgent<TContext = unknown>(
     fallbackProviders: resolvedFallbacks,
     toolResultOverflowDir: config.toolResultOverflowDir,
     readTool: config.readTool,
+    reasoningEffort: config.reasoningEffort,
   });
 
   return {

@@ -488,6 +488,7 @@ export class ProcessStage extends PipelineStage {
           llmCompressProviderId: cfg.llmCompressProviderId,
           enforceMaxTurns: cfg.enforceMaxTurns,
           truncateTurns: cfg.truncateTurns,
+          reasoningEffort: cfg.reasoningEffort,
         },
       });
 

@@ -659,6 +659,10 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
       toolExecutor: this,
       agentHooks: new EmptyAgentHooks(),
       streaming: false,
+      // Inherit the parent run's reasoning effort so the sub-agent thinks at
+      // the same intensity (the sub-runner re-exposes it on its own context,
+      // so deeper handoffs keep inheriting).
+      reasoningEffort: runContext._reasoningEffort,
       // Pass the inherited fallback providers through the standard
       // channel so ToolLoopAgentRunner.reset dedupes them against
       // the primary provider (subContext._fallbackProviders is also

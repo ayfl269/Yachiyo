@@ -34,6 +34,8 @@ interface Provider {
   custom_extra_body?: Record<string, any>
   max_context_tokens?: number
   reasoning?: boolean
+  /** 思考强度（推理模型专用）。缺省表示使用模型默认。 */
+  reasoningEffort?: 'off' | 'minimal' | 'low' | 'medium' | 'high'
   temperature?: number
   /** Gemini 上下文缓存触发阈值（估算 tokens），低于该值不创建缓存。 */
   cacheThreshold?: number
@@ -1659,6 +1661,25 @@ export default function ProviderManager() {
                 <input type="checkbox" checked={Boolean(providerEditData.reasoning)} onChange={e => setProviderEditField('reasoning', e.target.checked)} />
                 <span>{providerEditData.reasoning ? '开启' : '关闭'}</span>
               </label>
+            </div>
+            <div className="form-group">
+              <label>思考强度 (Reasoning Effort)</label>
+              <select
+                value={providerEditData.reasoningEffort ?? ''}
+                onChange={e => setProviderEditField('reasoningEffort', e.target.value || undefined)}
+                className="form-control"
+              >
+                <option value="">模型默认</option>
+                <option value="off">关闭 (off)</option>
+                <option value="minimal">最低 (minimal)</option>
+                <option value="low">低 (low)</option>
+                <option value="medium">中 (medium)</option>
+                <option value="high">高 (high)</option>
+              </select>
+              <span className="help-text">
+                仅对支持思考的模型生效（o 系列 / gpt-5、Claude 3.7+、Gemini 2.5+）。
+                映射为各家的原生字段；非推理模型自动忽略。
+              </span>
             </div>
             <div className="form-group">
               <label>模型默认温度 (Temperature)</label>

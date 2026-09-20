@@ -8,6 +8,7 @@ import { withRetry } from "../retry.js";
 import { ProviderAPIError, RateLimitError, safeParseJsonResponse } from "../errors.js";
 import { EstimateTokenCounter } from "@yachiyo/common/token-counter.js";
 import { getProxyAgent } from "@yachiyo/common";
+import { anthropicThinkingConfig, resolveReasoningEffort } from "../reasoning.js";
 import { applyCustomExtraBody } from "../extra-body.js";
 
 export interface AnthropicProviderConfig extends ProviderConfig {
@@ -118,6 +119,21 @@ export class AnthropicProvider implements Provider {
     }
     if (stream) {
       body.stream = true;
+    }
+
+    // Extended thinking. The budget must be < max_tokens, and Anthropic
+    // requires temperature to be unset/1 while thinking is enabled — so drop
+    // any configured temperature when we turn thinking on to avoid a 400.
+    const thinking = anthropicThinkingConfig(
+      resolveReasoningEffort(params.reasoningEffort, this.providerConfig.reasoningEffort),
+      useModel,
+      this.maxTokens,
+    );
+    if (thinking) {
+      body.thinking = thinking;
+      if (thinking.type === "enabled") {
+        delete body.temperature;
+      }
     }
 
     if (system) {

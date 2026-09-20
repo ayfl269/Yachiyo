@@ -35,6 +35,7 @@ interface AgentConfig {
   t2iFormat: 'png' | 'jpeg'
   t2iTemplate: string
   displayReasoningText: boolean
+  reasoningEffort?: 'off' | 'minimal' | 'low' | 'medium' | 'high'
   defaultProviderId: string
   fallbackProviderIds: string[]
   defaultPersonaId: string
@@ -1094,6 +1095,24 @@ export default function ConfigManager() {
                   id="displayReasoningText"
                 />
                 <label htmlFor="displayReasoningText">输出模型的思考推理过程 (Reasoning Content)</label>
+              </div>
+              <div className="form-group">
+                <label>思考强度 (Reasoning Effort)</label>
+                <select
+                  value={config.reasoningEffort ?? ''}
+                  onChange={(e) => updateField('reasoningEffort', (e.target.value || undefined) as AgentConfig['reasoningEffort'])}
+                  className="form-control"
+                >
+                  <option value="">模型默认</option>
+                  <option value="off">关闭 (off)</option>
+                  <option value="minimal">最低 (minimal)</option>
+                  <option value="low">低 (low)</option>
+                  <option value="medium">中 (medium)</option>
+                  <option value="high">高 (high)</option>
+                </select>
+                <span className="help-text">
+                  主对话链路的思考强度。仅对支持思考的模型生效，非推理模型自动忽略。
+                </span>
               </div>
             </div>
           )}

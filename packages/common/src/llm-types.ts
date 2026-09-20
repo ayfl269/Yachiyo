@@ -7,7 +7,28 @@ export interface TokenUsage {
   total: number;
   cacheCreationInputTokens?: number;
   cacheReadInputTokens?: number;
+  /**
+   * Reasoning/thinking tokens, when the provider reports them separately
+   * (OpenAI `completion_tokens_details.reasoning_tokens`, Gemini
+   * `usageMetadata.thoughtsTokenCount`). These are already included in
+   * `completionTokens`; this field only exposes the split for observability.
+   */
+  reasoningTokens?: number;
 }
+
+/**
+ * Reasoning/thinking intensity for a chat request.
+ *
+ * Provider-agnostic scale mapped to each vendor's native knob:
+ * - Anthropic: `thinking.budget_tokens` (off at `"minimal"` → no thinking).
+ * - OpenAI Chat: `reasoning_effort` (`"minimal"` → `"minimal"`).
+ * - OpenAI Responses: `reasoning.effort`.
+ * - Gemini: `generationConfig.thinkingConfig.thinkingBudget`.
+ *
+ * `"off"` disables thinking entirely where the provider supports disabling it;
+ * `undefined` leaves the provider's own default untouched.
+ */
+export type ReasoningEffort = "off" | "minimal" | "low" | "medium" | "high";
 
 // Message chain for response data
 export interface MessageChain {
@@ -79,6 +100,11 @@ export interface ProviderRequest {
   conversation?: Conversation;
   extraUserContentParts: ContentPart[];
   temperature?: number;
+  /**
+   * Reasoning/thinking intensity for this request. Threaded to the provider's
+   * native knob. Undefined leaves the provider/model default untouched.
+   */
+  reasoningEffort?: ReasoningEffort;
 }
 
 // Conversation
@@ -124,6 +150,12 @@ export interface ProviderConfig {
   cacheThreshold?: number;
   /** Gemini only: server-side cache TTL in seconds. */
   cacheTtlSeconds?: number;
+  /**
+   * Per-provider default reasoning/thinking intensity. Used when a request does
+   * not specify `ProviderChatParams.reasoningEffort`. `"off"` disables thinking.
+   * Ignored by models that do not support the native reasoning knob.
+   */
+  reasoningEffort?: ReasoningEffort;
   [key: string]: unknown;
 }
 
@@ -146,4 +178,11 @@ export interface ProviderChatParams {
   abortSignal?: AbortSignal;
   enableCaching?: boolean;
   temperature?: number;
+  /**
+   * Reasoning/thinking intensity for this request. Each provider maps it to its
+   * native field (Anthropic `thinking`, OpenAI `reasoning_effort`, Responses
+   * `reasoning.effort`, Gemini `thinkingConfig.thinkingBudget`). Providers must
+   * gate on model capability and no-op otherwise to avoid upstream 400s.
+   */
+  reasoningEffort?: ReasoningEffort;
 }

@@ -1,5 +1,17 @@
 export { ProviderType, type ProviderMeta } from "./types.js";
 export {
+  REASONING_EFFORT_ORDER,
+  resolveReasoningEffort,
+  normalizeReasoningEffort,
+  reasoningEffortRank,
+  modelSupportsReasoning,
+  anthropicThinkingConfig,
+  openaiReasoningEffort,
+  responsesReasoningEffort,
+  geminiThinkingConfig,
+  type ReasoningEffort,
+} from "./reasoning.js";
+export {
   ProviderManager,
   STTProvider,
   TTSProvider,
