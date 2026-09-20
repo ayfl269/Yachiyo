@@ -81,8 +81,8 @@ function testMappingHelpers(): void {
   // Anthropic
   const a = anthropicThinkingConfig("high", "claude-sonnet-4-5", 64000);
   assert(a?.type === "enabled" && a.budget_tokens === 24576, "Anthropic high → 24576 预算");
-  const aOff = anthropicThinkingConfig("off", "claude-sonnet-4-5", 64000);
-  assert(aOff?.type === "disabled", "Anthropic off → disabled");
+  // Anthropic 思考为 opt-in：off 应省略字段（不存在合法的 disabled 值）
+  assert(anthropicThinkingConfig("off", "claude-sonnet-4-5", 64000) === undefined, "Anthropic off → 省略字段（而非 disabled）");
   assert(anthropicThinkingConfig("high", "claude-3-5-sonnet", 64000) === undefined, "Anthropic 非推理模型 → undefined");
   assert(anthropicThinkingConfig(undefined, "claude-sonnet-4-5", 64000) === undefined, "Anthropic undefined → undefined");
   // max_tokens 太小无法满足 1024 最小预算 → undefined
@@ -93,18 +93,30 @@ function testMappingHelpers(): void {
 
   // OpenAI
   assert(openaiReasoningEffort("medium", "o3-mini") === "medium", "OpenAI medium 透传");
-  assert(openaiReasoningEffort("off", "o3-mini") === "none", "OpenAI off → none");
+  // o 系列不接受 "none"，off 应省略字段而非发送 none
+  assert(openaiReasoningEffort("off", "o3-mini") === undefined, "OpenAI o3 off → 省略（不接受 none）");
+  assert(openaiReasoningEffort("off", "gpt-5.1") === "none", "OpenAI gpt-5.1 off → none");
   assert(openaiReasoningEffort("high", "gpt-4o") === undefined, "OpenAI 非推理模型 → undefined");
 
   // Responses
   assert(responsesReasoningEffort("minimal", "gpt-5") === "low", "Responses minimal → low");
   assert(responsesReasoningEffort("high", "gpt-5") === "high", "Responses high 透传");
+  assert(responsesReasoningEffort("off", "o3-mini") === undefined, "Responses o3 off → 省略（不接受 none）");
   assert(responsesReasoningEffort("high", "gpt-4o") === undefined, "Responses 非推理模型 → undefined");
 
-  // Gemini
+  // Gemini 2.5 Flash：budget，0 可关闭
   const g = geminiThinkingConfig("medium", "gemini-2.5-flash");
-  assert(g?.thinkingBudget === 12288 && g.includeThoughts === true, "Gemini medium → 12288 + includeThoughts");
-  assert(geminiThinkingConfig("off", "gemini-2.5-flash")?.thinkingBudget === 0, "Gemini off → budget 0");
+  assert(!!g && "thinkingBudget" in g && g.thinkingBudget === 12288 && g.includeThoughts === true, "Gemini Flash medium → 12288");
+  const gOff = geminiThinkingConfig("off", "gemini-2.5-flash");
+  assert(!!gOff && "thinkingBudget" in gOff && gOff.thinkingBudget === 0, "Gemini Flash off → budget 0");
+  // Gemini 2.5 Pro：不能关闭，最小 128
+  const gPro = geminiThinkingConfig("off", "gemini-2.5-pro");
+  assert(!!gPro && "thinkingBudget" in gPro && gPro.thinkingBudget === 128, "Gemini Pro off → 最小 128（不可关闭）");
+  // Gemini 3.x：用 thinkingLevel 而非 budget
+  const g3 = geminiThinkingConfig("high", "gemini-3-pro-preview");
+  assert(!!g3 && "thinkingLevel" in g3 && g3.thinkingLevel === "high", "Gemini 3 high → thinkingLevel=high");
+  const g3low = geminiThinkingConfig("off", "gemini-3-flash");
+  assert(!!g3low && "thinkingLevel" in g3low && g3low.thinkingLevel === "low", "Gemini 3 off → thinkingLevel=low（不可完全关闭）");
   assert(geminiThinkingConfig("high", "gemini-1.5-flash") === undefined, "Gemini 非推理模型 → undefined");
 }
 
@@ -138,11 +150,20 @@ async function testProviderBodies(): Promise<void> {
   assert(lastBody?.reasoning?.effort === "high", "Responses 请求含 reasoning.effort");
   assert(Array.isArray(lastBody?.include) && lastBody.include.includes("reasoning.encrypted_content"), "Responses 请求含 encrypted_content include");
 
-  // Gemini
+  // Gemini Flash：budget
   const gemini = new GeminiProvider({ apiKey: "k", model: "gemini-2.5-flash" } as any);
   await gemini.textChat({ contexts: [{ role: "user", content: "hi" }] as Message[], reasoningEffort: "low" });
-  assert(lastBody?.generationConfig?.thinkingConfig?.thinkingBudget === 4096, "Gemini 请求含 thinkingConfig 预算");
+  assert(lastBody?.generationConfig?.thinkingConfig?.thinkingBudget === 4096, "Gemini Flash 请求含 thinkingConfig 预算");
   assert(lastBody?.generationConfig?.thinkingConfig?.includeThoughts === true, "Gemini includeThoughts=true");
+  // Gemini Pro：off 不能发 0（会 400），最小 128
+  const geminiPro = new GeminiProvider({ apiKey: "k", model: "gemini-2.5-pro" } as any);
+  await geminiPro.textChat({ contexts: [{ role: "user", content: "hi" }] as Message[], reasoningEffort: "off" });
+  assert(lastBody?.generationConfig?.thinkingConfig?.thinkingBudget === 128, "Gemini Pro off 请求发 128 而非 0");
+  // Gemini 3：thinkingLevel
+  const gemini3 = new GeminiProvider({ apiKey: "k", model: "gemini-3-pro-preview" } as any);
+  await gemini3.textChat({ contexts: [{ role: "user", content: "hi" }] as Message[], reasoningEffort: "high" });
+  assert(lastBody?.generationConfig?.thinkingConfig?.thinkingLevel === "high", "Gemini 3 请求用 thinkingLevel");
+  assert(lastBody?.generationConfig?.thinkingConfig?.thinkingBudget === undefined, "Gemini 3 不发 thinkingBudget");
 }
 
 // ── 3. Config fallback ──
@@ -277,6 +298,44 @@ async function testRunnerAutoWiring(): Promise<void> {
   assert(seenStatic.every((e) => e === "high"), `无 auto 时静态 effort 原样透传（${JSON.stringify(seenStatic)}）`);
 }
 
+// ── 6. 子代理继承父级 live effort ──
+async function testSubAgentInheritsLiveEffort(): Promise<void> {
+  console.log("\n=== 6. 子代理继承父级 live effort ===");
+  const { createAgent, createHandoffTool, createContextWrapper, EmptyAgentHooks, FunctionToolExecutor, ToolLoopAgentRunner, ToolSet } = await import("../src/index.js");
+
+  // 子代理 provider 记录其收到的 effort。
+  const subEfforts: Array<string | undefined> = [];
+  const subProvider = {
+    type: "chat_completion",
+    providerConfig: { id: "sub-prov", maxContextTokens: 4096, modalities: ["text", "tool_use"] },
+    async textChat(params: any) {
+      subEfforts.push(params.reasoningEffort);
+      return { role: "assistant", completionText: "sub done", isChunk: false };
+    },
+  } as any;
+
+  // 父级：auto 开启，先执行若干步把 effort 升到 medium，再触发 handoff。
+  // 这里直接构造一个已升档的 runContext 来验证继承逻辑（不必真跑多步）。
+  const executor = new FunctionToolExecutor();
+  const subAgent = createAgent({ name: "child", instructions: "x" });
+  const handoff = createHandoffTool(subAgent);
+
+  const parentCtx = createContextWrapper<Record<string, unknown>>({}, { toolCallTimeout: 120 });
+  parentCtx._provider = subProvider;
+  // 模拟父级 auto 控制器已升档并写入 live effort。
+  parentCtx._reasoningEffort = "minimal";
+  parentCtx._currentReasoningEffort = "medium";
+
+  const gen = executor.execute(handoff, parentCtx, { input: "do work" });
+  for await (const _ of gen) { void _; }
+
+  assert(subEfforts.length > 0, `子代理被调用 (calls=${subEfforts.length})`);
+  assert(
+    subEfforts.every((e) => e === "medium"),
+    `子代理继承父级 live effort=medium（而非静态 minimal，实际 ${JSON.stringify(subEfforts)}）`,
+  );
+}
+
 async function main(): Promise<void> {
   console.log("╔══════════════════════════════════════════╗");
   console.log("║   思考强度（Reasoning Effort）测试        ║");
@@ -288,6 +347,7 @@ async function main(): Promise<void> {
     await testConfigFallback();
     await testAutoController();
     await testRunnerAutoWiring();
+    await testSubAgentInheritsLiveEffort();
 
     console.log(`\n结果: ${passCount} 通过, ${failCount} 失败`);
     if (failCount > 0) process.exit(1);

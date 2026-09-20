@@ -131,9 +131,8 @@ export class AnthropicProvider implements Provider {
     );
     if (thinking) {
       body.thinking = thinking;
-      if (thinking.type === "enabled") {
-        delete body.temperature;
-      }
+      // Anthropic requires temperature to be unset/1 while thinking is enabled.
+      delete body.temperature;
     }
 
     if (system) {

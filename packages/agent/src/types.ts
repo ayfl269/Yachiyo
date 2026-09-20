@@ -107,6 +107,13 @@ export interface ContextWrapper<TContext = unknown> {
    */
   _reasoningEffort?: import("@yachiyo/common/llm-types.js").ReasoningEffort;
   /**
+   * Effective reasoning effort for the CURRENT step, including any value chosen
+   * by the automatic controller. Updated by the runner before each step; a
+   * sub-agent handoff reads this so it inherits the parent's live (possibly
+   * escalated) effort rather than only the static default.
+   */
+  _currentReasoningEffort?: import("@yachiyo/common/llm-types.js").ReasoningEffort;
+  /**
    * Name of the agent owning the current run (sub-agent name for handoffs).
    * Undefined for the main agent. Used for diagnostics.
    */

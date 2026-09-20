@@ -719,6 +719,9 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
         this.currentAutoEffort = effort;
       }
     }
+    // Expose the live effective effort on the run context so a handoff in this
+    // step's tool calls inherits the escalated value (not just the static one).
+    this.runContext._currentReasoningEffort = this.currentAutoEffort ?? this.reasoningEffort;
     // Advance the step index for the next call.
     this.runStepIndex++;
 

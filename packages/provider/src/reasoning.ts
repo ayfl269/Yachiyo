@@ -76,8 +76,9 @@ export function modelSupportsReasoning(modelId: string | undefined): boolean {
  * Map a `ReasoningEffort` to Anthropic's `thinking` body field.
  *
  * Anthropic requires `budget_tokens >= 1024` and `budget_tokens < max_tokens`.
- * `"off"` → `{ type: "disabled" }` (only sent when the caller explicitly wants
- * thinking off; otherwise `undefined` leaves the model default).
+ * Thinking is opt-in, so `"off"` returns `undefined` — omitting the field is
+ * the documented way to disable it (there is no valid `{ type: "disabled" }`
+ * value).
  *
  * Returns `undefined` when the effort is undefined or the model is not
  * reasoning-capable.
@@ -86,11 +87,10 @@ export function anthropicThinkingConfig(
   effort: ReasoningEffort | undefined,
   modelId: string | undefined,
   maxTokens: number,
-): { type: "enabled"; budget_tokens: number } | { type: "disabled" } | undefined {
+): { type: "enabled"; budget_tokens: number } | undefined {
   if (!effort) return undefined;
-  if (effort === "off") {
-    return modelSupportsReasoning(modelId) ? { type: "disabled" } : undefined;
-  }
+  // Opt-in feature: omitting the field disables thinking.
+  if (effort === "off") return undefined;
   if (!modelSupportsReasoning(modelId)) return undefined;
   const budget = ANTHROPIC_BUDGET_TOKENS[effort];
   if (budget === undefined) return undefined;
@@ -111,8 +111,21 @@ const ANTHROPIC_BUDGET_TOKENS: Partial<Record<ReasoningEffort, number>> = {
 };
 
 /**
+ * Whether an OpenAI model accepts `reasoning_effort: "none"` to disable
+ * reasoning. Only newer models (gpt-5.1+) accept it; o-series (o1/o3/o4-mini)
+ * and base gpt-5 reject "none" with a 400, so for those we omit the field
+ * entirely (leaving the model default) rather than send an invalid value.
+ */
+export function openaiSupportsReasoningNone(modelId: string | undefined): boolean {
+  if (!modelId) return false;
+  const id = modelId.toLowerCase();
+  return /gpt-5\.[1-9]/.test(id) || /gpt-[6-9]/.test(id);
+}
+
+/**
  * Map a `ReasoningEffort` to OpenAI's `reasoning_effort` value (Chat
- * Completions). `"off"` → `"none"` on models that accept it, else undefined.
+ * Completions). `"off"` → `"none"` only on models that accept it (gpt-5.1+);
+ * otherwise `undefined` so the field is omitted and no 400 is triggered.
  */
 export function openaiReasoningEffort(
   effort: ReasoningEffort | undefined,
@@ -120,15 +133,17 @@ export function openaiReasoningEffort(
 ): string | undefined {
   if (!effort) return undefined;
   if (!modelSupportsReasoning(modelId)) return undefined;
-  // OpenAI's documented values are minimal/low/medium/high; "none" disables on
-  // supported models. Map "off" to "none".
-  return effort === "off" ? "none" : effort;
+  if (effort === "off") {
+    return openaiSupportsReasoningNone(modelId) ? "none" : undefined;
+  }
+  // OpenAI's documented values are minimal/low/medium/high.
+  return effort;
 }
 
 /**
  * Map a `ReasoningEffort` to OpenAI Responses' `reasoning.effort` value.
  * Responses uses low/medium/high; "minimal" is not accepted by all models, so
- * it is mapped to "low".
+ * it is mapped to "low". `"off"` → `"none"` only on models that accept it.
  */
 export function responsesReasoningEffort(
   effort: ReasoningEffort | undefined,
@@ -136,13 +151,15 @@ export function responsesReasoningEffort(
 ): string | undefined {
   if (!effort) return undefined;
   if (!modelSupportsReasoning(modelId)) return undefined;
-  if (effort === "off") return "none";
+  if (effort === "off") {
+    return openaiSupportsReasoningNone(modelId) ? "none" : undefined;
+  }
   if (effort === "minimal") return "low";
   return effort;
 }
 
-/** Gemini thinking budgets per effort level (tokens); 0 disables on Flash. */
-const GEMINI_BUDGET_TOKENS: Record<ReasoningEffort, number> = {
+/** Gemini Flash thinking budgets per effort level (tokens); 0 disables. */
+const GEMINI_FLASH_BUDGET: Record<ReasoningEffort, number> = {
   off: 0,
   minimal: 1024,
   low: 4096,
@@ -151,17 +168,64 @@ const GEMINI_BUDGET_TOKENS: Record<ReasoningEffort, number> = {
 };
 
 /**
+ * Gemini Pro thinking budgets. Pro CANNOT disable thinking — sending
+ * `thinkingBudget: 0` returns a 400 — and its minimum budget is 128. `"off"`
+ * therefore maps to the 128-token minimum (the closest achievable to "off")
+ * rather than 0.
+ */
+const GEMINI_PRO_BUDGET: Record<ReasoningEffort, number> = {
+  off: 128,
+  minimal: 128,
+  low: 1024,
+  medium: 8192,
+  high: 24576,
+};
+
+/** Gemini 3.x thinking level. Gemini 3 uses `thinkingLevel`, not a budget. */
+type GeminiThinkingConfig =
+  | { thinkingBudget: number; includeThoughts: boolean }
+  | { thinkingLevel: "low" | "high"; includeThoughts: boolean };
+
+/** True for Gemini 3.x and later (major version >= 3). */
+function isGemini3(id: string): boolean {
+  return /gemini-[3-9]/.test(id);
+}
+
+/** True for a Gemini Pro model (thinking cannot be disabled; min budget 128). */
+function isGeminiPro(id: string): boolean {
+  return /gemini[^/]*\bpro\b/.test(id);
+}
+
+/**
  * Map a `ReasoningEffort` to Gemini's `generationConfig.thinkingConfig`.
+ *
+ * Model-family differences:
+ * - Gemini 3.x uses `thinkingLevel` ("low"/"high"), not a token budget. Thinking
+ *   cannot be fully disabled, so "off"/"minimal"/"low"/"medium" → "low" and
+ *   "high" → "high".
+ * - Gemini 2.5 Pro cannot disable thinking (`thinkingBudget: 0` → 400); its
+ *   minimum is 128, so all levels are clamped to >= 128.
+ * - Gemini 2.5 Flash supports `thinkingBudget: 0` to disable.
+ *
  * `includeThoughts: true` so the thought parts (and their signatures) are
  * returned for replay.
  */
 export function geminiThinkingConfig(
   effort: ReasoningEffort | undefined,
   modelId: string | undefined,
-): { thinkingBudget: number; includeThoughts: boolean } | undefined {
+): GeminiThinkingConfig | undefined {
   if (!effort) return undefined;
   if (!modelSupportsReasoning(modelId)) return undefined;
-  const budget = GEMINI_BUDGET_TOKENS[effort];
-  if (budget === undefined) return undefined;
-  return { thinkingBudget: budget, includeThoughts: true };
+  const id = modelId!.toLowerCase();
+
+  if (isGemini3(id)) {
+    const level: "low" | "high" = effort === "high" || effort === "medium" ? "high" : "low";
+    return { thinkingLevel: level, includeThoughts: true };
+  }
+
+  if (isGeminiPro(id)) {
+    return { thinkingBudget: GEMINI_PRO_BUDGET[effort], includeThoughts: true };
+  }
+
+  return { thinkingBudget: GEMINI_FLASH_BUDGET[effort], includeThoughts: true };
 }
