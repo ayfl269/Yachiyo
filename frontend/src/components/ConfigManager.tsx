@@ -36,6 +36,7 @@ interface AgentConfig {
   t2iTemplate: string
   displayReasoningText: boolean
   reasoningEffort?: 'off' | 'minimal' | 'low' | 'medium' | 'high'
+  autoReasoningEffort?: boolean
   defaultProviderId: string
   fallbackProviderIds: string[]
   defaultPersonaId: string
@@ -1102,6 +1103,7 @@ export default function ConfigManager() {
                   value={config.reasoningEffort ?? ''}
                   onChange={(e) => updateField('reasoningEffort', (e.target.value || undefined) as AgentConfig['reasoningEffort'])}
                   className="form-control"
+                  disabled={Boolean(config.autoReasoningEffort)}
                 >
                   <option value="">模型默认</option>
                   <option value="off">关闭 (off)</option>
@@ -1113,6 +1115,17 @@ export default function ConfigManager() {
                 <span className="help-text">
                   主对话链路的思考强度。仅对支持思考的模型生效，非推理模型自动忽略。
                 </span>
+              </div>
+              <div className="form-group row-checkbox">
+                <input
+                  type="checkbox"
+                  checked={Boolean(config.autoReasoningEffort)}
+                  onChange={(e) => updateField('autoReasoningEffort', e.target.checked)}
+                  id="autoReasoningEffort"
+                />
+                <label htmlFor="autoReasoningEffort">
+                  自动调整思考强度（按工具循环深度、重复调用、空输出重试、上下文压缩动态升降，覆盖上方手动设置）
+                </label>
               </div>
             </div>
           )}

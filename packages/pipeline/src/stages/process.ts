@@ -489,6 +489,7 @@ export class ProcessStage extends PipelineStage {
           enforceMaxTurns: cfg.enforceMaxTurns,
           truncateTurns: cfg.truncateTurns,
           reasoningEffort: cfg.reasoningEffort,
+          autoReasoningEffort: cfg.autoReasoningEffort,
         },
       });
 

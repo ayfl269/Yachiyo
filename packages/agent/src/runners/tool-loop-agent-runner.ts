@@ -14,6 +14,7 @@ import type {
   MessageChain,
 } from "../types.js";
 import type { ReasoningEffort } from "@yachiyo/common/llm-types.js";
+import { REASONING_EFFORT_ORDER, reasoningEffortRank } from "@yachiyo/provider/reasoning.js";
 import { BaseAgentRunner } from "./base.js";
 import type { BaseAgentRunHooks } from "../hooks.js";
 import type { BaseFunctionToolExecutor } from "../tool-executor.js";
@@ -182,6 +183,68 @@ class EmptyModelOutputError extends Error {
   }
 }
 
+// ── Automatic reasoning-effort control ──
+
+/**
+ * Run signals consumed by the automatic reasoning-effort controller. All are
+ * cumulative (or peak) over the current run so the computed effort is
+ * monotonic non-decreasing — a run that needed deep thinking never silently
+ * drops back down mid-task.
+ */
+export interface AutoReasoningSignals {
+  /** 0-based index of the current agent step within the run. */
+  stepIndex: number;
+  /** Longest consecutive same-tool streak observed so far. */
+  sameToolStreak: number;
+  /** Number of empty-model-output retries triggered so far. */
+  emptyOutputRetries: number;
+  /** Whether context compression/truncation has fired at least once. */
+  compressionFired: boolean;
+}
+
+/** Options for {@link computeAutoReasoningEffort}. */
+export interface AutoReasoningOptions {
+  /** Lowest effort the controller may pick. Default: "low". */
+  minFloor?: ReasoningEffort;
+  /** Highest effort the controller may pick. Default: "high". */
+  maxCeiling?: ReasoningEffort;
+  /** Step index at/after which effort escalates. Default: 4. */
+  escalateAfterSteps?: number;
+}
+
+/**
+ * Compute the reasoning effort for the current step from run signals.
+ *
+ * Starts at `minFloor` and adds one level for each independent "this is getting
+ * hard" signal: a long tool loop, repeated same-tool calls, empty-output
+ * retries, or context compression. The result is clamped to
+ * [`minFloor`, `maxCeiling`]. Deterministic and side-effect free so it can be
+ * unit-tested directly.
+ */
+export function computeAutoReasoningEffort(
+  signals: AutoReasoningSignals,
+  options: AutoReasoningOptions = {},
+): ReasoningEffort {
+  const minRank = reasoningEffortRank(options.minFloor ?? "low");
+  const maxRank = reasoningEffortRank(options.maxCeiling ?? "high");
+  const escalateAfter = Math.max(1, options.escalateAfterSteps ?? 4);
+  const lo = Math.min(minRank, maxRank);
+  const hi = Math.max(minRank, maxRank);
+
+  let rank = minRank;
+  // Longer tool loop → more likely a genuinely complex task.
+  if (signals.stepIndex >= escalateAfter) rank += 1;
+  if (signals.stepIndex >= escalateAfter * 2) rank += 1;
+  // Model is struggling (repeating the same tool / identical args).
+  if (signals.sameToolStreak >= 3) rank += 1;
+  // Model produced nothing usable and had to be retried.
+  if (signals.emptyOutputRetries >= 1) rank += 1;
+  // Context was large enough to be compressed — a long, information-dense task.
+  if (signals.compressionFired) rank += 1;
+
+  return REASONING_EFFORT_ORDER[Math.max(lo, Math.min(hi, rank))];
+}
+
 // Reset parameters
 export interface ToolLoopResetParams<TContext = unknown> {
   provider: Provider;
@@ -210,6 +273,12 @@ export interface ToolLoopResetParams<TContext = unknown> {
    * provider/model default. Ignored for non-reasoning models.
    */
   reasoningEffort?: ReasoningEffort;
+  /**
+   * Automatic reasoning-effort control. When enabled, the runner overrides
+   * `reasoningEffort` per step with {@link computeAutoReasoningEffort} based on
+   * run signals. See {@link AutoReasoningOptions}.
+   */
+  autoReasoning?: AutoReasoningOptions & { enabled?: boolean };
 }
 
 export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TContext> {
@@ -224,6 +293,16 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
   private providerCaching = false;
   /** Reasoning effort for the run (undefined = leave provider/model default). */
   private reasoningEffort: ReasoningEffort | undefined = undefined;
+  /** Automatic reasoning-effort controller (undefined = disabled). */
+  private autoReasoning: (AutoReasoningOptions & { enabled?: boolean }) | undefined = undefined;
+  /** 0-based step index within the run; consumed by the auto controller. */
+  private runStepIndex = 0;
+  /** Effort selected by the auto controller for the current step. */
+  private currentAutoEffort: ReasoningEffort | undefined = undefined;
+  /** Peak empty-output retries observed this run (auto controller signal). */
+  private autoEmptyRetries = 0;
+  /** Whether context compression has fired this run (auto controller signal). */
+  private autoCompressionFired = false;
   private toolExecutor!: BaseFunctionToolExecutor<TContext>;
   private agentHooks!: BaseAgentRunHooks<TContext>;
   private runContext!: ContextWrapper<TContext>;
@@ -306,6 +385,11 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
     this.streaming = params.streaming ?? false;
     this.providerCaching = params.providerCaching ?? false;
     this.reasoningEffort = params.reasoningEffort;
+    this.autoReasoning = params.autoReasoning?.enabled ? params.autoReasoning : undefined;
+    this.runStepIndex = 0;
+    this.currentAutoEffort = undefined;
+    this.autoEmptyRetries = 0;
+    this.autoCompressionFired = false;
     this.provider = params.provider;
     this.originalProvider = params.provider; // 记录原始 provider，fallback 后不丢失
     this.finalLlmResp = null;
@@ -609,6 +693,34 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
       this.runContext.messages,
       tokenUsage
     );
+    // Detect compression having fired (list shrank) — a signal for the auto
+    // reasoning controller that the task is large/information-dense.
+    if (this.runContext.messages.length < this.pristineRunMessages.length) {
+      this.autoCompressionFired = true;
+    }
+
+    // Automatic reasoning-effort control: recompute once per step from the run
+    // signals accumulated so far, then hold it for this step's LLM call(s).
+    if (this.autoReasoning) {
+      const effort = computeAutoReasoningEffort(
+        {
+          stepIndex: this.runStepIndex,
+          sameToolStreak: this.sameToolStreak,
+          emptyOutputRetries: this.autoEmptyRetries,
+          compressionFired: this.autoCompressionFired,
+        },
+        this.autoReasoning,
+      );
+      if (effort !== this.currentAutoEffort) {
+        console.info(
+          `[AgentRunner] Auto reasoning effort: ${this.currentAutoEffort ?? "(default)"} → ${effort} ` +
+          `(step=${this.runStepIndex}, streak=${this.sameToolStreak}, emptyRetries=${this.autoEmptyRetries}, compressed=${this.autoCompressionFired})`
+        );
+        this.currentAutoEffort = effort;
+      }
+    }
+    // Advance the step index for the next call.
+    this.runStepIndex++;
 
     // Call LLM with fallback
     // Accumulate text/reasoning across streaming chunks so final usage chunk doesn't lose content
@@ -1295,6 +1407,9 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
             if (e instanceof EmptyModelOutputError) {
               if (hasStreamOutput) break;
               lastException = e;
+              // Signal the auto reasoning controller: the model failed to
+              // produce content, so escalate thinking on the next step.
+              this.autoEmptyRetries++;
               const waitMs =
                 Math.min(
                   EMPTY_OUTPUT_RETRY_WAIT_MAX_S * 1000,
@@ -1347,8 +1462,9 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
         temperature: this.req.temperature,
         enableCaching: this.providerCaching,
       };
-      if (this.reasoningEffort !== undefined) {
-        payload.reasoningEffort = this.reasoningEffort;
+      const effectiveEffort = this.currentAutoEffort ?? this.reasoningEffort;
+      if (effectiveEffort !== undefined) {
+        payload.reasoningEffort = effectiveEffort;
       }
       if (options.includeModel) {
         payload.model = this.req.model;

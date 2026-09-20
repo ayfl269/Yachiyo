@@ -163,6 +163,120 @@ async function testConfigFallback(): Promise<void> {
   assert(lastBody?.reasoning_effort === undefined, "未配置时不发送字段（保留模型默认）");
 }
 
+// ── 4. Auto reasoning-effort controller ──
+async function testAutoController(): Promise<void> {
+  console.log("\n=== 4. 自动思考强度控制器 ===");
+  const { computeAutoReasoningEffort } = await import("@yachiyo/agent/runners/tool-loop-agent-runner.js");
+
+  const base = { stepIndex: 0, sameToolStreak: 1, emptyOutputRetries: 0, compressionFired: false };
+  assert(computeAutoReasoningEffort(base) === "low", "初始步无信号 → 最低档 low");
+
+  // 工具循环变深 → 升级
+  assert(
+    computeAutoReasoningEffort({ ...base, stepIndex: 4 }) === "medium",
+    "step>=4 → 升到 medium",
+  );
+  assert(
+    computeAutoReasoningEffort({ ...base, stepIndex: 8 }) === "high",
+    "step>=8 → 升到 high",
+  );
+
+  // 重复同一工具 → 升级
+  assert(
+    computeAutoReasoningEffort({ ...base, sameToolStreak: 3 }) === "medium",
+    "sameToolStreak>=3 → 升到 medium",
+  );
+
+  // 空输出重试 → 升级
+  assert(
+    computeAutoReasoningEffort({ ...base, emptyOutputRetries: 1 }) === "medium",
+    "emptyOutputRetries>=1 → 升到 medium",
+  );
+
+  // 压缩触发 → 升级
+  assert(
+    computeAutoReasoningEffort({ ...base, compressionFired: true }) === "medium",
+    "compressionFired → 升到 medium",
+  );
+
+  // 多信号叠加 → 封顶 high
+  assert(
+    computeAutoReasoningEffort({ stepIndex: 10, sameToolStreak: 5, emptyOutputRetries: 3, compressionFired: true }) === "high",
+    "多信号叠加封顶 high",
+  );
+
+  // 自定义上下界
+  assert(
+    computeAutoReasoningEffort(base, { minFloor: "medium" }) === "medium",
+    "minFloor=medium → 初始即 medium",
+  );
+  assert(
+    computeAutoReasoningEffort({ ...base, stepIndex: 20, sameToolStreak: 9 }, { maxCeiling: "medium" }) === "medium",
+    "maxCeiling=medium → 封顶 medium",
+  );
+  assert(
+    computeAutoReasoningEffort({ ...base, stepIndex: 4 }, { escalateAfterSteps: 10 }) === "low",
+    "escalateAfterSteps=10 → step4 仍未升级",
+  );
+}
+
+// ── 5. Runner 透传：auto 覆盖静态 effort ──
+async function testRunnerAutoWiring(): Promise<void> {
+  console.log("\n=== 5. Runner auto 接线（端到端）===");
+  const { ToolLoopAgentRunner, createContextWrapper, EmptyAgentHooks, FunctionToolExecutor, ToolSet } = await import("../src/index.js");
+
+  const seenEfforts: Array<string | undefined> = [];
+  const provider = {
+    type: "chat_completion",
+    providerConfig: { id: "auto-prov", maxContextTokens: 4096, modalities: ["text", "tool_use"] },
+    async textChat(params: any) {
+      seenEfforts.push(params.reasoningEffort);
+      return { role: "assistant", completionText: "ok", isChunk: false };
+    },
+  } as any;
+
+  const runner = new ToolLoopAgentRunner();
+  await runner.reset(createContextWrapper<null>(null), new EmptyAgentHooks(), {
+    provider,
+    request: { prompt: "hi", imageUrls: [], audioUrls: [], contexts: [], extraUserContentParts: [] },
+    toolExecutor: new FunctionToolExecutor(),
+    agentHooks: new EmptyAgentHooks(),
+    streaming: false,
+    reasoningEffort: "minimal",
+    autoReasoning: { enabled: true, minFloor: "low", maxCeiling: "high", escalateAfterSteps: 2 },
+  });
+  (runner as any).req.funcTool = new ToolSet([]);
+
+  // 运行若干步：step 索引增长 → auto 应在 step>=2 时升到 medium 并覆盖静态 minimal。
+  for await (const _ of runner.stepUntilDone(1)) { void _; }
+
+  assert(seenEfforts.length > 0, `LLM 被调用 (calls=${seenEfforts.length})`);
+  assert(seenEfforts[0] === "low", `首步 auto 取 minFloor=low（覆盖静态 minimal，实际 ${seenEfforts[0]}）`);
+
+  // 静态 effort（无 auto）应原样透传
+  const seenStatic: Array<string | undefined> = [];
+  const provider2 = {
+    type: "chat_completion",
+    providerConfig: { id: "static-prov", maxContextTokens: 4096, modalities: ["text", "tool_use"] },
+    async textChat(params: any) {
+      seenStatic.push(params.reasoningEffort);
+      return { role: "assistant", completionText: "ok", isChunk: false };
+    },
+  } as any;
+  const runner2 = new ToolLoopAgentRunner();
+  await runner2.reset(createContextWrapper<null>(null), new EmptyAgentHooks(), {
+    provider: provider2,
+    request: { prompt: "hi", imageUrls: [], audioUrls: [], contexts: [], extraUserContentParts: [] },
+    toolExecutor: new FunctionToolExecutor(),
+    agentHooks: new EmptyAgentHooks(),
+    streaming: false,
+    reasoningEffort: "high",
+  });
+  (runner2 as any).req.funcTool = new ToolSet([]);
+  for await (const _ of runner2.stepUntilDone(1)) { void _; }
+  assert(seenStatic.every((e) => e === "high"), `无 auto 时静态 effort 原样透传（${JSON.stringify(seenStatic)}）`);
+}
+
 async function main(): Promise<void> {
   console.log("╔══════════════════════════════════════════╗");
   console.log("║   思考强度（Reasoning Effort）测试        ║");
@@ -172,6 +286,8 @@ async function main(): Promise<void> {
     testMappingHelpers();
     await testProviderBodies();
     await testConfigFallback();
+    await testAutoController();
+    await testRunnerAutoWiring();
 
     console.log(`\n结果: ${passCount} 通过, ${failCount} 失败`);
     if (failCount > 0) process.exit(1);

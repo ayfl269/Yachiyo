@@ -40,6 +40,12 @@ export interface MainAgentBuildConfig {
   fallbackProviderIds?: string[];
   /** Reasoning/thinking intensity forwarded to every LLM call of this run. */
   reasoningEffort?: import("@yachiyo/common/llm-types.js").ReasoningEffort;
+  /**
+   * When true, the runner automatically adjusts reasoning effort per step based
+   * on run complexity signals (tool-loop depth, repeated-tool struggle,
+   * empty-output retries, compression). Overrides `reasoningEffort`.
+   */
+  autoReasoningEffort?: boolean;
 }
 
 export interface MainAgentBuildResult<TContext = unknown> {
@@ -196,6 +202,7 @@ export async function buildMainAgent<TContext = unknown>(
     toolResultOverflowDir: config.toolResultOverflowDir,
     readTool: config.readTool,
     reasoningEffort: config.reasoningEffort,
+    autoReasoning: config.autoReasoningEffort ? { enabled: true } : undefined,
   });
 
   return {
