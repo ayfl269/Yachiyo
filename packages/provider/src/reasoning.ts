@@ -47,28 +47,83 @@ export function reasoningEffortRank(effort: ReasoningEffort | undefined): number
 }
 
 /**
+ * Split a model id into lowercase tokens on the separators vendors use
+ * (`-`, `.`, `_`, `/`). Tokenizing once and inspecting the resulting array is
+ * linear in the id length, avoiding the polynomial-backtracking risk that
+ * CodeQL flags on regexes with quantifiers applied to an untrusted model id.
+ */
+function tokenizeModelId(modelId: string): string[] {
+  return modelId.toLowerCase().split(/[-._/]+/).filter((t) => t.length > 0);
+}
+
+/** Parse a non-negative integer token, or NaN. */
+function tokenToInt(token: string | undefined): number {
+  if (token === undefined) return Number.NaN;
+  if (!/^[0-9]+$/.test(token)) return Number.NaN;
+  return Number.parseInt(token, 10);
+}
+
+/**
+ * Find the index of the first token equal to `name`, or -1.
+ */
+function indexOfToken(tokens: string[], name: string): number {
+  return tokens.indexOf(name);
+}
+
+/**
  * Heuristic: does this model id look like a reasoning-capable model?
  *
  * Vendor id conventions change over time, so this is intentionally broad and
  * errs toward enabling when a provider has explicitly configured a reasoning
  * effort (the operator opted in). It is used only to *gate* sending a native
  * reasoning field, never to force one on.
+ *
+ * Implemented via tokenization (see {@link tokenizeModelId}) rather than
+ * regexes over the raw id to keep matching linear in the input length.
  */
 export function modelSupportsReasoning(modelId: string | undefined): boolean {
   if (!modelId) return false;
-  const id = modelId.toLowerCase();
-  // OpenAI: o-series (o1/o3/o4-mini/…), gpt-5 family.
-  if (/^o[1-9]/.test(id) || /(^|[/_-])o[1-9]($|[-._/])/.test(id)) return true;
-  if (/gpt-5/.test(id)) return true;
-  // Anthropic: Claude 3.7+ / 4.x+ extended thinking. Model ids can be
-  // `claude-3-7-sonnet-…`, `claude-sonnet-4-5`, `claude-opus-4-1`, etc. Match
-  // an optional family word (`sonnet`/`opus`/`haiku`) followed by a version
-  // token that is 3.7/3.8/3.9 or major 4+. This deliberately does NOT match
-  // minor versions of major 3 (e.g. `claude-3-5-sonnet`), which lack thinking.
-  if (/claude(?:[-.][a-z]+)*[-.](?:3[.-][789]|[4-9])(?:[-.]|$)/.test(id)) return true;
-  // Gemini: 2.5+ and 3.x support thinking.
-  if (/gemini-2[.-]5/.test(id)) return true;
-  if (/gemini-[3-9]/.test(id)) return true;
+  const tokens = tokenizeModelId(modelId);
+  if (tokens.length === 0) return false;
+
+  // OpenAI: o-series (o1/o3/o4-mini/…). A standalone `o1`..`o9` token.
+  for (const t of tokens) {
+    if (t.length === 2 && t[0] === "o" && t[1] >= "1" && t[1] <= "9") return true;
+  }
+  // OpenAI: gpt-5 family (substring, no quantifier).
+  if (modelId.toLowerCase().includes("gpt-5")) return true;
+
+  // Anthropic: Claude 3.7+/3.8/3.9 or major >= 4. Ids look like
+  // `claude-3-7-sonnet-…`, `claude-sonnet-4-5`, `claude-opus-4-1`. Only the
+  // FIRST numeric token after `claude` is the major version — scanning further
+  // would misread the minor `5` in `claude-3-5-sonnet` as major 5.
+  const claudeIdx = indexOfToken(tokens, "claude");
+  if (claudeIdx !== -1) {
+    for (let i = claudeIdx + 1; i < tokens.length; i++) {
+      const major = tokenToInt(tokens[i]);
+      if (Number.isNaN(major)) continue; // skip family words (sonnet/opus/…)
+      if (major >= 4) return true;
+      if (major === 3) {
+        const minor = tokenToInt(tokens[i + 1]);
+        if (minor === 7 || minor === 8 || minor === 9) return true;
+      }
+      break; // first numeric token was the major version
+    }
+  }
+
+  // Gemini: 2.5+ and 3.x+. Find `gemini` and inspect the following tokens.
+  const geminiIdx = indexOfToken(tokens, "gemini");
+  if (geminiIdx !== -1) {
+    const major = tokenToInt(tokens[geminiIdx + 1]);
+    if (!Number.isNaN(major)) {
+      if (major >= 3) return true;
+      if (major === 2) {
+        const minor = tokenToInt(tokens[geminiIdx + 2]);
+        if (minor >= 5) return true;
+      }
+    }
+  }
+
   return false;
 }
 
@@ -186,14 +241,25 @@ type GeminiThinkingConfig =
   | { thinkingBudget: number; includeThoughts: boolean }
   | { thinkingLevel: "low" | "high"; includeThoughts: boolean };
 
-/** True for Gemini 3.x and later (major version >= 3). */
+/**
+ * True for Gemini 3.x and later (major version >= 3). Tokenized rather than
+ * regex-matched to keep it linear in the input length.
+ */
 function isGemini3(id: string): boolean {
-  return /gemini-[3-9]/.test(id);
+  const tokens = tokenizeModelId(id);
+  const idx = indexOfToken(tokens, "gemini");
+  if (idx === -1) return false;
+  const major = tokenToInt(tokens[idx + 1]);
+  return !Number.isNaN(major) && major >= 3;
 }
 
-/** True for a Gemini Pro model (thinking cannot be disabled; min budget 128). */
+/**
+ * True for a Gemini Pro model (thinking cannot be disabled; min budget 128).
+ * Uses token equality on the `pro` token rather than a regex with a `[^/]*`
+ * quantifier over untrusted input.
+ */
 function isGeminiPro(id: string): boolean {
-  return /gemini[^/]*\bpro\b/.test(id);
+  return indexOfToken(tokenizeModelId(id), "pro") !== -1;
 }
 
 /**
