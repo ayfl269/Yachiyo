@@ -1780,7 +1780,12 @@ function testRedactProxyUrl(): void {
   const redacted = redactProxyUrl("http://user:secret@proxy.example.com:8080");
   assert(!redacted?.includes("secret"), `密码被脱敏 (redacted=${redacted})`);
   assert(!redacted?.includes("user:"), "用户名被脱敏");
-  assert(!!redacted?.includes("proxy.example.com:8080"), "主机与端口保留");
+  // Parse rather than substring-match: a substring check on a URL is
+  // bypassable (e.g. `evil.com/proxy.example.com:8080`) and is flagged by
+  // CodeQL as incomplete URL sanitization.
+  const redactedUrl = new URL(redacted!);
+  assert(redactedUrl.hostname === "proxy.example.com", `主机保留 (hostname=${redactedUrl.hostname})`);
+  assert(redactedUrl.port === "8080", `端口保留 (port=${redactedUrl.port})`);
 
   const noCreds = redactProxyUrl("http://proxy.example.com:8080");
   assert(noCreds === "http://proxy.example.com:8080", "无凭证 URL 原样返回");
