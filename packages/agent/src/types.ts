@@ -101,6 +101,20 @@ export interface ContextWrapper<TContext = unknown> {
    * escalate privileges by transferring to an unrestricted one.
    */
   _sandboxPolicy?: import("./sandbox.js").SandboxPolicy;
+  /**
+   * Name of the agent owning the current run (sub-agent name for handoffs).
+   * Undefined for the main agent. Used for diagnostics.
+   */
+  _agentName?: string;
+  /**
+   * Identity used as the {@link import("./coordination.js").FileLockManager}
+   * holder for file operations in this run. Unique per handoff invocation so
+   * two concurrent invocations of the same sub-agent do not share a lock
+   * holder (which would defeat write exclusion and let one invocation release
+   * the other's locks). Undefined for the main agent, which is treated as the
+   * singleton `"__main__"` holder.
+   */
+  _lockHolderId?: string;
 }
 
 /**

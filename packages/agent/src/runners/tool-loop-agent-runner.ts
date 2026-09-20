@@ -37,6 +37,7 @@ import { sanitizeContextsByModalities, logContextSanitizeStats } from "@yachiyo/
 import { toolImageCache } from "../tool-image-cache.js";
 import type { CachedImage } from "../tool-image-cache.js";
 import { resolveImageToDataUrl, resolveAudioToDataUrl } from "../download-utils.js";
+import { resolveSubAgentExecutionBudgetSeconds } from "../sandbox.js";
 
 // Constants
 const EMPTY_OUTPUT_RETRY_ATTEMPTS = 3; // 恢复为 3 次重试以应对偶发网络/API波动
@@ -91,6 +92,19 @@ function getRequeryToolCallFormatHint(providerType: string): string {
 const REPEATED_TOOL_NOTICE_L1_THRESHOLD = 3;
 const REPEATED_TOOL_NOTICE_L2_THRESHOLD = 4;
 const REPEATED_TOOL_NOTICE_L3_THRESHOLD = 5;
+
+/**
+ * Extra grace (seconds) added on top of a handoff sub-agent's execution budget
+ * when sizing the parent's per-tool-call timeout.
+ *
+ * The sub-agent enforces its own `maxExecutionTimeSeconds` internally and
+ * returns a timeout result when it fires. Without this margin the parent's
+ * shorter default tool-call timeout (120s) would race-kill a pre-configured
+ * sub-agent whose budget is 300s, making that budget unreachable and leaving
+ * the sub-agent running orphaned in the background after its result was
+ * discarded. The margin gives the sub-agent time to wind down and report.
+ */
+const HANDOFF_TIMEOUT_GRACE_SECONDS = 15;
 
 const REPEATED_TOOL_NOTICE_L1_TEMPLATE =
   "\n\n[SYSTEM NOTICE] By the way, you have executed the same tool " +
@@ -1645,7 +1659,10 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
           }
         } else {
           const executor = this.toolExecutor.execute(funcTool, this.runContext, validParams);
-          for await (const resp of this.iterToolExecutorResults(executor)) {
+          for await (const resp of this.iterToolExecutorResults(
+            executor,
+            this.resolveToolCallTimeout(funcTool),
+          )) {
             finalResp = resp;
             yield* this.processToolExecutorResult(
               resp, funcToolId, funcToolName, toolCallStreak, appendToolCallResult
@@ -1887,11 +1904,26 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
     // drains its executor generator fully — this is what gives us
     // parallelism: all sub-agents make progress simultaneously while
     // we await them together via Promise.all below.
+    //
+    // Each launch gets its OWN shallow-copied run context. The shared
+    // `this.runContext` is mutated by `iterToolExecutorResults` (it writes
+    // `_toolAbortController` before every `next()`), so concurrent launches
+    // sharing it would clobber each other's abort controller — a tool that
+    // reads `runContext._toolAbortController.signal` (e.g. a handoff
+    // propagating parent cancellation to its sub-agent) could observe
+    // another launch's controller or `undefined`. The copy isolates the
+    // per-call controller while still sharing `context`, `messages`,
+    // `_provider`, `_toolMgr`, etc. by reference.
     const launchPromises = handoffLaunches.map(async (launch) => {
       const results: CallToolResult[] = [];
+      const launchContext: ContextWrapper<TContext> = { ...this.runContext };
       try {
-        const iter = this.toolExecutor.execute(launch.tool, this.runContext, launch.args);
-        for await (const resp of this.iterToolExecutorResults(iter)) {
+        const iter = this.toolExecutor.execute(launch.tool, launchContext, launch.args);
+        for await (const resp of this.iterToolExecutorResults(
+          iter,
+          this.resolveToolCallTimeout(launch.tool),
+          launchContext,
+        )) {
           if (resp) results.push(resp);
         }
         return { toolCallId: launch.toolCallId, results, error: undefined as Error | undefined };
@@ -1907,9 +1939,39 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
     return result;
   }
 
+  /**
+   * Resolve the per-tool-call timeout (seconds) for a tool.
+   *
+   * Handoff tools get the target sub-agent's execution budget plus a small
+   * grace period, so a sub-agent configured with a longer budget (e.g. the
+   * pre-configured default of 300s) is not race-killed by the parent's
+   * shorter default tool-call timeout (120s). Without this, the sub-agent's
+   * own `maxExecutionTimeSeconds` was unreachable and, when the parent
+   * timeout fired, the sub-agent kept running orphaned in the background
+   * while its result was discarded. All other tools keep the run's configured
+   * `toolCallTimeout`.
+   */
+  private resolveToolCallTimeout(tool: FunctionTool): number {
+    const agent = (tool as { agent?: { name?: string; dynamic?: boolean; sandboxPolicy?: Record<string, unknown> } }).agent;
+    if (agent && typeof agent === "object") {
+      const budget = resolveSubAgentExecutionBudgetSeconds(
+        {
+          dynamic: agent.dynamic,
+          sandboxPolicy: agent.sandboxPolicy as import("../sandbox.js").SandboxPolicy | undefined,
+        },
+        this.runContext._sandboxPolicy,
+      );
+      return budget + HANDOFF_TIMEOUT_GRACE_SECONDS;
+    }
+    return this.runContext.toolCallTimeout;
+  }
+
   private async *iterToolExecutorResults(
-    executor: AsyncGenerator<CallToolResult | null, void, unknown>
+    executor: AsyncGenerator<CallToolResult | null, void, unknown>,
+    timeoutSeconds?: number,
+    context: ContextWrapper<TContext> = this.runContext,
   ): AsyncGenerator<CallToolResult | null, void, unknown> {
+    const effectiveTimeoutSeconds = timeoutSeconds ?? context.toolCallTimeout;
     try {
       while (true) {
         if (this.isStopRequested()) {
@@ -1921,14 +1983,17 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
         // Create a fresh AbortController for each tool call so the
         // underlying tool can be cancelled on timeout instead of
         // continuing to run in the background after the race is lost.
+        // Written to the (possibly per-launch) context passed in, not the
+        // shared `this.runContext`, so concurrent parallel handoffs don't
+        // clobber each other's controller.
         const abortController = new AbortController();
-        this.runContext._toolAbortController = abortController;
+        context._toolAbortController = abortController;
 
         let timerId: ReturnType<typeof setTimeout> | undefined;
         const timeoutPromise = new Promise<IteratorResult<CallToolResult | null>>((_, reject) => {
           timerId = setTimeout(
-            () => reject(new ToolTimeoutError(this.runContext.toolCallTimeout)),
-            this.runContext.toolCallTimeout * 1000,
+            () => reject(new ToolTimeoutError(effectiveTimeoutSeconds)),
+            effectiveTimeoutSeconds * 1000,
           );
         });
 
@@ -1958,7 +2023,7 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
           throw e;
         } finally {
           // Clear the reference so the next iteration sets a fresh one.
-          this.runContext._toolAbortController = undefined;
+          context._toolAbortController = undefined;
         }
       }
     } finally {

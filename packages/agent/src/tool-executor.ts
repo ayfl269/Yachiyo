@@ -247,8 +247,15 @@ class BackgroundTaskEventBus extends EventEmitter {
    * rather than being silently dropped.
    */
   async notifyCompleted(result: BackgroundTaskResult): Promise<void> {
-    // 1. Emit event for subscribers
-    this.emit("task_completed", result);
+    // 1. Emit event for subscribers. `emit` is synchronous, so a throwing
+    // listener would otherwise abort this method before the counter, the
+    // waker call, and the pending-result buffering ran — silently losing the
+    // background result. Isolate listener failures.
+    try {
+      this.emit("task_completed", result);
+    } catch (e) {
+      console.error(`[BackgroundTask] task_completed listener threw for task ${result.taskId}:`, e);
+    }
     this.totalCompletedCount++;
 
     // 2. Call waker if registered
@@ -597,11 +604,37 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
     // recorded onto the same parent trace. No-op when the parent context
     // has no span attached (e.g. tests, standalone usage).
     subContext._traceSpan = runContext._traceSpan;
+    // Inherit the tool manager so tools invoked inside the sub-agent that
+    // need global registration/lookup (notably create_subagent registering a
+    // new handoff, and later handoffs resolving it via `_toolMgr.getFunc`)
+    // work in nested handoff scenarios. Without this, create_subagent inside a
+    // sub-agent reported success but the handoff was never registered globally.
+    subContext._toolMgr = runContext._toolMgr;
     // Track handoff depth and propagate the effective sandbox policy so
     // further handoffs from this sub-agent are depth-bounded and cannot
     // escalate above the intersection computed above.
     subContext._handoffDepth = currentDepth + 1;
     subContext._sandboxPolicy = sandboxPolicy;
+    // Identity for diagnostics and file-lock ownership. A fresh unique id per
+    // handoff invocation (not the bare agent name) ensures two concurrent
+    // invocations of the same sub-agent do not share a lock holder, which
+    // would let one invocation's `releaseAll` drop the other's locks and
+    // defeat write exclusion.
+    subContext._agentName = agentName;
+    const lockHolderId = `${agentName}#${randomUUID()}`;
+    subContext._lockHolderId = lockHolderId;
+
+    // Propagate the parent's tool-call cancellation to the sub-agent. Without
+    // this, when the parent's per-tool-call timeout fires (or the user stops
+    // the run), the parent aborts and discards the result while the sub-agent
+    // keeps running to completion in the background as an orphan. The parent
+    // sets `runContext._toolAbortController` before invoking this executor, so
+    // its signal is available here.
+    const parentAbortSignal = runContext._toolAbortController?.signal;
+    const onParentAbort = (): void => {
+      console.info(`[SubAgent] Cancelling sub-agent "${agentName}" (parent tool call aborted).`);
+      subRunner.requestStop();
+    };
 
     // Inject model-specific tool call prompt for sub-agent
     let subSystemPrompt = tool.agent?.instructions ?? "";
@@ -632,6 +665,18 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
       // set above so deeper handoffs can inherit in turn).
       fallbackProviders: subContext._fallbackProviders,
     });
+
+    // Register the parent-abort listener AFTER reset() so the abort is
+    // delivered to the runner instance that is actually used for the loop
+    // (reset() installs a fresh AbortController). If the parent already
+    // aborted while reset() was awaiting, requestStop() immediately.
+    if (parentAbortSignal) {
+      if (parentAbortSignal.aborted) {
+        subRunner.requestStop();
+      } else {
+        parentAbortSignal.addEventListener("abort", onParentAbort, { once: true });
+      }
+    }
 
     // ── Sub-agent loop detection ──
     const LOOP_DETECTION_MAX_SAME_TOOL = 5;       // Same tool called N times consecutively
@@ -763,9 +808,15 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
         content: [{ type: "text" as const, text: resultText }],
       };
     } finally {
-      // Always release file locks held by this sub-agent, whether the run
-      // completed normally, was terminated (loop/timeout), or threw.
-      fileLockManager.releaseAll(agentName);
+      // Detach the parent-abort listener so it doesn't fire after this
+      // invocation has already settled (and doesn't accumulate listeners on
+      // the parent's AbortSignal across many handoffs).
+      parentAbortSignal?.removeEventListener("abort", onParentAbort);
+      // Always release file locks held by this sub-agent invocation, whether
+      // the run completed normally, was terminated (loop/timeout), or threw.
+      // Uses the per-invocation holder id so concurrent invocations of the
+      // same sub-agent don't release each other's locks.
+      fileLockManager.releaseAll(lockHolderId);
     }
   }
 
@@ -776,8 +827,24 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
   ): AsyncGenerator<CallToolResult, void, unknown> {
     const taskId = randomUUID();
 
+    // Dedicated AbortController for this background handoff. Registering it
+    // with the background task bus is what makes the task cancellable via
+    // `cancelBackgroundTask(taskId)` and makes `isBackgroundTaskRunning`
+    // report true while it runs. Previously nothing was registered, so the
+    // task was immediately reported as "already finished" (running=false) and
+    // could never be cancelled. Using a fresh controller (rather than the
+    // foreground tool call's) also ensures the background task is NOT killed
+    // when the foreground tool call that spawned it times out or the parent
+    // run stops.
+    const backgroundAbort = new AbortController();
+    const backgroundContext: ContextWrapper<TContext> = {
+      ...runContext,
+      _toolAbortController: backgroundAbort,
+    };
+    backgroundTaskBus.registerAbortController(taskId, backgroundAbort);
+
     // Run handoff in background and wake main agent when done
-    this.runHandoffBackground(tool, runContext, toolArgs, taskId).catch((e) => {
+    this.runHandoffBackground(tool, backgroundContext, toolArgs, taskId, backgroundAbort).catch((e) => {
       console.error(`Background handoff ${taskId} failed: ${e}`);
     });
 
@@ -793,9 +860,11 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
     tool: HandoffTool<TContext>,
     runContext: ContextWrapper<TContext>,
     toolArgs: Record<string, unknown>,
-    taskId: string
+    taskId: string,
+    backgroundAbort: AbortController
   ): Promise<void> {
     let resultText = "";
+    let cancelled = false;
     try {
       for await (const r of this.executeHandoff(tool, runContext, toolArgs)) {
         if (r && r.content) {
@@ -804,8 +873,25 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
           }
         }
       }
+      if (backgroundAbort.signal.aborted) cancelled = true;
     } catch (e) {
-      resultText = `error: Background task execution failed: ${e}`;
+      if (backgroundAbort.signal.aborted) {
+        cancelled = true;
+      } else {
+        resultText = `error: Background task execution failed: ${e}`;
+      }
+    } finally {
+      // Unregister so `isTaskRunning` returns false after settle and the map
+      // doesn't leak across long-lived runs.
+      backgroundTaskBus.unregisterAbortController(taskId);
+    }
+
+    if (cancelled) {
+      const reason = backgroundAbort.signal.reason;
+      resultText =
+        `cancelled: Background task for subagent '${tool.agent?.name}' was cancelled` +
+        (reason ? ` (${String(reason)}).` : ".");
+      console.info(`[BackgroundTask] ${taskId} cancelled.`);
     }
 
     // Wake main agent with background task result
@@ -814,7 +900,7 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
       toolName: `transfer_to_${tool.agent?.name}`,
       resultText,
       toolArgs,
-      note: `Background task for subagent '${tool.agent?.name}' finished.`,
+      note: `Background task for subagent '${tool.agent?.name}' ${cancelled ? "cancelled" : "finished"}.`,
       summaryName: `Dedicated to subagent \`${tool.agent?.name}\``,
     });
   }
@@ -977,7 +1063,19 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
 
       if (timedOut) {
         backgroundAbort.abort(new Error(`background task timeout (${BACKGROUND_TASK_TIMEOUT_SECONDS}s)`));
-        try { await iter.return(undefined as never); } catch { /* ignore */ }
+        // Close the generator (runs its finally blocks) but never await it
+        // unboundedly: a tool that both ignores the abort signal AND is stuck
+        // inside a pending `next()` would leave `iter.return()` queued behind
+        // it forever. That would skip the `finally` below (unregister) and the
+        // wake call after it — leaking the taskAborts entry and never
+        // reporting the result. Race the close against a short grace period.
+        await Promise.race([
+          iter.return(undefined as never).catch(() => { /* ignore */ }),
+          new Promise<void>((resolve) => {
+            const t = setTimeout(resolve, 2000);
+            if (typeof t === "object" && t && "unref" in t) (t as { unref(): void }).unref();
+          }),
+        ]);
         resultText = `error: Background task '${tool.name}' timed out after ${BACKGROUND_TASK_TIMEOUT_SECONDS}s and was stopped.`;
         console.error(`Background task ${taskId} timed out after ${BACKGROUND_TASK_TIMEOUT_SECONDS}s`);
       }
@@ -1089,6 +1187,25 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
           yield null;
         }
       }
+      // Handle synchronous generator (defensive). The ToolHandler type does
+      // not allow this shape, but a runtime-malformed handler returning a
+      // sync generator would otherwise hit neither branch and silently
+      // produce no result — leaving the tool_call without a result block,
+      // which can cause the next API call to fail with a 400. Drain it like
+      // an async generator so a result is always produced.
+      else if (isSyncGenerator(readyToCall)) {
+        for (const ret of readyToCall) {
+          if (ret != null) {
+            if (isCallToolResult(ret)) {
+              yield ret;
+            } else {
+              yield { content: [{ type: "text" as const, text: String(ret) }] };
+            }
+          } else {
+            yield null;
+          }
+        }
+      }
     } catch (e: unknown) {
       runContext._traceSpan?.record("tool.execute.error", {
         tool: tool.name,
@@ -1110,6 +1227,10 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
 
 function isAsyncGenerator(obj: unknown): obj is AsyncGenerator<unknown> {
   return obj != null && typeof obj === "object" && Symbol.asyncIterator in obj && "next" in obj && typeof (obj as AsyncGenerator<unknown>).next === "function";
+}
+
+function isSyncGenerator(obj: unknown): obj is Generator<unknown> {
+  return obj != null && typeof obj === "object" && Symbol.iterator in obj && "next" in obj && typeof (obj as Generator<unknown>).next === "function";
 }
 
 function isPromise(obj: unknown): obj is Promise<unknown> {

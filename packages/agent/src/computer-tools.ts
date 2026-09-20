@@ -12,6 +12,7 @@ import { join, resolve, normalize, dirname, basename, sep } from "path";
 import { execFile, type ChildProcess, type ExecFileOptionsWithStringEncoding } from "child_process";
 import { randomUUID } from "crypto";
 import { isPathAllowed, type SandboxPolicy } from "./sandbox.js";
+import { fileLockManager, type FileLockMode } from "./coordination.js";
 
 // ── Permission helpers ──
 
@@ -153,6 +154,81 @@ async function atomicWriteFile(filePath: string, content: string): Promise<void>
   }
 }
 
+// ── File locking ──
+
+/**
+ * Resolve the file-lock holder identity for the current run.
+ *
+ * Sub-agent handoffs set `_lockHolderId` to a per-invocation unique id; the
+ * main agent (and standalone tool usage) falls back to the singleton
+ * `"__main__"` holder. Using a stable per-run identity lets concurrent
+ * sub-agents contend on the same paths (write locks are exclusive) while a
+ * single run's own re-entrant accesses are granted immediately.
+ */
+function getLockHolderId(_ctx: unknown): string {
+  const wrapper = _ctx as ContextWrapper | undefined;
+  return wrapper?._lockHolderId ?? "__main__";
+}
+
+/**
+ * Acquire a {@link fileLockManager} lock for `filePath` around a file
+ * operation, then release it in a `finally`. Without this, the lock manager
+ * was dead code (`acquire()` had no callers) and concurrent sub-agents could
+ * interleave read-modify-write cycles on the same file (e.g. two
+ * `file_edit_tool` calls clobbering each other).
+ *
+ * Returns `{ granted: false }` when the lock could not be acquired within
+ * `timeoutMs` so the caller can surface a clear "file busy" error instead of
+ * proceeding unprotected.
+ */
+async function withFileLock<T>(
+  ctx: unknown,
+  filePath: string,
+  mode: FileLockMode,
+  fn: () => Promise<T>,
+  timeoutMs = 30_000
+): Promise<{ granted: true; value: T } | { granted: false }> {
+  const holderId = getLockHolderId(ctx);
+  const granted = await fileLockManager.acquire(filePath, mode, holderId, timeoutMs);
+  if (!granted) return { granted: false };
+  try {
+    return { granted: true, value: await fn() };
+  } finally {
+    fileLockManager.release(filePath, holderId, mode);
+  }
+}
+
+/**
+ * Acquire write locks for multiple paths atomically (all-or-nothing) and run
+ * `fn` while holding them. Paths are locked in sorted order so two concurrent
+ * multi-path operations (e.g. moves in opposite directions) cannot deadlock.
+ * On partial acquisition failure, already-acquired locks are released.
+ */
+async function withFileLocks<T>(
+  ctx: unknown,
+  paths: string[],
+  fn: () => Promise<T>,
+  timeoutMs = 30_000
+): Promise<{ granted: true; value: T } | { granted: false }> {
+  const holderId = getLockHolderId(ctx);
+  const uniqueSorted = [...new Set(paths)].sort();
+  const acquired: string[] = [];
+  try {
+    for (const p of uniqueSorted) {
+      const granted = await fileLockManager.acquire(p, "write", holderId, timeoutMs);
+      if (!granted) {
+        return { granted: false };
+      }
+      acquired.push(p);
+    }
+    return { granted: true, value: await fn() };
+  } finally {
+    for (const p of acquired) {
+      fileLockManager.release(p, holderId, "write");
+    }
+  }
+}
+
 // ── File Read Tool ──
 
 export function createFileReadTool(workspaceRoot?: string): FunctionTool<ComputerToolContext> {
@@ -181,17 +257,22 @@ export function createFileReadTool(workspaceRoot?: string): FunctionTool<Compute
           return { content: [{ type: "text", text: `error: File not found: ${normalizedPath}` }] };
         }
 
-        const content = await readFile(normalizedPath, "utf-8");
-        const lines = content.split("\n");
+        const lock = await withFileLock(_ctx, normalizedPath, "read", async () => {
+          const content = await readFile(normalizedPath, "utf-8");
+          const lines = content.split("\n");
 
-        const startLine = offset ?? 0;
-        const endLine = limit != null ? startLine + limit : lines.length;
-        const selectedLines = lines.slice(startLine, endLine);
+          const startLine = offset ?? 0;
+          const endLine = limit != null ? startLine + limit : lines.length;
+          const selectedLines = lines.slice(startLine, endLine);
 
-        // Add line numbers
-        const numbered = selectedLines.map((line, i) => `${startLine + i + 1}→${line}`).join("\n");
+          // Add line numbers
+          return selectedLines.map((line, i) => `${startLine + i + 1}→${line}`).join("\n");
+        });
+        if (!lock.granted) {
+          return { content: [{ type: "text", text: `error: Timed out waiting for a lock on ${normalizedPath}. Another sub-agent may be writing it.` }], isError: true };
+        }
 
-        return { content: [{ type: "text", text: numbered || "(empty file)" }] };
+        return { content: [{ type: "text", text: lock.value || "(empty file)" }] };
       } catch (e) {
         return { content: [{ type: "text", text: `error: Failed to read file: ${e}` }] };
       }
@@ -222,8 +303,13 @@ export function createFileWriteTool(workspaceRoot?: string): FunctionTool<Comput
       const normalizedPath = normalizeRwPath(path, { workspaceRoot, sandboxPolicy: context.sandboxPolicy });
 
       try {
-        await mkdir(dirname(normalizedPath), { recursive: true });
-        await atomicWriteFile(normalizedPath, content);
+        const lock = await withFileLock(_ctx, normalizedPath, "write", async () => {
+          await mkdir(dirname(normalizedPath), { recursive: true });
+          await atomicWriteFile(normalizedPath, content);
+        });
+        if (!lock.granted) {
+          return { content: [{ type: "text", text: `error: Timed out waiting for a write lock on ${normalizedPath}. Another sub-agent may be writing it.` }], isError: true };
+        }
         return { content: [{ type: "text", text: `Successfully wrote to ${normalizedPath}` }] };
       } catch (e) {
         return { content: [{ type: "text", text: `error: Failed to write file: ${e}` }], isError: true };
@@ -263,27 +349,41 @@ export function createFileEditTool(workspaceRoot?: string): FunctionTool<Compute
           return { content: [{ type: "text", text: `error: File not found: ${normalizedPath}` }], isError: true };
         }
 
-        const content = await readFile(normalizedPath, "utf-8");
+        // Hold the write lock across the entire read-modify-write cycle.
+        // Locking only the final write would let two concurrent edits both
+        // read the same base content and have the second silently clobber the
+        // first's change (lost update).
+        type EditOutcome = { ok: true } | { ok: false; message: string };
+        const lock = await withFileLock(_ctx, normalizedPath, "write", async (): Promise<EditOutcome> => {
+          const content = await readFile(normalizedPath, "utf-8");
 
-        if (!content.includes(oldString)) {
-          return { content: [{ type: "text", text: `error: old_string not found in file. Make sure the string matches exactly.` }], isError: true };
-        }
-
-        let newContent: string;
-        if (replaceAll) {
-          newContent = content.split(oldString).join(newString);
-        } else {
-          const idx = content.indexOf(oldString);
-          if (content.indexOf(oldString, idx + 1) !== -1) {
-            return {
-              content: [{ type: "text", text: `error: old_string appears multiple times in the file. Use replace_all=true to replace all occurrences, or provide more context to make the match unique.` }],
-              isError: true,
-            };
+          if (!content.includes(oldString)) {
+            return { ok: false, message: `error: old_string not found in file. Make sure the string matches exactly.` };
           }
-          newContent = content.replace(oldString, newString);
-        }
 
-        await atomicWriteFile(normalizedPath, newContent);
+          let newContent: string;
+          if (replaceAll) {
+            newContent = content.split(oldString).join(newString);
+          } else {
+            const idx = content.indexOf(oldString);
+            if (content.indexOf(oldString, idx + 1) !== -1) {
+              return {
+                ok: false,
+                message: `error: old_string appears multiple times in the file. Use replace_all=true to replace all occurrences, or provide more context to make the match unique.`,
+              };
+            }
+            newContent = content.replace(oldString, newString);
+          }
+
+          await atomicWriteFile(normalizedPath, newContent);
+          return { ok: true };
+        });
+        if (!lock.granted) {
+          return { content: [{ type: "text", text: `error: Timed out waiting for a write lock on ${normalizedPath}. Another sub-agent may be editing it.` }], isError: true };
+        }
+        if (!lock.value.ok) {
+          return { content: [{ type: "text", text: lock.value.message }], isError: true };
+        }
         return { content: [{ type: "text", text: `Successfully edited ${normalizedPath}` }] };
       } catch (e) {
         return { content: [{ type: "text", text: `error: Failed to edit file: ${e}` }], isError: true };
@@ -986,7 +1086,12 @@ export function createFileDeleteTool(workspaceRoot?: string): FunctionTool<Compu
           return { content: [{ type: "text", text: `error: Path is a directory, not a file. Use shell commands for directory removal.` }], isError: true };
         }
 
-        await unlink(normalizedPath);
+        const lock = await withFileLock(_ctx, normalizedPath, "write", async () => {
+          await unlink(normalizedPath);
+        });
+        if (!lock.granted) {
+          return { content: [{ type: "text", text: `error: Timed out waiting for a write lock on ${normalizedPath}. Another sub-agent may be using it.` }], isError: true };
+        }
         return { content: [{ type: "text", text: `Successfully deleted ${normalizedPath}` }] };
       } catch (e) {
         return { content: [{ type: "text", text: `error: Failed to delete file: ${e}` }], isError: true };
@@ -1027,9 +1132,16 @@ export function createFileMoveTool(workspaceRoot?: string): FunctionTool<Compute
           return { content: [{ type: "text", text: `error: Destination already exists: ${normalizedDest}` }], isError: true };
         }
 
-        // Ensure destination parent directory exists
-        await mkdir(dirname(normalizedDest), { recursive: true });
-        await rename(normalizedSource, normalizedDest);
+        // Lock both source and destination (sorted internally) so a move
+        // cannot interleave with an edit/write of either path.
+        const lock = await withFileLocks(_ctx, [normalizedSource, normalizedDest], async () => {
+          // Ensure destination parent directory exists
+          await mkdir(dirname(normalizedDest), { recursive: true });
+          await rename(normalizedSource, normalizedDest);
+        });
+        if (!lock.granted) {
+          return { content: [{ type: "text", text: `error: Timed out waiting for a lock on ${normalizedSource} or ${normalizedDest}. Another sub-agent may be using it.` }], isError: true };
+        }
 
         return { content: [{ type: "text", text: `Successfully moved ${normalizedSource} → ${normalizedDest}` }] };
       } catch (e) {
@@ -1226,6 +1338,13 @@ export function isPotentialReDoS(pattern: string): boolean {
 const GREP_MAX_PATTERN_LENGTH = 500;
 /** Skip lines longer than this to avoid slow regex matching on huge lines. */
 const GREP_MAX_LINE_LENGTH = 10_000;
+/**
+ * Maximum file size (bytes) the pure-JS grep fallback will read into memory.
+ * Files larger than this are skipped: reading a multi-GB file (binary, video,
+ * dataset) in full just to run a line regex causes huge memory spikes.
+ * ripgrep, when available, streams and has no such limit.
+ */
+const GREP_MAX_FILE_BYTES = 8 * 1024 * 1024; // 8 MB
 
 async function grepSearch(
   pattern: string,
@@ -1277,6 +1396,10 @@ async function grepSearch(
         if (globRegex && !globRegex.test(entry.name)) continue;
 
         try {
+          // Skip oversized files before reading them into memory.
+          const fileStat = await stat(fullPath);
+          if (fileStat.size > GREP_MAX_FILE_BYTES) continue;
+
           const content = await readFile(fullPath, "utf-8");
           const lines = content.split("\n");
 
@@ -1305,6 +1428,10 @@ async function grepSearch(
     } else {
       // Single file search
       try {
+        const fileStat = await stat(searchPath);
+        if (fileStat.size > GREP_MAX_FILE_BYTES) {
+          return [`error: File too large to search (max ${GREP_MAX_FILE_BYTES} bytes).`];
+        }
         const content = await readFile(searchPath, "utf-8");
         const lines = content.split("\n");
         for (let i = 0; i < lines.length; i++) {

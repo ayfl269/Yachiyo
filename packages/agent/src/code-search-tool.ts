@@ -6,6 +6,7 @@
 import { createFunctionTool, type FunctionTool } from "./tool.js";
 import type { CallToolResult } from "./types.js";
 import { normalizeRwPath, getAbortSignal } from "./computer-tools.js";
+import type { SandboxPolicy } from "./sandbox.js";
 import { readFile, readdir, stat } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
@@ -16,6 +17,8 @@ export interface CodeSearchToolContext {
   event?: {
     unifiedMsgOrigin?: string;
   };
+  /** Optional sandbox policy; path restrictions are enforced when present. */
+  sandboxPolicy?: SandboxPolicy;
 }
 
 // ── Symbol patterns for different languages ──
@@ -71,6 +74,9 @@ function detectLanguage(filePath: string): string {
   return langMap[ext] ?? "generic";
 }
 
+/** Skip files larger than this (bytes) to bound memory use during the walk. */
+const MAX_SEARCH_FILE_BYTES = 8 * 1024 * 1024; // 8 MB
+
 // ── Code search implementation ──
 
 interface SearchResult {
@@ -120,6 +126,12 @@ async function searchSymbols(
         const patterns = SYMBOL_PATTERNS[lang] ?? SYMBOL_PATTERNS.generic;
 
         try {
+          // Skip oversized files (binary, media, datasets) before reading them
+          // into memory. There is no ripgrep fast-path here, so this guard is
+          // the only protection against multi-GB memory spikes.
+          const fileStat = await stat(fullPath);
+          if (fileStat.size > MAX_SEARCH_FILE_BYTES) continue;
+
           const content = await readFile(fullPath, "utf-8");
           const lines = content.split("\n");
 
@@ -230,10 +242,15 @@ export function createCodeSearchTool(workspaceRoot?: string): FunctionTool<CodeS
       }
 
       const root = workspaceRoot ?? process.cwd();
+      // Enforce sandboxPolicy path restrictions the same way grep_tool /
+      // file_read_tool do. Without passing it, a sandboxed agent could scan
+      // directories that file_read_tool/grep_tool deny and read their source
+      // via the returned symbol context.
+      const context = (_ctx as { context?: CodeSearchToolContext } | undefined)?.context;
       let normalizedPath: string;
       try {
         normalizedPath = searchPath
-          ? normalizeRwPath(searchPath, { workspaceRoot: root })
+          ? normalizeRwPath(searchPath, { workspaceRoot: root, sandboxPolicy: context?.sandboxPolicy })
           : root;
       } catch (e) {
         return { content: [{ type: "text", text: `error: ${e}` }], isError: true };

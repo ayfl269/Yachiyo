@@ -140,6 +140,41 @@ export function intersectSandboxPolicies(a: SandboxPolicy, b: SandboxPolicy): Sa
   };
 }
 
+/** Structural view of a sub-agent target used to resolve its sandbox policy. */
+export interface SubAgentPolicyTarget {
+  sandboxPolicy?: SandboxPolicy;
+  dynamic?: boolean;
+}
+
+/**
+ * Resolve the effective sandbox policy for a handoff target by intersecting
+ * the target's own policy (or its dynamic/pre-configured default) with the
+ * parent run's policy. Single source of truth shared by the tool executor
+ * (which enforces it) and the agent runner (which uses it to size the
+ * per-tool-call timeout so the sub-agent's budget is actually reachable).
+ */
+export function resolveEffectiveSubAgentPolicy(
+  target: SubAgentPolicyTarget,
+  parentPolicy?: SandboxPolicy
+): SandboxPolicy {
+  const targetPolicy: SandboxPolicy = target.sandboxPolicy
+    ?? (target.dynamic ? DEFAULT_DYNAMIC_SUBAGENT_POLICY : DEFAULT_PRECONFIGURED_SUBAGENT_POLICY);
+  return parentPolicy ? intersectSandboxPolicies(parentPolicy, targetPolicy) : targetPolicy;
+}
+
+/**
+ * Effective execution-time budget (seconds) for a handoff target. Used to
+ * size the parent's per-tool-call timeout so a pre-configured sub-agent's
+ * 300s budget is not silently clipped by the parent's shorter default
+ * (e.g. 120s) tool-call timeout.
+ */
+export function resolveSubAgentExecutionBudgetSeconds(
+  target: SubAgentPolicyTarget,
+  parentPolicy?: SandboxPolicy
+): number {
+  return resolveEffectiveSubAgentPolicy(target, parentPolicy).maxExecutionTimeSeconds ?? 120;
+}
+
 /**
  * Apply a sandbox policy to a tool set, returning only the allowed tools.
  */

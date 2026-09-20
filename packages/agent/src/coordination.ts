@@ -89,12 +89,32 @@ export class FileLockManager {
 
   /**
    * Release a file lock held by a specific holder.
+   *
+   * A holder may hold multiple entries for the same path (e.g. a re-entrant
+   * read+write pair). `mode` optionally selects which entry to drop so a
+   * caller can release a single acquisition instead of all of the holder's
+   * entries on that path. When omitted, all of the holder's entries for the
+   * path are removed (legacy behaviour, used by `releaseAll`).
    */
-  release(path: string, holderId: string): void {
+  release(path: string, holderId: string, mode?: FileLockMode): void {
     const bucket = this.locksByPath.get(path);
     if (!bucket) return;
     const before = bucket.length;
-    const remaining = bucket.filter((l) => l.holderId !== holderId);
+    let remaining: FileLockEntry[];
+    if (mode === undefined) {
+      remaining = bucket.filter((l) => l.holderId !== holderId);
+    } else {
+      // Remove only the FIRST matching (holderId, mode) entry so repeated
+      // acquire/release pairs unwind symmetrically.
+      let removedOne = false;
+      remaining = bucket.filter((l) => {
+        if (!removedOne && l.holderId === holderId && l.mode === mode) {
+          removedOne = true;
+          return false;
+        }
+        return true;
+      });
+    }
     if (remaining.length === 0) {
       this.locksByPath.delete(path);
     } else {
@@ -186,15 +206,39 @@ export class FileLockManager {
     }
   }
 
-  private canGrant(path: string, mode: FileLockMode, holderId: string): boolean {
+  private canGrant(
+    path: string,
+    mode: FileLockMode,
+    holderId: string,
+    options: { ignoreQueue?: boolean } = {}
+  ): boolean {
     const existingLocks = this.locksByPath.get(path);
-    if (!existingLocks || existingLocks.length === 0) return true;
+    if (!existingLocks || existingLocks.length === 0) {
+      // No existing lock. For a fresh read request, still respect a queued
+      // writer (unless we're processing the queue itself, where FIFO order
+      // must let the head through): otherwise new readers can perpetually
+      // leapfrog a writer that is waiting for readers to drain → starvation.
+      if (mode === "read" && !options.ignoreQueue) {
+        const queue = this.waitQueueByPath.get(path);
+        if (queue && queue.some((w) => w.mode === "write")) {
+          return false;
+        }
+      }
+      return true;
+    }
 
     // Same holder can always re-acquire
     if (existingLocks.every((l) => l.holderId === holderId)) return true;
 
     if (mode === "read") {
-      // Read lock: allowed if all existing locks are also read locks
+      // Read lock: allowed if all existing locks are also read locks. If a
+      // writer is queued, block new readers so the writer isn't starved.
+      if (!options.ignoreQueue) {
+        const queue = this.waitQueueByPath.get(path);
+        if (queue && queue.some((w) => w.mode === "write")) {
+          return false;
+        }
+      }
       return existingLocks.every((l) => l.mode === "read");
     }
 
@@ -221,7 +265,11 @@ export class FileLockManager {
     const grantedIdx: number[] = [];
     for (let i = 0; i < queue.length; i++) {
       const waiter = queue[i];
-      if (this.canGrant(path, waiter.mode, waiter.holderId)) {
+      // ignoreQueue: the queue is already strict FIFO; the head must not be
+      // blocked by a writer that is *behind* it (that would deadlock the
+      // queue). New external readers are still gated by canGrant's queue
+      // check in `acquire`.
+      if (this.canGrant(path, waiter.mode, waiter.holderId, { ignoreQueue: true })) {
         this.addLock(path, waiter.mode, waiter.holderId);
         clearTimeout(waiter.timeout);
         waiter.resolve(true);
@@ -345,6 +393,12 @@ export class SubAgentTaskManager extends EventEmitter {
 
   constructor(options?: SubAgentTaskOptions) {
     super();
+    // Each queued task attaches up to 3 listeners (completed/failed/cancelled)
+    // while waiting for a slot, so with the default concurrency of 8 the
+    // per-batch listener count can exceed EventEmitter's default limit of 10
+    // and emit a spurious MaxListenersExceededWarning. Size the cap to the
+    // concurrency (plus headroom for external subscribers).
+    this.setMaxListeners(Math.max(50, (options?.maxConcurrency ?? 8) * 4));
     this.maxConcurrency = options?.maxConcurrency ?? 8;
     this.defaultTimeoutSeconds = options?.defaultTimeoutSeconds ?? 120;
     this.onTaskComplete = options?.onTaskComplete;
@@ -586,39 +640,52 @@ export class SubAgentTaskManager extends EventEmitter {
       // Defensive deadline timer. When `timeoutMs` is set, also poll on a
       // long interval so the deadline is enforced even if no events fire
       // (e.g. tasks stuck in `running` because the executor died without
-      // calling completeTask/failTask). When `timeoutMs` is unset, the
-      // timer never fires (`Infinity` deadline + `unref`).
+      // calling completeTask/failTask). The timer is deliberately REF'd: a
+      // caller passing an explicit timeout expects to wait up to that long,
+      // and if this were unref'd the process could exit (or the promise never
+      // resolve) when nothing else keeps the event loop alive. When
+      // `timeoutMs` is unset, no timer is created (Infinity deadline).
       const checkDeadline = (): void => {
         if (Date.now() >= deadline) {
           settle();
           return;
         }
-        // Re-arm the periodic check. Use unref so the timer doesn't keep
-        // the event loop alive on its own — it's only a safety net.
         deadlineTimer = setTimeout(checkDeadline, WAIT_FOR_ALL_POLL_INTERVAL_MS);
-        if (deadlineTimer && typeof deadlineTimer === "object" && "unref" in deadlineTimer) {
-          deadlineTimer.unref();
-        }
       };
       if (timeoutMs) {
         deadlineTimer = setTimeout(checkDeadline, WAIT_FOR_ALL_POLL_INTERVAL_MS);
-        if (deadlineTimer && typeof deadlineTimer === "object" && "unref" in deadlineTimer) {
-          deadlineTimer.unref();
-        }
       }
     });
 
-    // Timeout: cancel remaining tasks
+    // Timeout: cancel remaining tasks.
+    //
+    // Previously this mutated status silently: no `task_cancelled` event was
+    // emitted, so any concurrent event-driven `waitForAll` (one without a
+    // timeout) never woke up and hung forever; and `checkBatchComplete` was
+    // never called, so `onBatchComplete` / `batch_complete` never fired for a
+    // timed-out batch (inconsistent with the normal completion path).
     const hasTimeout = timeoutMs !== undefined && Date.now() >= deadline;
     if (hasTimeout) {
+      const cancelledNow: SubAgentTask[] = [];
       for (const task of this.tasks.values()) {
         if (task.status === "pending" || task.status === "running") {
+          const wasRunning = task.status === "running";
           task.status = "cancelled";
           task.error = "Timed out waiting for batch completion";
           task.completedAt = Date.now();
+          // Decrement per running task instead of zeroing the whole counter,
+          // so tasks that already completed normally are not miscounted and
+          // concurrent accounting stays consistent.
+          if (wasRunning) this.runningCount--;
+          cancelledNow.push(task);
         }
       }
-      this.runningCount = 0;
+      for (const task of cancelledNow) {
+        this.emit("task_cancelled", task);
+      }
+      if (cancelledNow.length > 0) {
+        this.checkBatchComplete();
+      }
     }
     return [...this.tasks.values()];
   }
@@ -677,6 +744,30 @@ export class SubAgentTaskManager extends EventEmitter {
   }
 }
 
+/**
+ * Race a promise against a timeout. On timeout the returned promise rejects
+ * with an Error built from `timeoutMessage`. The timeout timer is unref'd so
+ * it never keeps the process alive on its own.
+ */
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  timeoutMessage: () => string,
+): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise;
+  return new Promise<T>((resolve, reject) => {
+    // Deliberately ref'd: this timer is the only thing that can settle the
+    // race when the wrapped promise never does, so unref'ing it would let the
+    // process exit before the timeout fires. It is cleared as soon as the
+    // promise settles, so it never outlives the operation.
+    const timer = setTimeout(() => reject(new Error(timeoutMessage())), timeoutMs);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (err) => { clearTimeout(timer); reject(err); },
+    );
+  });
+}
+
 // ── Convenience: Create a managed parallel execution ──
 
 /**
@@ -693,6 +784,11 @@ export async function executeParallelSubAgents(
   options?: SubAgentTaskOptions
 ): Promise<SubAgentTask[]> {
   const manager = new SubAgentTaskManager(options);
+
+  // Per-task timeout budget. `defaultTimeoutSeconds` was previously stored
+  // but never used, so a single executor that never settles would hang
+  // `Promise.all` below forever (task stuck in "running"). Default 120s.
+  const timeoutSeconds = options?.defaultTimeoutSeconds ?? 120;
 
   // Submit all tasks
   const taskIds = tasks.map((t) => manager.submit(t.agentName, t.input));
@@ -721,9 +817,10 @@ export async function executeParallelSubAgents(
         const current = manager.getTask(taskId);
         if (!current || current.status !== "pending") return;
 
-        // Still pending but at capacity — wait for the next slot.
-        if (manager.hasCapacity) continue; // retry immediately if a slot opened
-
+        // Still pending and at capacity — wait for the next slot. (The
+        // previous `if (manager.hasCapacity) continue;` was unreachable:
+        // startTask only returns false for a pending task when the manager is
+        // at capacity, so hasCapacity was always false here.)
         await new Promise<void>((resolve) => {
           // Also listen for task_cancelled: a cancelled running task frees a
           // slot without emitting completed/failed, so without this a waiter
@@ -741,7 +838,11 @@ export async function executeParallelSubAgents(
       }
 
       try {
-        const result = await executor(task.agentName, task.input);
+        const result = await withTimeout(
+          executor(task.agentName, task.input),
+          timeoutSeconds * 1000,
+          () => `Task '${task.agentName}' timed out after ${timeoutSeconds}s`,
+        );
         manager.completeTask(taskId, result);
       } catch (e) {
         manager.failTask(taskId, (e as Error).message ?? String(e));
