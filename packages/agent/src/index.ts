@@ -218,6 +218,7 @@ export {
   createBrowserClosePageTool,
   getBrowserAutomationTools,
   closeAllBrowserPages,
+  decodeHtmlEntitiesOnce,
 } from "./web-tools.js";
 export type { WebToolContext, WebSearchProvider, SearchEngine } from "./web-tools.js";
 
@@ -341,6 +342,7 @@ export type { AskUserToolContext, PlainMessageComponent } from "./ask-user-tool.
 // Proxy management
 export {
   proxyManager,
+  redactProxyUrl,
 } from "./proxy-manager.js";
 export type { ProxyStatus, ProxyTestResult } from "./proxy-manager.js";
 export {
@@ -376,13 +378,16 @@ export {
   isDomainAllowed,
   DEFAULT_DYNAMIC_SUBAGENT_POLICY,
   DEFAULT_PRECONFIGURED_SUBAGENT_POLICY,
+  resolveEffectiveSubAgentPolicy,
+  resolveSubAgentExecutionBudgetSeconds,
 } from "./sandbox.js";
-export type { SandboxPolicy } from "./sandbox.js";
+export type { SandboxPolicy, SubAgentPolicyTarget } from "./sandbox.js";
 
 // Coordination
 export {
   FileLockManager,
   fileLockManager,
+  resetFileLockManager,
   SubAgentTaskManager,
   executeParallelSubAgents,
 } from "./coordination.js";

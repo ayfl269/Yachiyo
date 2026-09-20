@@ -40,6 +40,8 @@ import {
   createListDirTool,
   createFileDeleteTool,
   createFileMoveTool,
+  createFileWriteTool,
+  createFileEditTool,
   createLocalNodeTool,
   createWebFetchTool,
   createWebSearchTool,
@@ -54,6 +56,14 @@ import {
   getSubAgentManagementTools,
   dynamicSubAgentRegistry,
   InMemoryVectorStore,
+  fileLockManager,
+  resetFileLockManager,
+  backgroundTaskBus,
+  resolveSubAgentExecutionBudgetSeconds,
+  SubAgentTaskManager,
+  executeParallelSubAgents,
+  redactProxyUrl,
+  decodeHtmlEntitiesOnce,
 } from "../src/index.js";
 import type {
   Provider,
@@ -1414,6 +1424,388 @@ async function testDynamicContextPlacement(): Promise<void> {
 }
 
 // ============================================================
+// 19. 测试: H1 — 子代理执行预算不被父级 toolCallTimeout 截断
+// ============================================================
+
+async function testSubAgentBudgetNotClipped(): Promise<void> {
+  console.log("\n=== 测试: H1 子代理预算不被父级 toolCallTimeout 截断 ===");
+
+  // pre-configured 子代理默认预算 300s；父级默认 toolCallTimeout 120s。
+  const budget = resolveSubAgentExecutionBudgetSeconds({ dynamic: false }, undefined);
+  assert(budget === 300, `pre-configured 子代理预算为 300s (budget=${budget})`);
+
+  const dynBudget = resolveSubAgentExecutionBudgetSeconds({ dynamic: true }, undefined);
+  assert(dynBudget === 120, `dynamic 子代理预算为 120s (budget=${dynBudget})`);
+
+  // 父级策略更严格时取交集最小值
+  const intersected = resolveSubAgentExecutionBudgetSeconds(
+    { dynamic: false },
+    { maxExecutionTimeSeconds: 60 },
+  );
+  assert(intersected === 60, `与更严格的父级策略取最小值 (budget=${intersected})`);
+
+  // 验证 runner 为 handoff 工具计算的超时 = 子代理预算 + grace，且大于父级 120s。
+  // 通过构造一个带 agent 的 handoff 工具，读取 runner 的私有解析逻辑结果。
+  const { ToolLoopAgentRunner, createAgent, createHandoffTool, createContextWrapper, EmptyAgentHooks, FunctionToolExecutor, ToolSet } = await import("../src/index.js");
+  const runner = new ToolLoopAgentRunner();
+  const runContext = createContextWrapper<null>(null, { toolCallTimeout: 120 });
+  const provider = createMockProvider([
+    { role: "assistant", completionText: "done", isChunk: false },
+  ]);
+  await runner.reset(runContext, new EmptyAgentHooks(), {
+    provider,
+    request: { prompt: "hi", imageUrls: [], audioUrls: [], contexts: [], extraUserContentParts: [] },
+    toolExecutor: new FunctionToolExecutor(),
+    agentHooks: new EmptyAgentHooks(),
+    streaming: false,
+  });
+
+  const subAgent = createAgent({ name: "pre-config-agent", instructions: "x" });
+  const handoff = createHandoffTool(subAgent);
+  const resolvedTimeout = (runner as any).resolveToolCallTimeout(handoff) as number;
+  assert(
+    resolvedTimeout === 300 + 15,
+    `handoff 工具超时 = 子代理预算 300 + grace 15 (timeout=${resolvedTimeout})`,
+  );
+  assert(resolvedTimeout > 120, "handoff 超时大于父级默认 120s（预算可达）");
+
+  // 普通工具保持父级 toolCallTimeout
+  const plainTool = (await import("../src/index.js")).createFunctionTool({
+    name: "plain",
+    description: "plain",
+    parameters: { type: "object", properties: {} },
+  });
+  const plainTimeout = (runner as any).resolveToolCallTimeout(plainTool) as number;
+  assert(plainTimeout === 120, `普通工具保持 120s (timeout=${plainTimeout})`);
+
+  console.log("  ✅ H1 子代理预算不被截断测试通过");
+}
+
+// ============================================================
+// 20. 测试: H2 — 文件锁真实生效（并发写互斥）
+// ============================================================
+
+async function testFileLockEffective(): Promise<void> {
+  console.log("\n=== 测试: H2 文件锁真实生效 ===");
+  const { mkdir, rm, readFile } = await import("fs/promises");
+  const { join } = await import("path");
+  const { tmpdir } = await import("os");
+  const dir = join(tmpdir(), `lock_test_${Date.now()}`);
+  await mkdir(dir, { recursive: true });
+  resetFileLockManager();
+
+  const adminCtx = { context: { event: {}, providerSettings: { computer_use_runtime: "local" as const } }, messages: [], toolCallTimeout: 30 };
+  const writeTool = createFileWriteTool(dir);
+
+  // 两个并发写，同一文件。持锁的 holder 不同 → 串行化，最终内容为其中之一。
+  const ctxA = { ...adminCtx, _lockHolderId: "agentA#1" };
+  const ctxB = { ...adminCtx, _lockHolderId: "agentB#1" };
+  const filePath = join(dir, "shared.txt");
+  await Promise.all([
+    writeTool.handler!(ctxA, "shared.txt", "from-A") as Promise<CallToolResult>,
+    writeTool.handler!(ctxB, "shared.txt", "from-B") as Promise<CallToolResult>,
+  ]);
+
+  const finalContent = await readFile(filePath, "utf-8");
+  assert(finalContent === "from-A" || finalContent === "from-B", `并发写后文件内容完整（非交错）: ${JSON.stringify(finalContent)}`);
+  assert(fileLockManager.getLocks().length === 0, "写完成后锁已全部释放");
+
+  // 同一 holder 可重入：持写锁时再次 acquire 同一路径立即成功
+  const holder = "reentrant#1";
+  await fileLockManager.acquire(filePath, "write", holder, 1000);
+  const reAcquired = await fileLockManager.acquire(filePath, "write", holder, 1000);
+  assert(reAcquired, "同一 holder 可重入获取写锁");
+  fileLockManager.releaseAll(holder);
+
+  // 不同 holder 的写锁互斥：先持锁，后到的 acquire 超时返回 false
+  await fileLockManager.acquire(filePath, "write", "holder1", 1000);
+  const blocked = await fileLockManager.acquire(filePath, "write", "holder2", 150);
+  assert(!blocked, "不同 holder 的写锁互斥（超时返回 false）");
+  fileLockManager.releaseAll("holder1");
+
+  // 读锁可共享
+  const r1 = await fileLockManager.acquire(filePath, "read", "reader1", 1000);
+  const r2 = await fileLockManager.acquire(filePath, "read", "reader2", 1000);
+  assert(r1 && r2, "多个读锁可共享");
+  fileLockManager.releaseAll("reader1");
+  fileLockManager.releaseAll("reader2");
+
+  // 写锁阻塞读锁（不同 holder）
+  await fileLockManager.acquire(filePath, "write", "writerX", 1000);
+  const readBlocked = await fileLockManager.acquire(filePath, "read", "readerY", 150);
+  assert(!readBlocked, "写锁阻塞其他 holder 的读锁");
+  fileLockManager.releaseAll("writerX");
+
+  // 编辑工具持锁贯穿 read-modify-write：并发编辑不会丢更新
+  const editTool = createFileEditTool(dir);
+  await writeTool.handler!(adminCtx, "edit.txt", "AAA") as CallToolResult;
+  const editCtxA = { ...adminCtx, _lockHolderId: "editA#1" };
+  const editCtxB = { ...adminCtx, _lockHolderId: "editB#1" };
+  await Promise.all([
+    editTool.handler!(editCtxA, "edit.txt", "AAA", "BBB") as Promise<CallToolResult>,
+    editTool.handler!(editCtxB, "edit.txt", "AAA", "CCC") as Promise<CallToolResult>,
+  ]);
+  const edited = await readFile(join(dir, "edit.txt"), "utf-8");
+  assert(edited === "BBB" || edited === "CCC", `并发编辑结果一致（无损坏）: ${JSON.stringify(edited)}`);
+
+  resetFileLockManager();
+  await rm(dir, { recursive: true, force: true });
+  console.log("  ✅ H2 文件锁真实生效测试通过");
+}
+
+// ============================================================
+// 21. 测试: H3 — 后台 handoff 可取消且运行期被追踪
+// ============================================================
+
+async function testBackgroundHandoffCancellable(): Promise<void> {
+  console.log("\n=== 测试: H3 后台 handoff 可取消且被追踪 ===");
+
+  const { createAgent, createHandoffTool, createContextWrapper, EmptyAgentHooks, ToolLoopAgentRunner } = await import("../src/index.js");
+
+  // 一个长任务 provider：阻塞直到被取消（尊重 abortSignal），让子代理
+  // 在运行期保持存活，从而能验证运行期追踪与取消。
+  let subAgentStarted = false;
+  const slowProvider: Provider = {
+    type: "chat_completion",
+    providerConfig: { id: "slow-bg", maxContextTokens: 4096, modalities: ["text", "tool_use"] },
+    async textChat(params: ProviderChatParams): Promise<LLMResponse> {
+      subAgentStarted = true;
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, 10_000);
+        if (params.abortSignal) {
+          if (params.abortSignal.aborted) {
+            clearTimeout(timer);
+            reject(new Error("aborted"));
+            return;
+          }
+          params.abortSignal.addEventListener("abort", () => {
+            clearTimeout(timer);
+            reject(new Error("aborted"));
+          }, { once: true });
+        }
+      });
+      return { role: "assistant", completionText: "finished", isChunk: false };
+    },
+  };
+
+  const subAgent = createAgent({ name: "bg-agent", instructions: "do work" });
+  const handoff = createHandoffTool(subAgent);
+
+  const executor = new FunctionToolExecutor();
+  // 非 null context：executeHandoff 会读取 runContext.context.event / 路由信息，
+  // 传 null 会在子代理启动前抛错，使测试无法覆盖运行期取消。同时提供 provider，
+  // 否则 executeHandoff 会因“无可用 provider”直接返回。
+  const runContext = createContextWrapper<Record<string, unknown>>({}, { toolCallTimeout: 120 });
+  runContext._provider = slowProvider;
+
+  // 触发 background handoff
+  const gen = executor.execute(handoff, runContext, { input: "work", background_task: true });
+  const first = await gen.next();
+  const firstText = first.value && "content" in first.value && first.value.content[0] && "text" in first.value.content[0]
+    ? (first.value.content[0] as { text: string }).text
+    : "";
+  const taskIdMatch = firstText.match(/task_id=([0-9a-f-]+)/);
+  assert(!!taskIdMatch, `后台 handoff 返回 task_id (text=${firstText.slice(0, 80)})`);
+  const taskId = taskIdMatch![1];
+
+  // 等待子代理真正开始
+  const startDeadline = Date.now() + 3000;
+  while (!subAgentStarted && Date.now() < startDeadline) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert(subAgentStarted, "子代理已开始执行");
+
+  // 运行期必须被追踪为 running（旧实现立即报告为已结束）
+  assert(executor.isBackgroundTaskRunning(taskId), "运行期 isBackgroundTaskRunning 返回 true");
+
+  // 可取消
+  const cancelled = executor.cancelBackgroundTask(taskId, "test cancel");
+  assert(cancelled, "cancelBackgroundTask 返回 true");
+
+  // 取消后应变为非 running
+  const stopDeadline = Date.now() + 3000;
+  while (executor.isBackgroundTaskRunning(taskId) && Date.now() < stopDeadline) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert(!executor.isBackgroundTaskRunning(taskId), "取消后 isBackgroundTaskRunning 返回 false");
+
+  await gen.return(undefined as never);
+  console.log("  ✅ H3 后台 handoff 可取消测试通过");
+}
+
+// ============================================================
+// 22. 测试: M2 — executeParallelSubAgents 每任务超时兜底
+// ============================================================
+
+async function testParallelSubAgentsTimeout(): Promise<void> {
+  console.log("\n=== 测试: M2 executeParallelSubAgents 超时兜底 ===");
+
+  // executor 永不 resolve → 若无超时兜底，Promise.all 会永久挂起。
+  const start = Date.now();
+  const results = await executeParallelSubAgents(
+    [{ agentName: "hanger", input: "work" }],
+    () => new Promise<string>(() => { /* never settles */ }),
+    { defaultTimeoutSeconds: 1 },
+  );
+  const elapsed = Date.now() - start;
+
+  assert(elapsed < 8000, `超时在合理时间内返回 (elapsed=${elapsed}ms)`);
+  assert(results.length === 1, "返回一个任务结果");
+  assert(results[0].status === "failed", `挂死任务被标记为 failed (status=${results[0].status})`);
+  assert(
+    (results[0].error ?? "").includes("timed out"),
+    `错误信息包含 timed out (error=${results[0].error})`,
+  );
+
+  console.log("  ✅ M2 executeParallelSubAgents 超时兜底测试通过");
+}
+
+// ============================================================
+// 23. 测试: M3 — waitForAll 超时路径发事件 + batch_complete
+// ============================================================
+
+async function testWaitForAllTimeoutEvents(): Promise<void> {
+  console.log("\n=== 测试: M3 waitForAll 超时发事件 ===");
+
+  const manager = new SubAgentTaskManager({ maxConcurrency: 8, defaultTimeoutSeconds: 60 });
+  const id = manager.submit("slow", "work");
+  manager.startTask(id);
+
+  let cancelledEvents = 0;
+  let batchCompleteEvents = 0;
+  manager.on("task_cancelled", () => { cancelledEvents++; });
+  manager.on("batch_complete", () => { batchCompleteEvents++; });
+
+  // 另一个不带 timeout 的事件驱动 waitForAll 必须被超时路径唤醒，
+  // 否则会永久挂起（旧实现静默改状态、不发事件）。
+  const concurrentWait = manager.waitForAll();
+  const timedOut = await manager.waitForAll(100);
+
+  assert(timedOut[0]?.status === "cancelled", "超时任务被取消");
+  assert(cancelledEvents === 1, `发出 task_cancelled 事件 (count=${cancelledEvents})`);
+  assert(batchCompleteEvents === 1, `触发 batch_complete (count=${batchCompleteEvents})`);
+
+  const concurrentResult = await Promise.race([
+    concurrentWait,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("concurrent wait hung")), 2000)),
+  ]).catch((e) => e as Error);
+  assert(!(concurrentResult instanceof Error), "并发 waitForAll 被事件唤醒（未永久挂起）");
+
+  console.log("  ✅ M3 waitForAll 超时发事件测试通过");
+}
+
+// ============================================================
+// 24. 测试: M6 — notifyCompleted 监听器抛错不丢结果
+// ============================================================
+
+async function testNotifyCompletedListenerThrow(): Promise<void> {
+  console.log("\n=== 测试: M6 notifyCompleted 监听器抛错不丢结果 ===");
+
+  // 注册一个会抛错的监听器，并设置 waker 记录是否仍被调用。
+  const unsubscribe = backgroundTaskBus.onTaskCompleted(() => {
+    throw new Error("listener boom");
+  });
+  let wakerCalled = false;
+  backgroundTaskBus.setWaker({
+    async wake() { wakerCalled = true; },
+  });
+
+  try {
+    await backgroundTaskBus.notifyCompleted({
+      taskId: "m6-task",
+      toolName: "t",
+      resultText: "ok",
+      toolArgs: {},
+      note: "n",
+      summaryName: "s",
+      umo: "u",
+      sessionId: "s",
+      platformId: "p",
+    });
+    assert(wakerCalled, "监听器抛错后 waker 仍被调用（结果未丢失）");
+  } finally {
+    unsubscribe();
+    backgroundTaskBus.setWaker(null);
+  }
+
+  console.log("  ✅ M6 notifyCompleted 监听器抛错测试通过");
+}
+
+// ============================================================
+// 25. 测试: L3/L2 — 文件锁写者不饥饿 + 按模式释放
+// ============================================================
+
+async function testFileLockWriterStarvationAndModeRelease(): Promise<void> {
+  console.log("\n=== 测试: L2/L3 文件锁写者防饥饿与按模式释放 ===");
+  resetFileLockManager();
+
+  // L3: 持读锁期间，新读者不得越过排队中的写者。
+  const path = "/tmp/lock-test-path";
+  await fileLockManager.acquire(path, "read", "reader1", 1000);
+
+  // 排队一个写者（会因 reader1 未释放而等待）。
+  const writerPromise = fileLockManager.acquire(path, "write", "writer1", 5000);
+
+  // 新读者应被拒绝（因队列中有写者），而不是插队成功。
+  const newReader = await fileLockManager.acquire(path, "read", "reader2", 200);
+  assert(!newReader, "新读者不越过排队中的写者（防饥饿）");
+
+  // 释放 reader1，写者应获得锁。
+  fileLockManager.release(path, "reader1", "read");
+  const writerGranted = await writerPromise;
+  assert(writerGranted, "读锁释放后排队写者获得锁");
+  fileLockManager.releaseAll("writer1");
+
+  // L2: 同一 holder 重入 read+write，按模式释放只清对应条目。
+  await fileLockManager.acquire(path, "read", "multi", 1000);
+  await fileLockManager.acquire(path, "write", "multi", 1000);
+  assert(fileLockManager.getLocksByHolder("multi").length === 2, "同 holder 持有 read+write 两条目");
+  fileLockManager.release(path, "multi", "read");
+  const remaining = fileLockManager.getLocksByHolder("multi");
+  assert(remaining.length === 1 && remaining[0].mode === "write", "按模式释放只清 read 条目，保留 write");
+  fileLockManager.releaseAll("multi");
+  assert(fileLockManager.getLocks().length === 0, "releaseAll 清空剩余条目");
+
+  resetFileLockManager();
+  console.log("  ✅ L2/L3 文件锁测试通过");
+}
+
+// ============================================================
+// 26. 测试: L8 — 代理 URL 凭证脱敏
+// ============================================================
+
+function testRedactProxyUrl(): void {
+  console.log("\n=== 测试: L8 代理 URL 凭证脱敏 ===");
+
+  const redacted = redactProxyUrl("http://user:secret@proxy.example.com:8080");
+  assert(!redacted?.includes("secret"), `密码被脱敏 (redacted=${redacted})`);
+  assert(!redacted?.includes("user:"), "用户名被脱敏");
+  assert(!!redacted?.includes("proxy.example.com:8080"), "主机与端口保留");
+
+  const noCreds = redactProxyUrl("http://proxy.example.com:8080");
+  assert(noCreds === "http://proxy.example.com:8080", "无凭证 URL 原样返回");
+  assert(redactProxyUrl(null) === null, "null 原样返回");
+
+  console.log("  ✅ L8 代理 URL 脱敏测试通过");
+}
+
+// ============================================================
+// 27. 测试: L1(ext) — HTML 实体 &#39; 正确解码
+// ============================================================
+
+function testHtmlEntityDecode(): void {
+  console.log("\n=== 测试: L1(ext) HTML 实体解码 ===");
+
+  assert(decodeHtmlEntitiesOnce("it&#39;s") === "it's", "&#39; 解码为单引号");
+  assert(decodeHtmlEntitiesOnce("a&#039;b") === "a'b", "&#039; 解码为单引号");
+  assert(decodeHtmlEntitiesOnce("a&amp;b") === "a&b", "&amp; 解码");
+  assert(decodeHtmlEntitiesOnce("&lt;x&gt;") === "<x>", "&lt;/&gt; 解码");
+  assert(decodeHtmlEntitiesOnce("a&nbsp;b") === "a b", "&nbsp; 解码");
+
+  console.log("  ✅ L1(ext) HTML 实体解码测试通过");
+}
+
+// ============================================================
 // 运行所有测试
 // ============================================================
 
@@ -1445,6 +1837,15 @@ async function main(): Promise<void> {
     await testEmptyStreamRetry();
     await testProviderCachingPlumbing();
     await testDynamicContextPlacement();
+    await testSubAgentBudgetNotClipped();
+    await testFileLockEffective();
+    await testBackgroundHandoffCancellable();
+    await testParallelSubAgentsTimeout();
+    await testWaitForAllTimeoutEvents();
+    await testNotifyCompletedListenerThrow();
+    await testFileLockWriterStarvationAndModeRelease();
+    testRedactProxyUrl();
+    testHtmlEntityDecode();
 
     console.log("\n╔══════════════════════════════════════════╗");
     console.log(`║   通过: ${passCount}  失败: ${failCount}  跳过: ${skipCount}`.padEnd(46) + "║");
