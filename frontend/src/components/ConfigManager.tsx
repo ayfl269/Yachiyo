@@ -504,7 +504,12 @@ export default function ConfigManager() {
                   onChange={(e) => updateField('injectDateTime', e.target.checked)}
                   id="injectDateTime"
                 />
-                <label htmlFor="injectDateTime">注入当前日期/时间到系统提示词</label>
+                <label htmlFor="injectDateTime">注入当前日期/时间</label>
+              </div>
+              <div className="form-group">
+                <span className="help-text">
+                  日期/时间属于每轮变化的内容，会注入到当前用户消息中（而非系统提示词）。
+                </span>
               </div>
               <div className="form-group">
                 <label>时区</label>

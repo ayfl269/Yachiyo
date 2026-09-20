@@ -110,6 +110,8 @@ export class GeminiProvider implements Provider {
     cachedTools?: unknown;
     expireTime: number; // timestamp in ms
   }>();
+  /** Set when cachedContents returned 404 once: the host has no such endpoint. */
+  private explicitCachingUnavailable = false;
 
   private async cleanExpiredCaches(): Promise<void> {
     const now = Date.now();
@@ -229,6 +231,14 @@ export class GeminiProvider implements Provider {
     if (!response.ok) {
       const errText = await response.text();
       console.warn(`[GeminiProvider] Create context cache failed: Status ${response.status}. Response: ${errText}`);
+      // A 404 means the endpoint does not exist at all (e.g. OpenAI-style
+      // gateways that proxy generateContent only). Stop retrying per turn —
+      // each attempt would otherwise add a wasted failing request to every
+      // single LLM call for the lifetime of this provider instance.
+      if (response.status === 404) {
+        this.explicitCachingUnavailable = true;
+        console.warn("[GeminiProvider] cachedContents endpoint unavailable on this host; disabling explicit context caching for this instance.");
+      }
       return null;
     }
 
@@ -282,11 +292,16 @@ export class GeminiProvider implements Provider {
 
     // Context caching logic
     const enableCaching = params.enableCaching ?? (this.providerConfig.enableCaching as boolean | undefined) ?? false;
-    const sessionKey = params.sessionId ?? "default";
+    const sessionLabel = params.sessionId ?? "default";
+    // Key the cache by model as well as session: a cachedContents object is
+    // bound to the model it was created for, and `params.model` can override
+    // the instance model per request. Keying by session alone would let a
+    // request for a different model reuse (and be rejected by) a stale cache.
+    const sessionKey = `${useModel}::${sessionLabel}`;
 
     await this.cleanExpiredCaches();
 
-    if (enableCaching && contents.length > 1) {
+    if (enableCaching && !this.explicitCachingUnavailable && contents.length > 1) {
       // TTL must be a positive integer (the API rejects 0/negative/non-finite).
       const rawTtl = Number(this.providerConfig.cacheTtlSeconds);
       const ttl = Number.isFinite(rawTtl) && rawTtl > 0 ? Math.floor(rawTtl) : 300;
@@ -338,7 +353,24 @@ export class GeminiProvider implements Provider {
               return { type: "text", text: "" };
             }),
           })) as unknown as Message[];
-          const estimatedTokens = tokenCounter.countTokens(prefixMessages);
+          // The cache object stores systemInstruction and tools alongside the
+          // prefix contents, so the threshold estimate must count them too —
+          // counting the history alone made ordinary conversations (small
+          // history, large static prompt) never reach the threshold.
+          const cachePrefixEstimate = [...prefixMessages];
+          if (systemInstruction) {
+            const systemText = (systemInstruction.parts ?? [])
+              .map((p) => (typeof p.text === "string" ? p.text : ""))
+              .join("\n");
+            if (systemText) cachePrefixEstimate.push({ role: "assistant", content: systemText } as unknown as Message);
+          }
+          if (tools && tools.length > 0) {
+            cachePrefixEstimate.push({
+              role: "assistant",
+              content: JSON.stringify(tools),
+            } as unknown as Message);
+          }
+          const estimatedTokens = tokenCounter.countTokens(cachePrefixEstimate);
 
           // Gemini's minimum cacheable prefix is model-dependent (typically
           // 1024–4096 tokens). The previous 32768 default was so high that

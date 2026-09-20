@@ -244,7 +244,7 @@ async function main() {
     await saveHistory(stage, createRunner(messages));
 
     const history = updates[0].history;
-    assert(history.length === 10, "maxHistoryMessages 不再截断落库内容（全量保留 10 条）");
+    assert(history.length === 10, "落库内容不做截断（全量保留 10 条）");
     assert(
       history.map((e) => e.content).join(",") === "m0,m1,m2,m3,m4,m5,m6,m7,m8,m9",
       "完整按原顺序保留全部消息",

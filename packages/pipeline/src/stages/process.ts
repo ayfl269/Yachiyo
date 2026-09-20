@@ -95,14 +95,15 @@ export class ProcessStage extends PipelineStage {
         }
       }
 
-      const systemPrompt = await this.buildSystemPrompt(event);
+      const systemPrompt = await this.buildSystemPrompt();
+      const dynamicContext = await this.buildDynamicContext(event);
 
         // Distinguish "no provider available" (null) from a real exception:
         // only the former gets the "no available model" message; real errors
         // get the generic error path below so they are not misdiagnosed (#89).
         let buildResult: import("@yachiyo/agent/agent-builder.js").MainAgentBuildResult | null;
         try {
-          buildResult = await this.buildAgent(event, systemPrompt);
+          buildResult = await this.buildAgent(event, systemPrompt, dynamicContext);
         } catch {
           // Full error already logged inside buildAgent; send the generic
           // user-facing message without leaking internals (#89).
@@ -253,7 +254,18 @@ export class ProcessStage extends PipelineStage {
     }
   }
 
-  private async buildSystemPrompt(event: MessageEvent): Promise<string | undefined> {
+  /**
+   * Build the **static** portion of the system prompt.
+   *
+   * Only content that is stable across requests belongs here: the system
+   * message is the very first message of the conversation and therefore the
+   * anchor of the provider-side prompt cache (Anthropic `cache_control`,
+   * Gemini `cachedContent`, OpenAI automatic prefix caching). Anything that
+   * changes per request — the current time, retrieved knowledge, memory
+   * snapshots — must NOT live here or it invalidates the cached prefix on
+   * every single turn. See {@link buildDynamicContext}.
+   */
+  private async buildSystemPrompt(): Promise<string | undefined> {
     let systemPrompt: string | undefined;
 
     const personaId = this.ctx.config.defaultPersonaId;
@@ -262,40 +274,12 @@ export class ProcessStage extends PipelineStage {
       systemPrompt = persona.prompt;
     }
 
-    // Inject current date/time (configurable)
-    if (this.ctx.config.injectDateTime !== false) {
-      const tz = this.ctx.config.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
-      const now = new Date();
-      let timeInfo: string;
-      try {
-        timeInfo = now.toLocaleString("en-US", { timeZone: tz, dateStyle: "full", timeStyle: "long", hour12: false });
-      } catch {
-        timeInfo = now.toLocaleString("en-US", { dateStyle: "full", timeStyle: "long", hour12: false });
-      }
-      systemPrompt = systemPrompt
-        ? `${systemPrompt}\n\nCurrent date/time: ${timeInfo} (Timezone: ${tz})`
-        : `Current date/time: ${timeInfo} (Timezone: ${tz})`;
-    }
-
-    // Inject extra context
+    // Inject extra context (static configuration)
     const extraContext = this.ctx.config.extraContext?.trim();
     if (extraContext) {
       systemPrompt = systemPrompt
         ? `${systemPrompt}\n\n[Extra Context]\n${extraContext}`
         : `[Extra Context]\n${extraContext}`;
-    }
-
-    const kbNames = this.ctx.config.knowledgeBaseNames;
-    if (kbNames && kbNames.length > 0) {
-      const kbContext = await this.ctx.knowledgeBaseManager.retrieve(
-        event.messageStr,
-        kbNames
-      );
-      if (kbContext) {
-        systemPrompt = systemPrompt
-          ? `${systemPrompt}\n\n[Knowledge Base Reference]\n${kbContext}`
-          : `[Knowledge Base Reference]\n${kbContext}`;
-      }
     }
 
     const activeSkills = this.ctx.skillManager.listSkills({ activeOnly: true });
@@ -306,18 +290,58 @@ export class ProcessStage extends PipelineStage {
         : skillsPrompt;
     }
 
-    // Inject memory context (user profile, long-term memories, etc.)
-    const memoryContext = this.buildMemoryContext(event);
-    if (memoryContext) {
-      systemPrompt = systemPrompt
-        ? `${systemPrompt}\n\n${memoryContext}`
-        : memoryContext;
-    }
-
     return systemPrompt;
   }
 
-  private async buildAgent(event: MessageEvent, systemPrompt?: string): Promise<import("@yachiyo/agent/agent-builder.js").MainAgentBuildResult | null> {
+  /**
+   * Build the **volatile** per-request context: current date/time, retrieved
+   * knowledge base entries and the memory snapshot.
+   *
+   * This is deliberately kept out of the system prompt and injected into the
+   * current user message instead (see {@link buildAgent}). The user message is
+   * always the newest, never-cached part of the request, so volatile content
+   * placed there leaves the static system prefix and the append-only history
+   * prefix byte-stable across turns — which is what makes prompt caching hit.
+   * Putting it in the system prompt made the prefix change every second and
+   * reduced the cache hit rate to zero for every provider.
+   */
+  private async buildDynamicContext(event: MessageEvent): Promise<string | undefined> {
+    const parts: string[] = [];
+
+    // Current date/time (configurable)
+    if (this.ctx.config.injectDateTime !== false) {
+      const tz = this.ctx.config.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const now = new Date();
+      let timeInfo: string;
+      try {
+        timeInfo = now.toLocaleString("en-US", { timeZone: tz, dateStyle: "full", timeStyle: "long", hour12: false });
+      } catch {
+        timeInfo = now.toLocaleString("en-US", { dateStyle: "full", timeStyle: "long", hour12: false });
+      }
+      parts.push(`Current date/time: ${timeInfo} (Timezone: ${tz})`);
+    }
+
+    const kbNames = this.ctx.config.knowledgeBaseNames;
+    if (kbNames && kbNames.length > 0) {
+      const kbContext = await this.ctx.knowledgeBaseManager.retrieve(
+        event.messageStr,
+        kbNames
+      );
+      if (kbContext) {
+        parts.push(`[Knowledge Base Reference]\n${kbContext}`);
+      }
+    }
+
+    // Memory context (user profile, long-term memories, etc.)
+    const memoryContext = this.buildMemoryContext(event);
+    if (memoryContext) {
+      parts.push(memoryContext);
+    }
+
+    return parts.length > 0 ? parts.join("\n\n") : undefined;
+  }
+
+  private async buildAgent(event: MessageEvent, systemPrompt?: string, dynamicContext?: string): Promise<import("@yachiyo/agent/agent-builder.js").MainAgentBuildResult | null> {
     try {
       const { buildMainAgent } = await import("@yachiyo/agent/agent-builder.js");
 
@@ -378,18 +402,15 @@ export class ProcessStage extends PipelineStage {
         historyContexts = [];
       }
 
-      // Prompt-context window: storage keeps the complete history (append-only,
-      // required by background memory indexing), but only the most recent
-      // `maxHistoryMessages` entries are sent to the model as context. This is a
-      // per-request prompt cap only — it never deletes stored data. 0 = unlimited.
-      const maxHistoryMessages =
-        this.ctx.conversationManager?.getMaxHistoryMessages?.() ??
-        this.ctx.config.maxHistoryMessages ??
-        0;
-      if (maxHistoryMessages > 0 && historyContexts.length > maxHistoryMessages) {
-        historyContexts = historyContexts.slice(historyContexts.length - maxHistoryMessages);
-      }
-
+      // The complete stored history is sent as prompt context. Size control is
+      // handled downstream by token-based compression in the agent runner
+      // (ContextManager), which replaces the oldest rounds with a summary at a
+      // stable position. A front-truncating sliding window is deliberately NOT
+      // applied here: dropping the oldest messages shifts the prefix of every
+      // subsequent request, which invalidates the provider-side prompt cache
+      // (Anthropic `cache_control`, Gemini `cachedContent`, OpenAI prefix
+      // caching) on every turn once the history exceeds the window. Storage is
+      // append-only regardless (background memory indexing reads the full log).
       const providerRequest = event.requestLlm(prompt, {
         // Session id is used by provider-side prompt caching (Gemini keys its
         // server-side cachedContents by it). Without this every conversation
@@ -405,6 +426,7 @@ export class ProcessStage extends PipelineStage {
           .map(c => c.url ?? c.file)
           .filter((u): u is string => Boolean(u)),
         systemPrompt,
+        dynamicContext,
         contexts: historyContexts,
         conversation: conv ? {
           id: conv.id,
@@ -444,6 +466,12 @@ export class ProcessStage extends PipelineStage {
       // 缓存）；仅 Anthropic/Gemini 会改变请求体。存量 config blob 无该字段
       // 时按开启处理，用户可在 Dashboard 关闭。
       const providerCaching = this.ctx.config.providerCachingEnabled ?? true;
+      // Context-size control now relies entirely on token-based compression
+      // (there is no longer a per-turn message-count window). Forward the
+      // user's chosen strategy so the dashboard settings actually take effect:
+      // `llm_compress` produces a summary at a fixed position (cache-friendly),
+      // while the `truncate_by_turns` fallback drops old rounds.
+      const cfg = this.ctx.config;
       const result = await buildMainAgent({
         provider,
         request: providerRequest,
@@ -453,6 +481,13 @@ export class ProcessStage extends PipelineStage {
         config: {
           streaming: useStreaming,
           providerCaching,
+          contextLimitReachedStrategy: cfg.contextLimitReachedStrategy,
+          llmCompressInstruction: cfg.llmCompressInstruction,
+          llmCompressKeepRecent: cfg.llmCompressKeepRecent,
+          llmCompressKeepRecentRatio: cfg.llmCompressKeepRecentRatio,
+          llmCompressProviderId: cfg.llmCompressProviderId,
+          enforceMaxTurns: cfg.enforceMaxTurns,
+          truncateTurns: cfg.truncateTurns,
         },
       });
 
@@ -655,7 +690,11 @@ export class ProcessStage extends PipelineStage {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         providerId: agentRunner.getProviderId(),
         model: agentRunner.getModel(),
-        tokenInputOther: stats.tokenUsage.promptTokens - (stats.tokenUsage.cacheReadInputTokens ?? 0) + (stats.tokenUsage.cacheCreationInputTokens ?? 0),
+        // `promptTokens` is the inclusive input total for every provider
+        // (cache-read + cache-write + uncached). Non-hit input therefore is the
+        // total minus the cache-read portion; cache-write tokens stay counted as
+        // "other" input so the overall input total is preserved.
+        tokenInputOther: stats.tokenUsage.promptTokens - (stats.tokenUsage.cacheReadInputTokens ?? 0),
         tokenInputCached: stats.tokenUsage.cacheReadInputTokens ?? 0,
         tokenOutput: stats.tokenUsage.completionTokens,
         startTime: stats.startTime,

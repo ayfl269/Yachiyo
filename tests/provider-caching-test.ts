@@ -52,8 +52,15 @@ async function mockFetch(url: string | URL | Request, init?: RequestInit): Promi
       output_tokens: 50,
       cache_creation_input_tokens: 80,
       cache_read_input_tokens: 20,
+      // Chat Completions shape (OpenAI provider).
       prompt_tokens_details: {
         cached_tokens: 45
+      },
+      // Responses API shape — distinct values so a regression back to reading
+      // `prompt_tokens_details` is caught instead of silently passing.
+      input_tokens_details: {
+        cached_tokens: 55,
+        cache_write_tokens: 12
       }
     },
     usageMetadata: {
@@ -96,8 +103,9 @@ async function runTests() {
     assert(Array.isArray(body.system) && body.system[0].cache_control?.type === "ephemeral", "Anthropic System Prompt cached");
     assert(Array.isArray(body.messages[0].content) && body.messages[0].content[0].cache_control?.type === "ephemeral", "Anthropic Last Message cached");
 
-    // Validate parsed token usage
-    assert(anthropicResp.usage?.promptTokens === 100, "Anthropic promptTokens parsed");
+    // Validate parsed token usage. Anthropic's `input_tokens` excludes the
+    // cache tokens, so the inclusive prompt total is 100 + 80 + 20 = 200.
+    assert(anthropicResp.usage?.promptTokens === 200, "Anthropic promptTokens normalized to inclusive input total");
     assert(anthropicResp.usage?.cacheCreationInputTokens === 80, "Anthropic cacheCreationInputTokens parsed");
     assert(anthropicResp.usage?.cacheReadInputTokens === 20, "Anthropic cacheReadInputTokens parsed");
 
@@ -252,7 +260,10 @@ async function runTests() {
     });
 
     assert(responsesResp.usage?.promptTokens === 100, "OpenAI Responses promptTokens parsed");
-    assert(responsesResp.usage?.cacheReadInputTokens === 45, "OpenAI Responses cacheReadInputTokens parsed");
+    // Responses reports cache usage under `input_tokens_details`, NOT
+    // `prompt_tokens_details`; the mock uses 55 vs 45 to prove the right field.
+    assert(responsesResp.usage?.cacheReadInputTokens === 55, "OpenAI Responses cacheReadInputTokens read from input_tokens_details.cached_tokens");
+    assert(responsesResp.usage?.cacheCreationInputTokens === 12, "OpenAI Responses cacheCreationInputTokens read from input_tokens_details.cache_write_tokens");
 
     // 4. custom_extra_body 透传
     // 此前 dashboard 存储了该字段但没有任何 provider 读取它（死配置）。

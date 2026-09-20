@@ -147,15 +147,22 @@ export async function buildMainAgent<TContext = unknown>(
   // Resolve fallback providers
   const resolvedFallbacks = fallbackProviders;
 
-  // Resolve compression provider
+  // Resolve compression provider.
+  //
+  // The summary compressor is the cache-friendly strategy: it replaces the
+  // oldest rounds with a summary at a *fixed* position (right after the system
+  // messages), so the request prefix stays stable between compressions. The
+  // fallback truncate-by-turns compressor drops the oldest rounds instead,
+  // which shifts the prefix every time it fires and invalidates the prompt
+  // cache. When `llm_compress` is selected we therefore fall back to the
+  // active chat provider when no dedicated compression provider is configured
+  // (the dashboard documents "leave empty to use the current chat model").
   let compressProvider: Provider | undefined;
-  if (
-    config.contextLimitReachedStrategy === "llm_compress" &&
-    config.llmCompressProviderId &&
-    toolManager
-  ) {
-    // Try to resolve from tool manager's provider registry
-    compressProvider = toolManager.getProviderById(config.llmCompressProviderId) ?? undefined;
+  if (config.contextLimitReachedStrategy === "llm_compress") {
+    const resolved = config.llmCompressProviderId && toolManager
+      ? toolManager.getProviderById(config.llmCompressProviderId)
+      : null;
+    compressProvider = resolved ?? provider;
   }
 
   // Create agent runner

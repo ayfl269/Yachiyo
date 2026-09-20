@@ -2,7 +2,10 @@ import type { Provider, ProviderChatParams } from "../provider.js";
 import type { LLMResponse, ProviderConfig, TokenUsage, ToolSetInterface } from "@yachiyo/common/llm-types.js";
 import type { Message } from "@yachiyo/common/llm-message.js";
 import { messageToResponsesInput } from "../converters/openai-responses-converter.js";
-import { parseResponsesStream } from "../parsers/openai-responses-stream-parser.js";
+import {
+  extractResponsesCacheTokens,
+  parseResponsesStream,
+} from "../parsers/openai-responses-stream-parser.js";
 import { sanitizeContextsByModalities } from "../modalities.js";
 import { withRetry } from "../retry.js";
 import { ProviderAPIError, RateLimitError, safeParseJsonResponse } from "../errors.js";
@@ -293,13 +296,17 @@ export class OpenAIResponsesProvider implements Provider {
       if (total === 0 && inputMessages) {
         result.usage = this.estimateUsage(inputMessages, result.completionText ?? "");
       } else {
-        const promptTokensDetails = u.prompt_tokens_details as { cached_tokens?: number } | undefined;
-        const cacheReadInputTokens = promptTokensDetails?.cached_tokens ?? 0;
+        const { cacheReadInputTokens, cacheCreationInputTokens } =
+          extractResponsesCacheTokens(u as {
+            input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
+            prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
+          });
         result.usage = {
           promptTokens,
           completionTokens,
           total,
           cacheReadInputTokens,
+          cacheCreationInputTokens,
         } as TokenUsage;
       }
     } else if (inputMessages) {

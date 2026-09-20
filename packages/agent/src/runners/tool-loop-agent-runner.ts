@@ -378,12 +378,34 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
     // Append current user message
     if (
       this.req.prompt ||
+      this.req.dynamicContext ||
       (this.req.imageUrls && this.req.imageUrls.length > 0) ||
       (this.req.audioUrls && this.req.audioUrls.length > 0) ||
       (this.req.extraUserContentParts && this.req.extraUserContentParts.length > 0)
     ) {
-      const userMsg = await this.assembleRequestContextForProvider(this.req);
-      messages.push(validateMessage(userMsg));
+      // Volatile per-request context (time, retrieved knowledge, memory) is
+      // emitted as its own user message INSTEAD of being merged into the
+      // current user message. The current message is persisted raw by the
+      // pipeline (saveUserMessage) and replayed verbatim on the next turn;
+      // merging volatile content into it would make the replayed history
+      // diverge from what was sent, breaking the provider-side prompt cache
+      // prefix at that message on every turn. As a separate trailing message
+      // it is never persisted, so the persisted history stays byte-stable.
+      if (this.req.dynamicContext) {
+        messages.push(validateMessage({
+          role: "user",
+          content: [{ type: "text", text: this.req.dynamicContext }],
+        }));
+      }
+      if (
+        this.req.prompt ||
+        (this.req.imageUrls && this.req.imageUrls.length > 0) ||
+        (this.req.audioUrls && this.req.audioUrls.length > 0) ||
+        (this.req.extraUserContentParts && this.req.extraUserContentParts.length > 0)
+      ) {
+        const userMsg = await this.assembleRequestContextForProvider(this.req);
+        messages.push(validateMessage(userMsg));
+      }
     }
 
     // Everything appended from here on was produced by THIS run. The loaded
@@ -430,6 +452,10 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
     const fullySupported = supportsImage && supportsAudio;
 
     const contentBlocks: Record<string, unknown>[] = [];
+
+    // Note: request.dynamicContext is NOT merged here — the runner emits it as
+    // a separate trailing user message (see reset()) so that persisted history
+    // replays byte-identically and provider prompt caches stay valid.
 
     if (request.prompt) {
       contentBlocks.push({ type: "text", text: request.prompt });

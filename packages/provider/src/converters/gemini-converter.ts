@@ -91,7 +91,25 @@ function toolCallToGeminiFunctionCall(tc: ToolCall): GeminiPart {
 }
 
 function convertContentParts(content: ContentPart[]): GeminiPart[] {
-  return content.map(contentPartToGemini).filter((p): p is GeminiPart => p !== null);
+  const mapped = content.map(contentPartToGemini).filter((p): p is GeminiPart => p !== null);
+  // Some upstreams reject a standalone empty-text thought part replayed with
+  // its signature ("Unsupported input part type: go/debug*"). The documented
+  // replay shape carries the signature on a real content part, so fold a
+  // signature-only thought part into the next part. A trailing one has
+  // nothing to ride on and is dropped along with its signature.
+  const parts: GeminiPart[] = [];
+  let pendingSignature: string | undefined;
+  for (const part of mapped) {
+    if (part.thought && !part.text) {
+      pendingSignature = part.thoughtSignature ?? pendingSignature;
+      continue;
+    }
+    parts.push(
+      pendingSignature && !part.thoughtSignature ? { ...part, thoughtSignature: pendingSignature } : part
+    );
+    pendingSignature = undefined;
+  }
+  return parts;
 }
 
 // ─── Main converter ───

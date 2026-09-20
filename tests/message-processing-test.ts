@@ -567,8 +567,6 @@ async function testConversationManager(): Promise<void> {
   assert(updated?.history?.includes("Hello") === true, "更新后历史包含 Hello");
 
   // addMessagePair is append-only: full history is always preserved.
-  // maxHistoryMessages only limits the prompt-context window, not storage.
-  manager.setMaxHistoryMessages(3);
   await manager.addMessagePair(umo, "Hello 1", "Reply 1");
   await manager.addMessagePair(umo, "Hello 2", "Reply 2");
   const appendedConv = await manager.getConversation(umo, convId);

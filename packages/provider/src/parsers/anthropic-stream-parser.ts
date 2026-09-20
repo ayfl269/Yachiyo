@@ -67,7 +67,13 @@ export async function* parseAnthropicStream(
         // usage chunk would double-count prompt tokens and cut the stream
         // short. The cumulative usage is emitted once from message_delta.
         if (d.message?.usage) {
-          cachedPromptTokens = d.message.usage.input_tokens ?? 0;
+          // Anthropic's `input_tokens` excludes the cache-read/cache-write
+          // tokens; fold them in so the emitted prompt count is the inclusive
+          // billed input, matching OpenAI/Gemini semantics downstream.
+          const cacheCreation = d.message.usage.cache_creation_input_tokens ?? 0;
+          const cacheRead = d.message.usage.cache_read_input_tokens ?? 0;
+          cachedPromptTokens =
+            (d.message.usage.input_tokens ?? 0) + cacheCreation + cacheRead;
           cachedCacheCreationInputTokens = d.message.usage.cache_creation_input_tokens;
           cachedCacheReadInputTokens = d.message.usage.cache_read_input_tokens;
         }

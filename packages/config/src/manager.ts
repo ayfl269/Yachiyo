@@ -86,8 +86,6 @@ export interface AgentConfig {
   memoryLongTermMaxLLMCallsPerBatch: number;
   memoryLongTermMaxBatchesPerRun: number;
   memoryLongTermMaxRetries: number;
-  // History storage limit
-  maxHistoryMessages: number;
   temperature?: number;
   // Session whitelist: when enabled, only whitelisted UMOs get responses
   sessionWhitelistEnabled: boolean;
@@ -297,8 +295,6 @@ export class ConfigManager {
       memoryLongTermMaxLLMCallsPerBatch: 20,
       memoryLongTermMaxBatchesPerRun: 10,
       memoryLongTermMaxRetries: 3,
-      // History storage limit
-      maxHistoryMessages: 200,
       temperature: 0.7,
       // Session whitelist
       sessionWhitelistEnabled: false,

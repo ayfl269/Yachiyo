@@ -222,9 +222,45 @@ export async function encodeAudioToBase64(
   return `data:${detectedMime};base64,${base64}`;
 }
 
+// ── Remote media resolution cache ──
+// The same media URLs are re-resolved on every LLM call (each tool-loop
+// iteration re-sends the whole conversation history). Beyond the wasted
+// download, a URL that expires between turns (e.g. signed QQ CDN links)
+// resolves to a different part shape — base64 one turn, raw URL the next —
+// which breaks the provider-side prompt-cache prefix at that message for
+// every later turn. Cache successes for the TTL, and keep serving a stale
+// entry as a last resort when the fetch fails so request content stays
+// byte-identical across turns.
+const MEDIA_CACHE_MAX_ENTRIES = 32;
+const MEDIA_CACHE_TTL_MS = 10 * 60 * 1000;
+const mediaDataUrlCache = new Map<string, { dataUrl: string; cachedAt: number }>();
+
+async function resolveRemoteMediaWithCache(
+  ref: string,
+  loader: () => Promise<string | null>
+): Promise<string | null> {
+  const cached = mediaDataUrlCache.get(ref);
+  if (cached && Date.now() - cached.cachedAt < MEDIA_CACHE_TTL_MS) {
+    // Refresh insertion order so the Map acts as an LRU.
+    mediaDataUrlCache.delete(ref);
+    mediaDataUrlCache.set(ref, cached);
+    return cached.dataUrl;
+  }
+  const fresh = await loader();
+  if (fresh) {
+    if (!cached && mediaDataUrlCache.size >= MEDIA_CACHE_MAX_ENTRIES) {
+      const oldest = mediaDataUrlCache.keys().next().value;
+      if (oldest !== undefined) mediaDataUrlCache.delete(oldest);
+    }
+    mediaDataUrlCache.set(ref, { dataUrl: fresh, cachedAt: Date.now() });
+    return fresh;
+  }
+  return cached ? cached.dataUrl : null;
+}
+
 /**
  * Resolve a remote or local image reference to a base64 data URL.
- * - http/https URLs are downloaded first, then encoded.
+ * - http/https URLs are downloaded first, then encoded (with TTL caching).
  * - file:/// URIs are resolved to local paths, then encoded.
  * - base64:// URIs are converted directly.
  * - Local paths are read and encoded directly.
@@ -232,14 +268,15 @@ export async function encodeAudioToBase64(
 export async function resolveImageToDataUrl(imageRef: string): Promise<string | null> {
   try {
     if (imageRef.startsWith("http://") || imageRef.startsWith("https://")) {
-      const localPath = await downloadImageByUrl(imageRef);
-      try {
-        const dataUrl = await encodeImageToBase64(localPath);
-        return dataUrl;
-      } finally {
-        // Clean up temp file
-        try { await unlink(localPath); } catch { /* ignore */ }
-      }
+      return await resolveRemoteMediaWithCache(imageRef, async () => {
+        const localPath = await downloadImageByUrl(imageRef);
+        try {
+          return await encodeImageToBase64(localPath);
+        } finally {
+          // Clean up temp file
+          try { await unlink(localPath); } catch { /* ignore */ }
+        }
+      });
     }
     const result = await encodeImageToBase64(imageRef);
     return result;
@@ -259,14 +296,16 @@ export async function resolveImageToDataUrl(imageRef: string): Promise<string | 
 export async function resolveAudioToDataUrl(audioRef: string): Promise<string | null> {
   try {
     if (audioRef.startsWith("http://") || audioRef.startsWith("https://")) {
-      const suffix = extname(new URL(audioRef).pathname) || ".wav";
-      const tempPath = join(tmpdir(), `audio_${crypto.randomUUID().slice(0, 8)}${suffix}`);
-      try {
-        await downloadFile(audioRef, tempPath);
-        return await encodeAudioToBase64(tempPath);
-      } finally {
-        try { await unlink(tempPath); } catch { /* ignore */ }
-      }
+      return await resolveRemoteMediaWithCache(audioRef, async () => {
+        const suffix = extname(new URL(audioRef).pathname) || ".wav";
+        const tempPath = join(tmpdir(), `audio_${crypto.randomUUID().slice(0, 8)}${suffix}`);
+        try {
+          await downloadFile(audioRef, tempPath);
+          return await encodeAudioToBase64(tempPath);
+        } finally {
+          try { await unlink(tempPath); } catch { /* ignore */ }
+        }
+      });
     }
     return await encodeAudioToBase64(audioRef);
   } catch (e) {

@@ -302,16 +302,17 @@ async function testAddMessagePair(): Promise<void> {
   assertEqual(history2.length, 4, "history has 4 messages after two addMessagePair calls");
 }
 
-async function testMaxHistoryMessages(): Promise<void> {
+async function testHistoryIsAppendOnly(): Promise<void> {
   console.log("\n── Test: ConversationManager history is append-only ──");
   const store = new InMemoryConversationStore();
   await store.initialize();
-  // maxHistoryMessages only caps the prompt-context window; it must never
-  // truncate stored history (background memory indexing reads the full log).
-  const manager = new ConversationManager(store, { maxHistoryMessages: 4 });
+  // History is append-only: stored history is never truncated (background
+  // memory indexing reads the full log). Prompt size is controlled by
+  // token-based compression, not by a message-count window.
+  const manager = new ConversationManager(store);
   const umo = "umo:append-only-test";
 
-  // Add 5 message pairs (10 messages total), well past the max of 4
+  // Add 5 message pairs (10 messages total)
   for (let i = 0; i < 5; i++) {
     await manager.addMessagePair(umo, `question ${i}`, `answer ${i}`);
   }
@@ -421,7 +422,7 @@ async function main(): Promise<void> {
     await testGetAllConversationMetadata();
     await testConversationManagerLifecycle();
     await testAddMessagePair();
-    await testMaxHistoryMessages();
+    await testHistoryIsAppendOnly();
     await testSessionConversationMapping();
     await testInMemoryStoreBasicOps();
     await testNoStoreManager();

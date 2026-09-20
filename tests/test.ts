@@ -1267,6 +1267,81 @@ async function testProviderCachingPlumbing(): Promise<void> {
 }
 
 // ============================================================
+// 18. 测试: 动态上下文注入位置（缓存前缀稳定性，regression）
+// ============================================================
+
+async function testDynamicContextPlacement(): Promise<void> {
+  console.log("\n=== 测试: 动态上下文注入位置（缓存前缀稳定性） ===");
+
+  // 背景：系统提示词曾是消息列表的第 0 条，而它内嵌了秒级时间戳/知识库检索/
+  // 记忆快照等每轮变化的内容，导致缓存前缀每次都不同，所有 provider 的提示
+  // 缓存命中率归零。现在动态内容应注入"当前用户消息"，系统提示词保持稳定。
+  const seen: Array<{ system?: string; messages: Array<Record<string, unknown>> }> = [];
+  const provider: Provider = {
+    type: "chat_completion",
+    providerConfig: { id: "dynamic-context", maxContextTokens: 4096, modalities: ["text", "tool_use"] },
+    async textChat(params: ProviderChatParams): Promise<LLMResponse> {
+      const msgs = params.contexts as Array<Record<string, unknown>>;
+      const system = msgs.find((m) => m.role === "system");
+      seen.push({
+        system: typeof system?.content === "string" ? system.content : undefined,
+        messages: msgs,
+      });
+      return { role: "assistant", completionText: "ok", isChunk: false };
+    },
+  };
+
+  const hooks = new EmptyAgentHooks();
+  const executor = new FunctionToolExecutor();
+
+  const runOnce = async (dynamicContext: string, systemPrompt: string) => {
+    const runner = new ToolLoopAgentRunner();
+    await runner.reset(createContextWrapper<null>(null), hooks, {
+      provider,
+      request: {
+        prompt: "hello",
+        imageUrls: [],
+        audioUrls: [],
+        contexts: [],
+        systemPrompt,
+        dynamicContext,
+        extraUserContentParts: [],
+      },
+      toolExecutor: executor,
+      agentHooks: hooks,
+      streaming: false,
+    });
+    (runner as any).req.funcTool = new ToolSet([]);
+    for await (const _ of runner.stepUntilDone(5)) { void _; }
+  };
+
+  // 两轮：系统提示词相同，动态上下文不同（模拟时间推进）
+  await runOnce("Current date/time: T1", "STATIC PERSONA");
+  await runOnce("Current date/time: T2", "STATIC PERSONA");
+
+  assert(seen.length === 2, `两次请求均被捕获（seen=${seen.length}）`);
+  assert(seen[0].system === "STATIC PERSONA", "系统提示词仅含静态内容");
+  assert(seen[0].system === seen[1].system, "系统提示词跨请求保持稳定（缓存前缀不变）");
+  assert(!seen[0].system?.includes("Current date/time"), "时间戳未混入系统提示词");
+
+  const userMessages = seen[0].messages.filter((m) => m.role === "user");
+  const textOf = (m: Message | undefined): string[] =>
+    Array.isArray(m?.content)
+      ? (m!.content as Array<Record<string, unknown>>)
+          .map((p) => (typeof p.text === "string" ? p.text : ""))
+      : [];
+  const dynMsg = userMessages.find((m) => textOf(m).some((t) => t.includes("Current date/time: T1")));
+  const promptMsg = userMessages.find((m) => textOf(m).includes("hello"));
+  assert(dynMsg && promptMsg && dynMsg !== promptMsg, "动态上下文以独立消息注入（不与用户输入合并）");
+  assert(
+    !textOf(promptMsg).some((t) => t.includes("Current date/time")),
+    "用户原始输入消息不含易变上下文（持久化历史跨轮重放字节稳定）",
+  );
+
+  console.log("  ✅ 动态上下文注入位置测试通过");
+}
+
+// ============================================================
 // 运行所有测试
 // ============================================================
 
@@ -1296,6 +1371,7 @@ async function main(): Promise<void> {
     await testInMemoryVectorStoreDimensionValidation();
     await testEmptyStreamRetry();
     await testProviderCachingPlumbing();
+    await testDynamicContextPlacement();
 
     console.log("\n╔══════════════════════════════════════════╗");
     console.log(`║   通过: ${passCount}  失败: ${failCount}  跳过: ${skipCount}`.padEnd(46) + "║");

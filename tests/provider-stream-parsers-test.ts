@@ -5,6 +5,7 @@
 import { parseOpenAIStream } from "@yachiyo/provider/parsers/openai-stream-parser.js";
 import { parseGeminiStream } from "@yachiyo/provider/parsers/gemini-stream-parser.js";
 import { parseAnthropicStream } from "@yachiyo/provider/parsers/anthropic-stream-parser.js";
+import { parseResponsesStream } from "@yachiyo/provider/parsers/openai-responses-stream-parser.js";
 
 let passed = 0;
 let failed = 0;
@@ -185,6 +186,75 @@ async function testGeminiStream() {
   assert(toolChunk?.usage?.total === 7, "工具调用 chunk 携带 usage（工具轮次统计不丢失）");
 }
 
+// ── 2b. OpenAI Responses 流式：usage 缓存字段读取 ──
+async function testResponsesStreamUsage() {
+  console.log("\n=== OpenAI Responses 流式解析器 - usage ===");
+  const events: Array<[string, object]> = [
+    ["response.output_text.delta", { delta: "hi" }],
+    [
+      "response.completed",
+      {
+        response: {
+          usage: {
+            input_tokens: 100,
+            output_tokens: 20,
+            total_tokens: 120,
+            // Responses API shape — authoritative.
+            input_tokens_details: { cached_tokens: 55, cache_write_tokens: 12 },
+            // Chat Completions shape (proxy fallback) with different values;
+            // the parser must prefer input_tokens_details.
+            prompt_tokens_details: { cached_tokens: 45 },
+          },
+        },
+      },
+    ],
+  ];
+  const body = events
+    .map(([type, payload]) => `event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`)
+    .join("");
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(body));
+      controller.close();
+    },
+  });
+  const results = await collect(parseResponsesStream(new Response(stream, { status: 200 })));
+  const usage = results.find((r) => r.usage)?.usage;
+  assert(usage?.promptTokens === 100, "Responses 流式 promptTokens 解析");
+  assert(usage?.cacheReadInputTokens === 55, "Responses 流式从 input_tokens_details.cached_tokens 读取命中");
+  assert(usage?.cacheCreationInputTokens === 12, "Responses 流式从 input_tokens_details.cache_write_tokens 读取写入");
+
+  // 仅提供 Chat Completions 形态的网关回退路径。
+  const fallbackEvents: Array<[string, object]> = [
+    [
+      "response.completed",
+      {
+        response: {
+          usage: {
+            input_tokens: 30,
+            output_tokens: 5,
+            total_tokens: 35,
+            prompt_tokens_details: { cached_tokens: 7 },
+          },
+        },
+      },
+    ],
+  ];
+  const fallbackBody = fallbackEvents
+    .map(([type, payload]) => `event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`)
+    .join("");
+  const fallbackStream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(fallbackBody));
+      controller.close();
+    },
+  });
+  const fallbackUsage = (
+    await collect(parseResponsesStream(new Response(fallbackStream, { status: 200 })))
+  ).find((r) => r.usage)?.usage;
+  assert(fallbackUsage?.cacheReadInputTokens === 7, "Responses 流式回退读取 prompt_tokens_details.cached_tokens");
+}
+
 // ── 3. Anthropic 流式：thinking_delta 分离 ──
 async function testAnthropicStream() {
   console.log("\n=== Anthropic 流式解析器 ===");
@@ -225,6 +295,7 @@ async function testAnthropicStream() {
     await testOpenAIStreamUsageFallback();
     await testOpenAIStreamToolCalls();
     await testGeminiStream();
+    await testResponsesStreamUsage();
     await testAnthropicStream();
     console.log(`\n总计: ${passed + failed} | 通过: ${passed} | 失败: ${failed}`);
     if (failures.length) {

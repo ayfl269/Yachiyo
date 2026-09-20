@@ -1,12 +1,44 @@
 import type { LLMResponse } from "@yachiyo/common/llm-types.js";
 import { parseSSEStream } from "./sse-parser.js";
 
+interface ResponsesUsageDetails {
+  cached_tokens?: number;
+  cache_write_tokens?: number;
+}
+
 interface ResponsesUsage {
   input_tokens?: number;
   output_tokens?: number;
   total_tokens?: number;
-  prompt_tokens_details?: {
-    cached_tokens?: number;
+  /**
+   * The Responses API reports cache usage under `input_tokens_details`
+   * (`cached_tokens` = cache read, `cache_write_tokens` = cache write). Some
+   * OpenAI-compatible gateways mirror the Chat Completions shape instead, so
+   * `prompt_tokens_details` is accepted as a fallback.
+   */
+  input_tokens_details?: ResponsesUsageDetails;
+  prompt_tokens_details?: ResponsesUsageDetails;
+}
+
+/**
+ * Extract cache-read / cache-write tokens from a Responses API `usage` object.
+ * `input_tokens_details` is authoritative; `prompt_tokens_details` only covers
+ * gateways that proxy the Chat Completions field naming.
+ */
+export function extractResponsesCacheTokens(usage: {
+  input_tokens_details?: ResponsesUsageDetails;
+  prompt_tokens_details?: ResponsesUsageDetails;
+}): { cacheReadInputTokens: number; cacheCreationInputTokens: number } {
+  // Merge per field rather than `??` on the whole object: a gateway may emit an
+  // empty `input_tokens_details: {}` alongside a populated
+  // `prompt_tokens_details`, and object-level `??` would then wrongly stop at
+  // the empty authoritative object and drop the fallback values.
+  const primary = usage.input_tokens_details;
+  const fallback = usage.prompt_tokens_details;
+  return {
+    cacheReadInputTokens: primary?.cached_tokens ?? fallback?.cached_tokens ?? 0,
+    cacheCreationInputTokens:
+      primary?.cache_write_tokens ?? fallback?.cache_write_tokens ?? 0,
   };
 }
 
@@ -133,13 +165,14 @@ export async function* parseResponsesStream(
         const d = data as { response?: { usage?: ResponsesUsage } };
         if (d.response?.usage) {
           const u = d.response.usage;
-          const promptTokensDetails = u.prompt_tokens_details as { cached_tokens?: number } | undefined;
-          const cacheReadInputTokens = promptTokensDetails?.cached_tokens ?? 0;
+          const { cacheReadInputTokens, cacheCreationInputTokens } =
+            extractResponsesCacheTokens(u);
           result.usage = {
             promptTokens: u.input_tokens ?? 0,
             completionTokens: u.output_tokens ?? 0,
             total: u.total_tokens ?? 0,
             cacheReadInputTokens,
+            cacheCreationInputTokens,
           };
         }
         break;

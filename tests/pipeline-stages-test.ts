@@ -506,6 +506,94 @@ async function testResultDecorateStage(): Promise<void> {
   assert(text4?.includes("Answer"), "Original answer should be present");
 }
 
+/**
+ * Regression: ProcessStage must pass the COMPLETE stored history to the agent.
+ *
+ * It previously applied a message-count sliding window (`maxHistoryMessages`)
+ * that dropped the oldest messages on every turn once the cap was exceeded.
+ * Because the prompt cache is prefix-based (Anthropic cache_control / Gemini
+ * cachedContent / OpenAI prefix caching), shifting the front of the message
+ * list invalidated the cached prefix every turn. Context size is now bounded
+ * solely by token-based compression inside the agent runner.
+ */
+async function testNoHistoryFrontTruncation(): Promise<void> {
+  const { ProcessStage } = await import("../packages/pipeline/src/stages/process.js");
+
+  const stored = Array.from({ length: 10 }, (_, i) => ({
+    role: i % 2 === 0 ? "user" : "assistant",
+    content: `m${i}`,
+  }));
+
+  const mockProvider = {
+    type: "chat_completion",
+    providerConfig: { id: "p1", maxContextTokens: 4096, modalities: ["text"] },
+    async textChat() {
+      return { role: "assistant", completionText: "ok", isChunk: false };
+    },
+  };
+
+  const stage = new ProcessStage();
+  await stage.initialize({
+    config: {
+      promptPrefix: "",
+      defaultPersonaId: "",
+      injectDateTime: false,
+      knowledgeBaseNames: [],
+      contextLimitReachedStrategy: "llm_compress",
+      llmCompressKeepRecent: 0,
+      llmCompressKeepRecentRatio: 0.15,
+      llmCompressProviderId: "",
+      enforceMaxTurns: 0,
+      truncateTurns: 0,
+    },
+    conversationManager: {
+      getCurrConversationId: async () => "conv-1",
+      getConversation: async () => ({
+        id: "conv-1",
+        unifiedMsgOrigin: "umo",
+        personaId: null,
+        history: JSON.stringify(stored),
+        platformId: "p",
+        tokenUsage: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      }),
+      newConversation: async () => "conv-1",
+      // Legacy API intentionally still present to prove it is IGNORED.
+      getMaxHistoryMessages: () => 2,
+    },
+    personaManager: { resolveSelectedPersona: async () => null },
+    knowledgeBaseManager: { retrieve: async () => null },
+    skillManager: { listSkills: () => [] },
+    providerManager: {
+      getUsingProvider: () => mockProvider,
+      getFallbackProviders: () => [],
+    },
+  } as unknown as PipelineContext);
+
+  const event = new MockMessageEvent({ messageStr: "hi" });
+  let capturedContexts: unknown[] | undefined;
+  const originalRequestLlm = event.requestLlm.bind(event);
+  (event as unknown as { requestLlm: typeof originalRequestLlm }).requestLlm = (prompt, options) => {
+    capturedContexts = options?.contexts;
+    return originalRequestLlm(prompt, options);
+  };
+
+  await (stage as unknown as {
+    buildAgent: (event: MessageEvent, systemPrompt?: string, dynamicContext?: string) => Promise<unknown>;
+  }).buildAgent(event, "static system", "dynamic context");
+
+  assert(Array.isArray(capturedContexts), "buildAgent produced a request");
+  assert(
+    capturedContexts?.length === 10,
+    `完整历史全部下发（期望 10 条，实际 ${capturedContexts?.length}）`,
+  );
+  assert(
+    (capturedContexts?.[0] as { content?: string } | undefined)?.content === "m0",
+    "最早一条历史未被前向丢弃（前缀稳定）",
+  );
+}
+
 async function testResultDecorateSegmentedReply(): Promise<void> {
   // Test the splitTextToSegments logic indirectly via process()
   const stage = new ResultDecorateStage();
@@ -552,6 +640,7 @@ async function main(): Promise<void> {
   await test("SessionStatusCheckStage", testSessionStatusCheckStage);
   await test("ResultDecorateStage", testResultDecorateStage);
   await test("ResultDecorateStage - Segmented Reply", testResultDecorateSegmentedReply);
+  await test("ProcessStage - no history front truncation", testNoHistoryFrontTruncation);
 
   console.log(`\n${"=".repeat(50)}`);
   console.log(`Results: ${passCount} passed, ${failCount} failed`);

@@ -66,6 +66,13 @@ export interface ProviderRequest {
   audioUrls: string[];
   contexts: Message[] | Record<string, unknown>[];
   systemPrompt?: string;
+  /**
+   * Volatile per-request context (current date/time, retrieved knowledge,
+   * memory snapshot). Injected into the current user message rather than the
+   * system prompt so the static system prefix stays byte-stable and
+   * provider-side prompt caching can hit. See ProcessStage.buildDynamicContext.
+   */
+  dynamicContext?: string;
   funcTool?: ToolSetInterface;
   sessionId?: string;
   model?: string;

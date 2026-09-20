@@ -158,11 +158,17 @@ export class AnthropicProvider implements Provider {
           lastBlock.cache_control = { type: "ephemeral" };
         }
       };
-      // Set cache control on the last message
+      // Set cache control on the last message — inside a tool loop each
+      // iteration extends the previous request, so this checkpoint is what
+      // makes consecutive iterations hit.
       setCacheControlOnMessage(messages[messages.length - 1]);
-      // If messages length >= 4, also set on the third-to-last message (to cache historical checkpoints)
-      if (messages.length >= 4) {
-        setCacheControlOnMessage(messages[messages.length - 3]);
+      // Anchor a second checkpoint on the last message before the volatile
+      // per-request tail (dynamic context is merged into the final user
+      // message by the converter, so this is the newest byte-stable history
+      // boundary). The last-message checkpoint can never match on the next
+      // user turn — its content changed — but this one replays verbatim.
+      if (messages.length >= 2) {
+        setCacheControlOnMessage(messages[messages.length - 2]);
       }
     }
 
@@ -258,9 +264,16 @@ export class AnthropicProvider implements Provider {
 
     if (data.usage) {
       const u = data.usage as Record<string, number>;
-      const promptTokens = u.input_tokens ?? 0;
+      const cacheCreationInputTokens = u.cache_creation_input_tokens ?? 0;
+      const cacheReadInputTokens = u.cache_read_input_tokens ?? 0;
+      // Anthropic's `input_tokens` EXCLUDES the cache-read/cache-write tokens;
+      // the true billed input is the sum of all three. Normalise `promptTokens`
+      // to that inclusive total so it matches OpenAI/Gemini semantics (where the
+      // prompt count already contains the cached portion) and so `total` — used
+      // for context-window tracking — is not understated on cached turns.
+      const promptTokens = (u.input_tokens ?? 0) + cacheReadInputTokens + cacheCreationInputTokens;
       const completionTokens = u.output_tokens ?? 0;
-      const total = (u.input_tokens ?? 0) + (u.output_tokens ?? 0);
+      const total = promptTokens + completionTokens;
 
       if (total === 0 && inputMessages) {
         result.usage = this.estimateUsage(inputMessages, result.completionText ?? "");
@@ -269,8 +282,8 @@ export class AnthropicProvider implements Provider {
           promptTokens,
           completionTokens,
           total,
-          cacheCreationInputTokens: u.cache_creation_input_tokens,
-          cacheReadInputTokens: u.cache_read_input_tokens,
+          cacheCreationInputTokens,
+          cacheReadInputTokens,
         } as TokenUsage;
       }
     } else if (inputMessages) {

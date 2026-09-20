@@ -36,11 +36,22 @@ export class EstimateTokenCounter implements TokenCounter {
   }
 
   private estimateTokens(text: string): number {
-    let chineseCount = 0;
+    // CJK characters tokenize at roughly 1 token per character on Qwen /
+    // Gemini / DeepSeek (the previous 0.6 coefficient understated
+    // Chinese-heavy prompts by ~40%, which delayed cacheThreshold triggers
+    // and context compression until close to the hard window limit).
+    let cjkCount = 0;
     for (const c of text) {
-      if (c >= "\u4e00" && c <= "\u9fff") chineseCount++;
+      if (
+        (c >= "\u4e00" && c <= "\u9fff") ||
+        (c >= "\u3400" && c <= "\u4dbf") ||
+        (c >= "\u3040" && c <= "\u30ff") ||
+        (c >= "\uac00" && c <= "\ud7af")
+      ) {
+        cjkCount++;
+      }
     }
-    const otherCount = text.length - chineseCount;
-    return Math.floor(chineseCount * 0.6 + otherCount * 0.3);
+    const otherCount = text.length - cjkCount;
+    return Math.floor(cjkCount * 1.0 + otherCount * 0.3);
   }
 }

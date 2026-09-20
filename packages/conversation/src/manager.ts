@@ -18,22 +18,9 @@ export interface ConversationRecord {
 export class ConversationManager {
   private store: ConversationStore | null;
   private memoryConsolidator: MemoryConsolidator | null = null;
-  /** Maximum number of messages to keep in history for prompt context. 0 = unlimited. */
-  private maxHistoryMessages: number = 200;
 
-  constructor(store?: ConversationStore, options?: { maxHistoryMessages?: number }) {
+  constructor(store?: ConversationStore) {
     this.store = store ?? null;
-    if (options?.maxHistoryMessages !== undefined) {
-      this.maxHistoryMessages = options.maxHistoryMessages;
-    }
-  }
-
-  setMaxHistoryMessages(max: number): void {
-    this.maxHistoryMessages = max;
-  }
-
-  getMaxHistoryMessages(): number {
-    return this.maxHistoryMessages;
   }
 
   setMemoryConsolidator(consolidator: MemoryConsolidator): void {

@@ -119,6 +119,7 @@ export abstract class MessageEvent {
     audioUrls?: string[];
     contexts?: Message[];
     systemPrompt?: string;
+    dynamicContext?: string;
     conversation?: Conversation;
   }): ProviderRequest {
     return {
@@ -127,6 +128,7 @@ export abstract class MessageEvent {
       audioUrls: options?.audioUrls ?? [],
       contexts: options?.contexts ?? [],
       systemPrompt: options?.systemPrompt,
+      dynamicContext: options?.dynamicContext,
       funcTool: options?.toolSet,
       sessionId: options?.sessionId,
       conversation: options?.conversation,
