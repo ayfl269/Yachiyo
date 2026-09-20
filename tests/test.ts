@@ -28,6 +28,7 @@ import {
   markContentPartAsTemp,
   ToolCallPart,
   MCPClient,
+  ClosedResourceError,
   validateMcpStdioConfig,
   ToolImageCache,
   sanitizeContextsByModalities,
@@ -564,6 +565,72 @@ function testMcpValidation(): void {
   }
 
   console.log("  ✅ MCP Stdio 校验测试通过");
+}
+
+// ============================================================
+// 6b. 测试: MCP 重连失败后可再次重连（regression）
+// ============================================================
+
+async function testMcpReconnectAfterFailure(): Promise<void> {
+  console.log("\n=== 测试: MCP 重连失败后可再次重连 ===");
+
+  // 背景：callToolWithReconnect 在重连失败后会把 session 置为 null。
+  // 旧实现随后直接抛 "MCP session not available"（不是 closed-resource
+  // 错误），因此再也不会触发重连，客户端永久失效。现在 session 为 null
+  // 时应主动尝试重连。
+  let connectCalls = 0;
+  let failConnect = true;
+
+  const client = new MCPClient();
+  client.name = "test-server";
+  (client as any).mcpServerConfig = { url: "http://localhost:1/mcp" };
+  (client as any).serverName = "test-server";
+
+  const makeLiveSession = () => ({
+    async initialize() {},
+    async listTools() { return { tools: [{ name: "echo" }] }; },
+    async callTool() {
+      return { content: [{ type: "text" as const, text: "pong" }] };
+    },
+    async close() {},
+  });
+
+  const deadSession = {
+    async initialize() {},
+    async listTools() { return { tools: [] }; },
+    async callTool(): Promise<never> { throw new ClosedResourceError("Connection closed"); },
+    async close() {},
+  };
+
+  // 第一次重连失败，之后成功
+  (client as any).connectToServer = async function () {
+    connectCalls++;
+    if (failConnect) throw new Error("server still down");
+    this.session = makeLiveSession();
+  };
+
+  client.session = deadSession;
+
+  // 1) 断线触发重连，但服务器仍不可用 → 调用失败，session 被清空
+  let firstError: unknown = null;
+  try {
+    await client.callToolWithReconnect("echo", {}, 5);
+  } catch (e) {
+    firstError = e;
+  }
+  assert(firstError !== null, "重连失败时调用抛错");
+  assert(client.session === null, "重连失败后 session 为 null");
+  const connectsAfterFirst = connectCalls;
+
+  // 2) 服务器恢复后，后续调用必须再次尝试重连（而非永久失效）
+  failConnect = false;
+  const result = await client.callToolWithReconnect("echo", {}, 5);
+  assert(connectCalls > connectsAfterFirst, "重连失败后再次调用会重新尝试连接");
+  assert(client.session !== null, "重新连接成功后 session 恢复");
+  const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
+  assert(text === "pong", "重连后工具调用成功返回结果");
+
+  console.log("  ✅ MCP 重连失败后可再次重连测试通过");
 }
 
 // ============================================================
@@ -1364,6 +1431,7 @@ async function main(): Promise<void> {
     testContextConfig();
     testAgentAndHandoff();
     testMcpValidation();
+    await testMcpReconnectAfterFailure();
     testModalities();
     await testToolLoopRunner();
     await testErrorResponseHandling();

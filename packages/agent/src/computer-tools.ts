@@ -454,7 +454,7 @@ export function listBackgroundProcesses(): { id: string; pid: number | undefined
  * with `detached: true` so it leads its own process group, then signal the
  * whole group with `-pid` (falling back to the direct child kill).
  */
-function killProcessTree(child: ChildProcess, signal: NodeJS.Signals = "SIGTERM"): void {
+export function killProcessTree(child: ChildProcess, signal: NodeJS.Signals = "SIGTERM"): void {
   if (child.pid == null || child.exitCode !== null || child.signalCode !== null) return;
   try {
     if (process.platform === "win32") {
@@ -478,7 +478,7 @@ function killProcessTree(child: ChildProcess, signal: NodeJS.Signals = "SIGTERM"
 }
 
 /** Grace period before a SIGTERM'd process is force-killed. */
-const KILL_ESCALATION_MS = 3000;
+export const KILL_ESCALATION_MS = 3000;
 
 /**
  * Kill a background shell process by id. Returns true if a process was found

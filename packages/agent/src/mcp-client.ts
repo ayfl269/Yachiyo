@@ -468,6 +468,16 @@ export class MCPClient {
     readTimeoutSeconds: number,
     abortSignal?: AbortSignal
   ): Promise<CallToolResult> {
+    // A null session means either we were never connected or a previous
+    // reconnection attempt failed. In both cases we must attempt to
+    // (re)establish the connection before giving up — otherwise the client
+    // would be permanently dead after a single failed reconnect: the session
+    // stays null forever and every later call throws "MCP session not
+    // available" without ever retrying.
+    if (!this.session) {
+      await this.reconnect();
+    }
+
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         if (!this.session) throw new Error("MCP session not available");

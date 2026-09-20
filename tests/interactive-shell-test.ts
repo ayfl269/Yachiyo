@@ -49,6 +49,26 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/** 进程是否存活 (EPERM 表示存在但无权限,仍算存活) */
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** 轮询等待进程退出,返回是否已退出 */
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isProcessAlive(pid)) return true;
+    await sleep(100);
+  }
+  return !isProcessAlive(pid);
+}
+
 /** 从 CallToolResult 中提取文本 */
 function extractText(result: CallToolResult): string {
   if (result.content && result.content.length > 0 && result.content[0].type === "text") {
@@ -557,6 +577,62 @@ async function testStderrCapture(): Promise<void> {
 }
 
 // ============================================================
+// 13. 测试: 关闭会话时终止整个进程树 (regression)
+// ============================================================
+
+async function testCloseKillsProcessTree(): Promise<void> {
+  console.log("\n=== 测试: 关闭会话终止整个进程树 ===");
+
+  const { mkdtemp, writeFile, readFile, rm } = await import("fs/promises");
+  const { join } = await import("path");
+  const { tmpdir } = await import("os");
+
+  const dir = await mkdtemp(join(tmpdir(), "ish-tree-"));
+  const scriptPath = join(dir, "orphan.cjs");
+  const pidPath = join(dir, "grandchild.pid");
+
+  // 该脚本记录自身 pid 后长期存活,模拟 shell 派生的孙进程。
+  await writeFile(
+    scriptPath,
+    "const fs=require('fs');fs.writeFileSync(process.argv[2],String(process.pid));setInterval(()=>{},1000);\n"
+  );
+
+  let grandchildPid = 0;
+  try {
+    const id = await startSessionAndConsumeBanner();
+
+    // 让交互式 shell 启动 node 子进程 (相对测试进程为孙进程)。
+    interactiveShellSend(id, `node "${scriptPath}" "${pidPath}"`);
+
+    // 等待孙进程写入 pid 文件。
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      try {
+        const content = await readFile(pidPath, "utf8");
+        if (content.trim()) { grandchildPid = Number(content.trim()); break; }
+      } catch { /* 尚未写入 */ }
+      await sleep(100);
+    }
+    assert(grandchildPid > 0, `捕获到孙进程 pid (pid=${grandchildPid})`);
+    assert(isProcessAlive(grandchildPid), "关闭前孙进程存活");
+
+    // 关闭会话 — 必须连带终止孙进程,否则孤儿进程会累积。
+    assert(interactiveShellClose(id), "关闭会话返回 true");
+
+    const exited = await waitForProcessExit(grandchildPid, 8000);
+    assert(exited, `关闭后孙进程被终止 (pid=${grandchildPid})`);
+  } finally {
+    // 兜底清理,避免测试自身泄漏孤儿进程。
+    if (grandchildPid > 0 && isProcessAlive(grandchildPid)) {
+      try { process.kill(grandchildPid, "SIGKILL"); } catch { /* ignore */ }
+    }
+    try { await rm(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+
+  console.log("  ✅ 关闭会话终止整个进程树测试通过");
+}
+
+// ============================================================
 // 运行所有测试
 // ============================================================
 
@@ -582,6 +658,7 @@ async function main(): Promise<void> {
     { name: "env 和 cwd 参数", fn: testEnvAndCwd },
     { name: "缓冲截断", fn: testBufferTruncation },
     { name: "stderr 捕获", fn: testStderrCapture },
+    { name: "关闭终止进程树", fn: testCloseKillsProcessTree },
   ];
 
   let passed = 0;

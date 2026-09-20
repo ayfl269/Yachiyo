@@ -21,7 +21,13 @@ import { randomUUID } from "crypto";
 import { createFunctionTool, type FunctionTool } from "./tool.js";
 import type { CallToolResult, ContextWrapper } from "./types.js";
 import type { ComputerToolContext } from "./computer-tools.js";
-import { isPotentialReDoS, normalizeRwPath, isDestructiveCommand } from "./computer-tools.js";
+import {
+  isPotentialReDoS,
+  normalizeRwPath,
+  isDestructiveCommand,
+  killProcessTree,
+  KILL_ESCALATION_MS,
+} from "./computer-tools.js";
 
 // ── Session registry ──
 
@@ -162,6 +168,10 @@ export function interactiveShellStart(
     env: { ...process.env, ...(options.env ?? {}) },
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: false,
+    // POSIX: lead a new process group so interactiveShellClose can signal the
+    // whole tree via `process.kill(-pid)`. Windows uses `taskkill /T` instead
+    // (see killProcessTree), so detached isn't needed there.
+    detached: !isWindows,
   });
 
   // Collision-proof id: re-draw if the 8-char prefix is already live so a
@@ -313,30 +323,46 @@ export async function interactiveShellRead(
 }
 
 /**
- * Close an interactive session. Sends SIGTERM (or equivalent) to the child
- * process and removes it from the registry.
+ * Close an interactive session. Terminates the child process AND its whole
+ * process tree, then removes it from the registry.
+ *
+ * A plain `child.kill()` only terminates the shell itself; commands the shell
+ * spawned (e.g. `node server.js`, `npm install`, an ssh client) survive as
+ * orphaned processes and accumulate over time. We reuse the shared
+ * {@link killProcessTree} helper, which walks the tree via `taskkill /T /F` on
+ * Windows and signals the process group (`-pid`) on POSIX, then escalates to
+ * SIGKILL if the tree ignores the graceful signal.
  *
  * Returns true if a session was found and signalled, false otherwise.
  */
 export function interactiveShellClose(id: string): boolean {
   const session = sessions.get(id);
   if (!session) return false;
+  const child = session.child;
   try {
-    if (!session.closed && session.exitCode === null) {
+    if (!session.closed && child.exitCode === null && child.signalCode === null) {
       // Close stdin first so interactive programs that read until EOF can exit
-      // gracefully before we escalate to SIGTERM.
-      session.child.stdin?.end();
-      session.child.stdin?.destroy();
-      session.child.kill("SIGTERM");
+      // gracefully before we escalate to signalling the tree.
+      child.stdin?.end();
+      child.stdin?.destroy();
+      killProcessTree(child, "SIGTERM");
+      // Escalate to a force-kill if the tree survived the graceful signal, so
+      // orphaned grandchildren are reaped rather than accumulating.
+      const escalation = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          killProcessTree(child, "SIGKILL");
+        }
+      }, KILL_ESCALATION_MS);
+      if (typeof escalation === "object" && escalation && "unref" in escalation) {
+        escalation.unref();
+      }
     }
   } catch {
     /* ignore — process may have already exited */
   }
   session.closed = true;
-  // Remove from registry after a short delay so a final read can still see
-  // any remaining buffered output. For simplicity in the synchronous case we
-  // remove immediately; callers who need the final output should read before
-  // closing.
+  // Remove from registry immediately; callers who need the final output
+  // should read before closing.
   sessions.delete(id);
   return true;
 }
