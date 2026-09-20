@@ -1402,8 +1402,10 @@ async function testDynamicContextPlacement(): Promise<void> {
   assert(!seen[0].system?.includes("Current date/time"), "时间戳未混入系统提示词");
 
   const userMessages = seen[0].messages.filter((m) => m.role === "user");
+  // Content may be a plain string (text-only prompt) or a content-part array.
   const textOf = (m: Message | undefined): string[] => {
     const content = m?.content;
+    if (typeof content === "string") return [content];
     if (!Array.isArray(content)) return [];
     const out: string[] = [];
     for (const part of content) {
@@ -1412,12 +1414,21 @@ async function testDynamicContextPlacement(): Promise<void> {
     }
     return out;
   };
-  const dynMsg = userMessages.find((m) => textOf(m).some((t) => t.includes("Current date/time: T1")));
-  const promptMsg = userMessages.find((m) => textOf(m).includes("hello"));
-  assert(!!dynMsg && !!promptMsg && dynMsg !== promptMsg, "动态上下文以独立消息注入（不与用户输入合并）");
+  const dynIdx = userMessages.findIndex((m) => textOf(m).some((t) => t.includes("Current date/time: T1")));
+  const promptIdx = userMessages.findIndex((m) => textOf(m).includes("hello"));
+  assert(dynIdx !== -1 && promptIdx !== -1 && dynIdx !== promptIdx, "动态上下文以独立消息注入（不与用户输入合并）");
   assert(
-    !textOf(promptMsg).some((t) => t.includes("Current date/time")),
+    !textOf(userMessages[promptIdx]).some((t) => t.includes("Current date/time")),
     "用户原始输入消息不含易变上下文（持久化历史跨轮重放字节稳定）",
+  );
+  // The persisted user message must come BEFORE the volatile dynamic message,
+  // so it is the last byte-stable block and can be reused from cache next turn.
+  assert(promptIdx < dynIdx, "用户消息位于动态上下文之前（持久化消息可被缓存复用）");
+  // Text-only prompt is emitted as a plain string matching the persisted form.
+  assert(
+    typeof userMessages[promptIdx].content === "string" &&
+      (userMessages[promptIdx].content as string) === "hello",
+    "文本用户消息以字符串形式发送（与持久化形态一致，避免前缀断裂）",
   );
 
   console.log("  ✅ 动态上下文注入位置测试通过");

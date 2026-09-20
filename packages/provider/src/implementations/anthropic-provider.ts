@@ -162,11 +162,13 @@ export class AnthropicProvider implements Provider {
       // iteration extends the previous request, so this checkpoint is what
       // makes consecutive iterations hit.
       setCacheControlOnMessage(messages[messages.length - 1]);
-      // Anchor a second checkpoint on the last message before the volatile
-      // per-request tail (dynamic context is merged into the final user
-      // message by the converter, so this is the newest byte-stable history
-      // boundary). The last-message checkpoint can never match on the next
-      // user turn — its content changed — but this one replays verbatim.
+      // Anchor a second checkpoint on the second-to-last message. The runner
+      // orders the current turn as [..., persistedUserMessage, dynamicContext],
+      // so messages[length-2] is the persisted (byte-stable) user message that
+      // replays verbatim next turn and messages[length-1] is the volatile
+      // per-request tail. The last-message checkpoint can never match on the
+      // next user turn (its content changed), but this one does — it caches the
+      // entire history up to and including the newest stable user message.
       if (messages.length >= 2) {
         setCacheControlOnMessage(messages[messages.length - 2]);
       }

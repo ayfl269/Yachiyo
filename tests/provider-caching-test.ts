@@ -109,6 +109,47 @@ async function runTests() {
     assert(anthropicResp.usage?.cacheCreationInputTokens === 80, "Anthropic cacheCreationInputTokens parsed");
     assert(anthropicResp.usage?.cacheReadInputTokens === 20, "Anthropic cacheReadInputTokens parsed");
 
+    // 1b. Anthropic second cache breakpoint must anchor on the byte-stable
+    // persisted user message, NOT the volatile dynamic-context tail. The runner
+    // orders the current turn as [..., user(prompt), user(dynamicContext)], so
+    // messages[length-2] is the stable user message and messages[length-1] is
+    // the volatile tail. Regression: the breakpoint previously landed on the
+    // volatile message, so no message-level cache entry ever survived a turn.
+    console.log("\n--- Testing Anthropic second breakpoint on stable message ---");
+    requestLog = [];
+    const anthropicBreakpoint = new AnthropicProvider({
+      apiKey: "test-anthropic-key",
+      model: "claude-3-5-sonnet-20240620",
+    });
+    await anthropicBreakpoint.textChat({
+      contexts: [
+        { role: "system", content: "System instruction" },
+        { role: "user", content: "history user" },
+        { role: "assistant", content: "history assistant" },
+        { role: "user", content: "stable persisted prompt" },
+        { role: "user", content: "volatile dynamic context (time/date)" },
+      ] as Message[],
+      enableCaching: true,
+    });
+    const bpBody = JSON.parse(lastRequestInit?.body as string);
+    const bpMessages = bpBody.messages as Array<{
+      content: Array<{ text?: string; cache_control?: { type?: string } }>;
+    }>;
+    const lastMsg = bpMessages[bpMessages.length - 1];
+    const secondLast = bpMessages[bpMessages.length - 2];
+    assert(
+      lastMsg?.content?.[0]?.cache_control?.type === "ephemeral",
+      "Anthropic last message carries cache_control",
+    );
+    assert(
+      secondLast?.content?.[0]?.cache_control?.type === "ephemeral",
+      "Anthropic second-to-last message carries cache_control",
+    );
+    assert(
+      secondLast?.content?.[0]?.text === "stable persisted prompt",
+      `Anthropic breakpoint anchors on the stable user message (got ${JSON.stringify(secondLast?.content?.[0]?.text)})`,
+    );
+
     // 2. Gemini Provider Caching Test (with Configurable TTL)
     console.log("\n--- Testing Gemini Caching with Configurable TTL ---");
     const gemini = new GeminiProvider({
@@ -193,6 +234,41 @@ async function runTests() {
     // The cache-creation request itself must carry the tools.
     const createReq = requestLog.find((r) => r.url.includes("/cachedContents") && r.method === "POST");
     assert(createReq?.body?.tools !== undefined, "Gemini cache creation embeds tools in the cachedContent object");
+
+    // 2b-ii. Once the uncached delta grows past the extension threshold, the
+    // cache must be rebuilt to cover the newer prefix instead of being reused
+    // forever (which would shrink the cached fraction every turn).
+    console.log("\n--- Testing Gemini Cache Extension ---");
+    requestLog = [];
+    cacheCreateCount = 0;
+    cacheDeleteCount = 0;
+    const geminiExtend = new GeminiProvider({
+      apiKey: "test-gemini-key",
+      model: "gemini-1.5-flash",
+      enableCaching: true,
+      cacheThreshold: 10,
+      cacheTtlSeconds: 600,
+    } as any);
+    const extMsg = (label: string, big = false) => ({
+      role: label.startsWith("U") ? "user" : "assistant",
+      content: big ? pad(label) : label,
+    }) as Message;
+    // Seed: prefix of 4 messages (cache created).
+    await geminiExtend.textChat({
+      contexts: [extMsg("SYS", true), extMsg("U1", true), extMsg("A1", true), extMsg("U2")],
+      enableCaching: true,
+      sessionId: "extend-session",
+    });
+    assert(cacheCreateCount === 1, "Gemini extension seed creates a cache");
+    // Grow the delta by >= CACHE_EXTEND_DELTA_MESSAGES (6) messages.
+    const grown: Message[] = [extMsg("SYS", true), extMsg("U1", true), extMsg("A1", true), extMsg("U2")];
+    for (let i = 2; i <= 5; i++) {
+      grown.push(extMsg(`A${i}`));
+      grown.push(extMsg(`U${i + 1}`));
+    }
+    await geminiExtend.textChat({ contexts: grown, enableCaching: true, sessionId: "extend-session" });
+    assert(cacheCreateCount === 2, "Gemini rebuilds (extends) the cache once the delta grows");
+    assert(cacheDeleteCount === 1, "Gemini deletes the superseded cache after a successful extension");
 
     // 2c. A changed system instruction invalidates the cache and rebuilds it,
     // and the stale server-side cache must be deleted (not leaked).

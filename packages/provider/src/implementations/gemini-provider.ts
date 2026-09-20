@@ -113,6 +113,20 @@ export class GeminiProvider implements Provider {
   /** Set when cachedContents returned 404 once: the host has no such endpoint. */
   private explicitCachingUnavailable = false;
 
+  /**
+   * Number of uncached messages (beyond the cached prefix) after which a
+   * reusable cache is rebuilt instead of reused.
+   *
+   * A cache is created from `contents.slice(0, -1)` at creation time and, once
+   * reusable, the previous implementation never refreshed it. The cached prefix
+   * was therefore frozen while the per-request delta grew every turn, so the
+   * cached fraction shrank monotonically until TTL expiry. Periodically
+   * rebuilding the cache to cover the newer prefix keeps the cached fraction
+   * high; the cost is one create + one delete request per extension, amortized
+   * over the turns that would otherwise re-send those tokens uncached.
+   */
+  private static readonly CACHE_EXTEND_DELTA_MESSAGES = 6;
+
   private async cleanExpiredCaches(): Promise<void> {
     const now = Date.now();
     const expired: string[] = [];
@@ -317,7 +331,15 @@ export class GeminiProvider implements Provider {
           existing.expireTime > Date.now() &&
           this.isCacheReusable(existing, contents, systemInstruction, tools);
 
-        if (reusable && existing) {
+        // Extend the cache when the uncached delta has grown past the threshold:
+        // reusing a stale, short prefix forever shrinks the cached fraction each
+        // turn. Rebuilding covers the newer prefix and resets the delta.
+        const deltaMessages = existing ? contents.length - existing.cachedContents.length : 0;
+        const shouldExtend =
+          reusable && existing &&
+          deltaMessages >= GeminiProvider.CACHE_EXTEND_DELTA_MESSAGES;
+
+        if (reusable && existing && !shouldExtend) {
           // The cache only covers the older prefix; send every message after it
           // so nothing between the cached prefix and the latest turn is dropped.
           // `systemInstruction`/`tools` are baked into the cache, so the request
@@ -327,10 +349,14 @@ export class GeminiProvider implements Provider {
           delete body.systemInstruction;
           delete body.tools;
         } else {
-          // A cache that can no longer serve this session is dead weight: drop
-          // the local entry and delete the server-side object now, otherwise it
-          // lingers until its remote TTL elapses.
-          if (existing) {
+          // Rebuild path: either there is no reusable cache, or the reusable
+          // cache is being extended. For an extension we must NOT delete the old
+          // cache up front — if the new create fails we still want to fall back
+          // to the old one. A genuinely stale cache (expired / metadata changed)
+          // cannot serve this request, so drop it now to avoid leaking the
+          // server-side object until its remote TTL elapses.
+          const keepOldOnFailure = reusable && existing !== undefined;
+          if (existing && !keepOldOnFailure) {
             this.activeCaches.delete(sessionKey);
             await this.deleteContextCache(existing.cacheName);
           }
@@ -380,6 +406,19 @@ export class GeminiProvider implements Provider {
           const cacheThreshold =
             Number.isFinite(rawThreshold) && rawThreshold > 0 ? rawThreshold : 4096;
 
+          const fallbackToOldCache = () => {
+            // Extension create failed: keep serving the old cache (still valid
+            // for the older prefix) instead of dropping to an uncached request.
+            if (keepOldOnFailure && existing) {
+              body.cachedContent = existing.cacheName;
+              body.contents = contents.slice(existing.cachedContents.length);
+              delete body.systemInstruction;
+              delete body.tools;
+            } else {
+              applyUncachedBody();
+            }
+          };
+
           if (estimatedTokens >= cacheThreshold) {
             try {
               console.info(`[GeminiProvider] Creating context cache for session ${sessionKey} (estimated tokens: ${estimatedTokens})...`);
@@ -392,19 +431,25 @@ export class GeminiProvider implements Provider {
                   cachedTools: tools,
                   expireTime: Date.now() + ttl * 1000,
                 });
+                // Delete the previous server-side cache only after the new one
+                // is in place, so a failed rebuild never leaves the session
+                // without a usable cache.
+                if (keepOldOnFailure && existing) {
+                  await this.deleteContextCache(existing.cacheName);
+                }
                 body.cachedContent = cacheResult.name;
                 body.contents = [lastMessage];
                 delete body.systemInstruction;
                 delete body.tools;
               } else {
-                applyUncachedBody();
+                fallbackToOldCache();
               }
             } catch (cacheErr) {
               console.warn("[GeminiProvider] Context caching failed, falling back to standard prompt:", cacheErr);
-              applyUncachedBody();
+              fallbackToOldCache();
             }
           } else {
-            applyUncachedBody();
+            fallbackToOldCache();
           }
         }
       } else {

@@ -397,20 +397,21 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
       (this.req.audioUrls && this.req.audioUrls.length > 0) ||
       (this.req.extraUserContentParts && this.req.extraUserContentParts.length > 0)
     ) {
-      // Volatile per-request context (time, retrieved knowledge, memory) is
-      // emitted as its own user message INSTEAD of being merged into the
-      // current user message. The current message is persisted raw by the
-      // pipeline (saveUserMessage) and replayed verbatim on the next turn;
-      // merging volatile content into it would make the replayed history
-      // diverge from what was sent, breaking the provider-side prompt cache
-      // prefix at that message on every turn. As a separate trailing message
-      // it is never persisted, so the persisted history stays byte-stable.
-      if (this.req.dynamicContext) {
-        messages.push(validateMessage({
-          role: "user",
-          content: [{ type: "text", text: this.req.dynamicContext }],
-        }));
-      }
+      // Order matters for prompt caching: the persisted user message comes
+      // FIRST, and the volatile per-request context (time, retrieved
+      // knowledge, memory) is emitted as a SEPARATE message AFTER it.
+      //
+      // The current user message is persisted raw by the pipeline
+      // (saveUserMessage) and replayed verbatim on the next turn, so it is
+      // part of the byte-stable prefix. The dynamic context is never persisted
+      // and changes every turn. Emitting it BEFORE the user message (the
+      // previous behaviour, despite the "trailing" comment) placed volatile
+      // content at the stable-history boundary: the longest common prefix
+      // between consecutive turns ended at the previous turn's assistant
+      // message, so the newest user message was never cacheable and
+      // Anthropic's second cache breakpoint anchored on volatile content.
+      // Trailing placement makes the persisted user message the last stable
+      // block, so it is cached and reused on the next turn.
       if (
         this.req.prompt ||
         (this.req.imageUrls && this.req.imageUrls.length > 0) ||
@@ -419,6 +420,12 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
       ) {
         const userMsg = await this.assembleRequestContextForProvider(this.req);
         messages.push(validateMessage(userMsg));
+      }
+      if (this.req.dynamicContext) {
+        messages.push(validateMessage({
+          role: "user",
+          content: [{ type: "text", text: this.req.dynamicContext }],
+        }));
       }
     }
 
@@ -527,6 +534,23 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
 
     if (request.extraUserContentParts) {
       contentBlocks.push(...(request.extraUserContentParts as unknown as Record<string, unknown>[]));
+    }
+
+    // Emit a plain string for the text-only case so the live request matches
+    // the persisted form. `saveUserMessage` stores the raw prompt as a string
+    // and replays it verbatim next turn; sending `[{type:"text",text}]` here
+    // would make the replayed message a different JSON shape, breaking the
+    // provider-side prefix cache at the newest user message for converters
+    // that distinguish string vs block-array content (OpenAI Chat Completions,
+    // OpenAI Responses). Messages with media/extra parts keep the array shape
+    // (their persisted form is an unavoidable placeholder anyway).
+    if (
+      contentBlocks.length === 1 &&
+      contentBlocks[0].type === "text" &&
+      typeof contentBlocks[0].text === "string" &&
+      request.prompt
+    ) {
+      return { role: "user", content: request.prompt };
     }
 
     return { role: "user", content: contentBlocks };

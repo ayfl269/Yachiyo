@@ -413,6 +413,12 @@ export class SkillManager {
     if (options?.activeOnly) {
       results = results.filter(s => s.active);
     }
+    // Sort by name so the returned order is deterministic. The prompt built
+    // from this list is part of the static system prefix; Map insertion order
+    // depends on scan order (readdir is not guaranteed) and changes when a
+    // skill is deleted and re-added, which would silently invalidate the
+    // provider-side prompt cache. A stable sort keeps the prefix byte-identical.
+    results.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     return results;
   }
 
