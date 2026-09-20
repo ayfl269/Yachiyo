@@ -48,6 +48,8 @@ interface InteractiveSession {
   exitCode: number | null;
   signalCode: string | null;
   command: string;
+  /** Set when the child emits an async 'spawn' error (e.g. invalid cwd). */
+  spawnError: string | null;
 }
 
 const sessions = new Map<string, InteractiveSession>();
@@ -193,6 +195,7 @@ export function interactiveShellStart(
     exitCode: null,
     signalCode: null,
     command: command || exe,
+    spawnError: null,
   };
 
   child.stdout?.on("data", (data: Buffer) => {
@@ -217,6 +220,7 @@ export function interactiveShellStart(
   });
 
   child.on("error", (err) => {
+    session.spawnError = err.message;
     session.stderrAll = clampBuffer(session.stderrAll + `\n[spawn error: ${err.message}]\n`, MAX_BUFFER_SIZE);
     session.stderrSinceRead = clampBuffer(session.stderrSinceRead + `\n[spawn error: ${err.message}]\n`, MAX_BUFFER_SIZE);
     session.closed = true;
@@ -238,6 +242,39 @@ export function interactiveShellStart(
     child.stdin?.write(command + "\n");
   }
   return id;
+}
+
+/**
+ * Wait briefly for a freshly spawned session to either produce an async
+ * 'spawn' error or prove it started. `child_process.spawn` reports failures
+ * such as an invalid `cwd` or a missing shell asynchronously via the 'error'
+ * event, not a synchronous throw — so the start tool would otherwise report
+ * success for a session that never launched.
+ *
+ * Returns the spawn error message, or null if the child appears to have
+ * started (or no error arrived within the short grace period).
+ */
+export async function waitForSessionSpawn(
+  id: string,
+  graceMs = 300
+): Promise<string | null> {
+  const session = sessions.get(id);
+  if (!session) return "Session disappeared immediately after start.";
+  if (session.spawnError) return session.spawnError;
+
+  const deadline = Date.now() + graceMs;
+  while (Date.now() < deadline) {
+    if (session.spawnError) return session.spawnError;
+    // A successfully spawned child has a pid and hasn't errored.
+    if (session.child.pid != null && session.exitCode === null && session.signalCode === null) {
+      return null;
+    }
+    if (session.exitCode !== null || session.signalCode !== null) {
+      return `Process exited immediately (exitCode=${session.exitCode}, signal=${session.signalCode}).`;
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  return session.spawnError;
 }
 
 /**
@@ -335,26 +372,45 @@ export async function interactiveShellRead(
  *
  * Returns true if a session was found and signalled, false otherwise.
  */
-export function interactiveShellClose(id: string): boolean {
+/** Grace period (ms) after stdin EOF before escalating to SIGTERM. */
+const EOF_GRACE_MS = 200;
+
+export function interactiveShellClose(id: string, options: { force?: boolean } = {}): boolean {
   const session = sessions.get(id);
   if (!session) return false;
   const child = session.child;
   try {
     if (!session.closed && child.exitCode === null && child.signalCode === null) {
-      // Close stdin first so interactive programs that read until EOF can exit
-      // gracefully before we escalate to signalling the tree.
+      // Close stdin so programs that read until EOF can exit on their own.
+      // `end()` (not `destroy()`) flushes any buffered writes; destroying
+      // immediately would discard them and defeat the graceful path. We give
+      // a short grace for a natural exit, then signal the whole tree.
       child.stdin?.end();
-      child.stdin?.destroy();
-      killProcessTree(child, "SIGTERM");
-      // Escalate to a force-kill if the tree survived the graceful signal, so
-      // orphaned grandchildren are reaped rather than accumulating.
-      const escalation = setTimeout(() => {
-        if (child.exitCode === null && child.signalCode === null) {
-          killProcessTree(child, "SIGKILL");
+
+      const signalTree = (): void => {
+        if (child.exitCode !== null || child.signalCode !== null) return;
+        killProcessTree(child, "SIGTERM");
+        // Escalate to a force-kill if the tree survived the graceful signal,
+        // so orphaned grandchildren are reaped rather than accumulating.
+        const escalation = setTimeout(() => {
+          if (child.exitCode === null && child.signalCode === null) {
+            killProcessTree(child, "SIGKILL");
+          }
+        }, KILL_ESCALATION_MS);
+        if (typeof escalation === "object" && escalation && "unref" in escalation) {
+          escalation.unref();
         }
-      }, KILL_ESCALATION_MS);
-      if (typeof escalation === "object" && escalation && "unref" in escalation) {
-        escalation.unref();
+      };
+
+      if (options.force) {
+        // Shutdown path: no time to wait for a natural EOF exit (the process
+        // is about to exit and an unref'd timer would never fire). Signal now.
+        signalTree();
+      } else {
+        const termTimer = setTimeout(signalTree, EOF_GRACE_MS);
+        if (typeof termTimer === "object" && termTimer && "unref" in termTimer) {
+          termTimer.unref();
+        }
       }
     }
   } catch {
@@ -373,7 +429,7 @@ export function interactiveShellClose(id: string): boolean {
 export function closeAllInteractiveSessions(): number {
   let count = 0;
   for (const id of sessions.keys()) {
-    if (interactiveShellClose(id)) count++;
+    if (interactiveShellClose(id, { force: true })) count++;
   }
   return count;
 }
@@ -615,6 +671,18 @@ export function createInteractiveShellStartTool(
           env,
           workspaceRoot,
         });
+
+        // spawn() reports failures (bad cwd, missing shell) asynchronously.
+        // Wait briefly so we can report a real error instead of a bogus
+        // "session started" id that never actually launched.
+        const spawnError = await waitForSessionSpawn(id);
+        if (spawnError) {
+          interactiveShellClose(id);
+          return {
+            content: [{ type: "text", text: `error: Failed to start interactive session: ${spawnError}` }],
+            isError: true,
+          };
+        }
 
         // If the tool call is aborted, clean up the session.
         if (abortSignal) {

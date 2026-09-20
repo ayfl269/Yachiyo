@@ -13,7 +13,7 @@
 
 import { createFunctionTool, type FunctionTool } from "./tool.js";
 import type { CallToolResult } from "./types.js";
-import { proxyManager } from "./proxy-manager.js";
+import { proxyManager, redactProxyUrl } from "./proxy-manager.js";
 
 // ── Context type ──
 
@@ -113,7 +113,7 @@ function handleGet(): CallToolResult {
   const lines: string[] = [
     "Current proxy status:",
     `  Enabled: ${status.enabled ? "yes" : "no"}`,
-    `  URL: ${status.url ?? "(none — direct connection)"}`,
+    `  URL: ${redactProxyUrl(status.url) ?? "(none — direct connection)"}`,
     `  Source: ${status.source}`,
     "",
     "Notes:",
@@ -150,7 +150,7 @@ async function handleSet(url: string | undefined): Promise<CallToolResult> {
 
   const lines: string[] = [
     "Proxy enabled successfully.",
-    `  URL: ${status.url}`,
+    `  URL: ${redactProxyUrl(status.url)}`,
     "",
     "The proxy is now active for:",
     "  - All fetch() requests (web_fetch, http_request, web_search)",

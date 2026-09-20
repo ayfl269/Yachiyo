@@ -43,10 +43,34 @@ export interface ProxyTestResult {
 
 type ProxyChangeListener = (url: string | null) => void;
 
+/**
+ * Redact userinfo (username/password) from a proxy URL for safe logging and
+ * for display back to the model. `http://user:pass@host:port` →
+ * `http://***@host:port`. Returns the input unchanged if it can't be parsed.
+ */
+export function redactProxyUrl(url: string | null): string | null {
+  if (!url) return url;
+  // Preserve the original string when there are no credentials, so callers
+  // comparing against the configured value aren't surprised by URL
+  // normalization (e.g. an appended trailing slash).
+  if (!/\/\/[^/@]*@/.test(url)) return url;
+  try {
+    const parsed = new URL(url);
+    parsed.username = "***";
+    parsed.password = "";
+    return parsed.toString();
+  } catch {
+    // Fall back to a regex strip of any `user:pass@` segment.
+    return url.replace(/\/\/[^/@]*@/, "//***@");
+  }
+}
+
 class ProxyManager {
   private _url: string | null = null;
   private _source: "env" | "runtime" | "default" = "default";
   private _listeners: ProxyChangeListener[] = [];
+  /** The ProxyAgent/Agent currently installed as the global dispatcher. */
+  private _dispatcher: { close?: () => Promise<void> } | null = null;
 
   /** Current proxy URL (null = no proxy / direct connection). */
   get url(): string | null {
@@ -96,7 +120,7 @@ class ProxyManager {
     }
 
     if (normalized) {
-      console.log(`[ProxyManager] Proxy set to ${normalized} (source: ${source})`);
+      console.log(`[ProxyManager] Proxy set to ${redactProxyUrl(normalized)} (source: ${source})`);
     } else {
       console.log(`[ProxyManager] Proxy disabled (source: ${source})`);
     }
@@ -130,6 +154,10 @@ class ProxyManager {
         signal: controller.signal,
         redirect: "follow",
       });
+
+      // Consume the body so the connection is returned to the pool rather
+      // than left open until GC.
+      try { await response.body?.cancel(); } catch { /* ignore */ }
 
       const elapsedMs = Date.now() - start;
       return {
@@ -186,26 +214,40 @@ class ProxyManager {
   /** Apply the proxy (or direct connection) to undici's global dispatcher. */
   private async applyToGlobalDispatcher(url: string | null): Promise<void> {
     try {
+      const { setGlobalDispatcher, Agent, ProxyAgent } = await import("undici");
+      let next: { close?: () => Promise<void> };
       if (url) {
         // undici's ProxyAgent only supports http:// and https:// proxy URLs.
         // SOCKS proxies (socks5://, socks4://) are not supported by undici —
         // they will still work for Playwright browser launches, but fetch()
-        // calls will not be routed through a SOCKS proxy. Log a warning so
-        // the user is aware of this limitation.
+        // calls cannot be routed through a SOCKS proxy. Reset to a direct
+        // Agent (rather than leaving the previous proxy installed) so the
+        // reported state matches the actual fetch behaviour; the URL remains
+        // recorded for Playwright.
         if (/^socks/i.test(url)) {
           console.warn(
             `[ProxyManager] SOCKS proxy '${url}' is not supported by undici (fetch). ` +
             `It will be used for Playwright browser launches only. ` +
+            `fetch() falls back to a direct connection. ` +
             `Use an http:// or https:// proxy if you need fetch() to go through the proxy.`
           );
-          return;
+          next = new Agent();
+        } else {
+          next = new ProxyAgent(url);
         }
-        const { setGlobalDispatcher, ProxyAgent } = await import("undici");
-        setGlobalDispatcher(new ProxyAgent(url));
       } else {
         // Reset to the default Agent (direct connection, no proxy).
-        const { setGlobalDispatcher, Agent } = await import("undici");
-        setGlobalDispatcher(new Agent());
+        next = new Agent();
+      }
+      setGlobalDispatcher(next as unknown as import("undici").Dispatcher);
+
+      // Close the previously installed dispatcher so its keep-alive
+      // connection pool is released instead of lingering until GC. Without
+      // this, repeatedly changing the proxy leaked one pool per change.
+      const prev = this._dispatcher;
+      this._dispatcher = next;
+      if (prev && prev !== next && typeof prev.close === "function") {
+        try { await prev.close(); } catch { /* ignore */ }
       }
     } catch (e) {
       // undici is a Node.js built-in (available since Node 18+). If the

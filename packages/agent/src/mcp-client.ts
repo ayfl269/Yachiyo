@@ -478,6 +478,7 @@ export class MCPClient {
       await this.reconnect();
     }
 
+    let firstError: unknown = null;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         if (!this.session) throw new Error("MCP session not available");
@@ -491,13 +492,22 @@ export class MCPClient {
         // If the caller aborted, don't retry — propagate immediately.
         if (abortSignal?.aborted) throw e;
         if (isClosedResourceError(e)) {
+          // Remember the original failure (it carries the server's actual
+          // error) so the post-retry error can preserve the root cause
+          // instead of replacing it with a generic message.
+          if (attempt === 0) firstError = e;
           await this.reconnect();
           continue;
         }
         throw e;
       }
     }
-    throw new Error("MCP tool call failed after reconnection");
+    // The retry after reconnection also failed. Surface the original error as
+    // the cause so debugging isn't reduced to "failed after reconnection".
+    throw new Error(
+      `MCP tool call failed after reconnection: ${firstError instanceof Error ? firstError.message : String(firstError)}`,
+      { cause: firstError instanceof Error ? firstError : undefined },
+    );
   }
 
   private async reconnect(): Promise<void> {
@@ -644,6 +654,11 @@ export async function quickTestMcpConnection(
         body: JSON.stringify(testPayload),
         signal: controller.signal,
       });
+      // Consume/cancel the body in every case. A successful streamable_http
+      // initialize typically returns a `text/event-stream` that stays open;
+      // returning without reading or cancelling it leaves the connection open
+      // until the server drops it — one leaked connection per connect/reconnect.
+      try { await response.body?.cancel(); } catch { /* ignore */ }
       if (response.ok) return [true, ""];
       return [false, `HTTP ${response.status}: ${response.statusText}`];
     } else {
@@ -655,6 +670,8 @@ export async function quickTestMcpConnection(
         },
         signal: controller.signal,
       });
+      // SSE GET holds the stream open on success — cancel it, don't leak.
+      try { await response.body?.cancel(); } catch { /* ignore */ }
       if (response.ok) return [true, ""];
       return [false, `HTTP ${response.status}: ${response.statusText}`];
     }

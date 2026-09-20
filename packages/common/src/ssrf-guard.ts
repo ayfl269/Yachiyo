@@ -64,11 +64,34 @@ export async function safeFetch(
     const status = response.status;
     if (status >= 300 && status < 400 && response.headers.has("location")) {
       if (redirects >= maxRedirects) {
+        // Cancel the un-consumed redirect body before throwing so the
+        // underlying keep-alive socket is released rather than leaked.
+        try { await response.body?.cancel(); } catch { /* ignore */ }
         throw new Error(`Too many redirects (max: ${maxRedirects})`);
       }
       redirects++;
       const location = response.headers.get("location")!;
-      currentUrl = new URL(location, currentUrl).toString();
+      const nextUrl = new URL(location, currentUrl);
+
+      // Drain/cancel the 3xx response body. Without this the undici keep-alive
+      // socket stays checked out (never returned to the pool) on every
+      // redirect — a slow connection leak.
+      try { await response.body?.cancel(); } catch { /* ignore */ }
+
+      // Strip credential-bearing headers when the redirect crosses origin, so
+      // an Authorization/Cookie header set by the caller isn't forwarded to a
+      // third-party host. Same-origin redirects keep them.
+      if (nextUrl.origin !== new URL(currentUrl).origin) {
+        const stripped = { ...(currentInit.headers as Record<string, string> | undefined) };
+        for (const key of Object.keys(stripped)) {
+          if (/^(authorization|cookie|proxy-authorization)$/i.test(key)) {
+            delete stripped[key];
+          }
+        }
+        currentInit = { ...currentInit, headers: stripped };
+      }
+
+      currentUrl = nextUrl.toString();
 
       // For typical redirects, POST might become GET, body should be removed
       if (status === 303 || ((status === 301 || status === 302) && currentInit.method === "POST")) {

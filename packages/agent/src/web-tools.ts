@@ -141,6 +141,17 @@ function htmlToMarkdown(html: string): string {
 }
 
 /**
+ * Clamp a model-supplied timeout (seconds) to a sane range. Node's setTimeout
+ * silently coerces delays > 2^31-1 ms to 1 ms, so an unbounded value like
+ * `1e9` seconds would make every request time out instantly. Mirrors
+ * `clampTimeoutSeconds` in computer-tools.
+ */
+function clampWebTimeoutSeconds(value: number | undefined, fallback: number, max = 3600): number {
+  if (value == null || !Number.isFinite(value)) return fallback;
+  return Math.min(Math.max(Math.floor(value), 1), max);
+}
+
+/**
  * Strip all HTML tags from a string, looping until stable to prevent
  * bypass via nested constructs (e.g. "<scr<script>ipt>").
  */
@@ -158,16 +169,19 @@ function stripHtmlTags(html: string): string {
  * Decode common HTML entities in a single pass to avoid double-unescaping.
  * Handles: &amp; &lt; &gt; &quot; &#39; &#0?39; &nbsp;
  */
-function decodeHtmlEntitiesOnce(str: string): string {
+export function decodeHtmlEntitiesOnce(str: string): string {
   if (!str) return str;
+  // The capture group includes the leading '#' for numeric entities, so the
+  // switch must match "#39"/"#039" (the previous "39"/"039" cases were dead:
+  // &#39; matched with entity === "#39" and fell through to default).
   return str.replace(/&(amp|lt|gt|quot|#0?39|nbsp);/g, (_match, entity: string) => {
     switch (entity) {
       case "amp": return "&";
       case "lt": return "<";
       case "gt": return ">";
       case "quot": return '"';
-      case "39":
-      case "039": return "'";
+      case "#39":
+      case "#039": return "'";
       case "nbsp": return " ";
       default: return _match;
     }
@@ -200,7 +214,7 @@ export function createWebFetchTool(): FunctionTool<WebToolContext> {
       const method = (args[1] as string) ?? "GET";
       const headers = (args[2] as Record<string, string>) ?? {};
       const body = args[3] != null ? String(args[3]) : undefined;
-      const timeout = args[4] != null ? Number(args[4]) : 30;
+      const timeout = clampWebTimeoutSeconds(args[4] != null ? Number(args[4]) : undefined, 30);
       const maxLength = args[5] != null ? Number(args[5]) : 50000;
       const format = (args[6] as string) ?? "markdown";
       const screenshot = args[7] === true;
@@ -557,10 +571,15 @@ class PlaywrightSearchProviderBase implements WebSearchProvider {
 class PlaywrightGoogleSearchProvider extends PlaywrightSearchProviderBase {
   override async search(query: string, maxResults: number): Promise<{ title: string; url: string; snippet: string }[]> {
     const context = await this.createContext();
-    const page = await context.newPage();
-    await this.injectStealthScripts(page);
-
+    // Hold page in a mutable binding and null it in the finally so a failure
+    // in newPage()/injectStealthScripts() (before the try) still closes the
+    // context instead of leaking it, and a partially-created page doesn't
+    // trigger a TypeError on close.
+    let page: Page | null = null;
     try {
+      page = await context.newPage();
+      await this.injectStealthScripts(page);
+
       await page.goto("https://www.google.com/", {
         waitUntil: "networkidle",
         timeout: 30000,
@@ -628,8 +647,8 @@ class PlaywrightGoogleSearchProvider extends PlaywrightSearchProviderBase {
 
       return results;
     } finally {
-      await page.close();
-      await context.close();
+      try { await page?.close(); } catch { /* ignore */ }
+      try { await context.close(); } catch { /* ignore */ }
     }
   }
 }
@@ -637,9 +656,10 @@ class PlaywrightGoogleSearchProvider extends PlaywrightSearchProviderBase {
 class PlaywrightBingSearchProvider extends PlaywrightSearchProviderBase {
   override async search(query: string, maxResults: number): Promise<{ title: string; url: string; snippet: string }[]> {
     const context = await this.createContext();
-    const page = await context.newPage();
+    let page: Page | null = null;
 
     try {
+      page = await context.newPage();
       await page.goto(`https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${maxResults}&setlang=en-US`, {
         waitUntil: "networkidle",
         timeout: 30000,
@@ -690,8 +710,8 @@ class PlaywrightBingSearchProvider extends PlaywrightSearchProviderBase {
 
       return results;
     } finally {
-      await page.close();
-      await context.close();
+      try { await page?.close(); } catch { /* ignore */ }
+      try { await context.close(); } catch { /* ignore */ }
     }
   }
 }
@@ -798,6 +818,9 @@ export function createWebSearchTool(customProvider?: WebSearchProvider, engine: 
                 });
                 const contentType = resp.headers.get("content-type") ?? "";
                 if (!/text\/html/i.test(contentType)) {
+                  // Cancel the un-consumed body so the socket is released
+                  // instead of being held until the server closes it.
+                  try { await resp.body?.cancel(); } catch { /* ignore */ }
                   return { ...r, content: "[Non-HTML content, skipped]" };
                 }
                 const html = await resp.text();
@@ -860,7 +883,7 @@ export function createHttpRequestTool(): FunctionTool<WebToolContext> {
       const headers = (args[2] as Record<string, string>) ?? {};
       const body = args[3] != null ? String(args[3]) : undefined;
       const contentType = (args[4] as string) ?? "application/json";
-      const timeout = args[5] != null ? Number(args[5]) : 30;
+      const timeout = clampWebTimeoutSeconds(args[5] != null ? Number(args[5]) : undefined, 30);
       const followRedirects = args[6] !== false;
 
       // Enforce sandbox domain restrictions.
@@ -912,6 +935,8 @@ export function createHttpRequestTool(): FunctionTool<WebToolContext> {
         if (isBinary) {
           const contentLength = response.headers.get("content-length");
           bodyText = `[Binary content, Content-Type: ${respContentType}, Size: ${contentLength ?? "unknown"} bytes]`;
+          // Cancel the un-consumed binary body so the socket is released.
+          try { await response.body?.cancel(); } catch { /* ignore */ }
         } else {
           bodyText = await response.text();
           // Truncate very long responses
@@ -972,6 +997,8 @@ interface PageEntry {
    * (tests, tooling) which only ever sees its own pages.
    */
   owner: string;
+  /** Last-activity epoch ms; refreshed on every page operation. */
+  lastActivityAt: number;
 }
 
 const pageRegistry = new Map<string, PageEntry>();
@@ -1015,7 +1042,60 @@ function getPage(pageId: string, owner: string): PageEntry | null {
   const entry = pageRegistry.get(pageId);
   if (!entry) return null;
   if (entry.owner !== owner) return null;
+  touchPage(entry);
   return entry;
+}
+
+/**
+ * Extract the tool-level AbortSignal from the run context, if available.
+ * Mirrors `computer-tools.getAbortSignal`; lets long-running Playwright
+ * operations be cancelled when the tool-loop timeout fires.
+ */
+function getWebAbortSignal(_ctx: unknown): AbortSignal | undefined {
+  const wrapper = _ctx as { _toolAbortController?: AbortController } | undefined;
+  return wrapper?._toolAbortController?.signal;
+}
+
+/**
+ * Close a page and its context and remove it from the registry. Used when a
+ * page becomes permanently unusable (e.g. an un-cancellable `page.evaluate`
+ * that never returns poisoned the page's JS thread).
+ */
+async function destroyPage(pageId: string, entry: PageEntry): Promise<void> {
+  pageRegistry.delete(pageId);
+  try { await entry.page.close(); } catch { /* ignore */ }
+  try { await entry.context.close(); } catch { /* ignore */ }
+}
+
+/**
+ * Idle TTL for browser pages. A session that navigates and then ends leaves
+ * its page (and its Chromium BrowserContext) registered forever, occupying one
+ * of the {@link MAX_BROWSER_PAGES} global slots until another session hits the
+ * cap. Reap pages idle for longer than this. The timestamp is refreshed on
+ * every page operation via {@link touchPage}.
+ */
+const PAGE_IDLE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+/** Update a page's last-activity timestamp. */
+function touchPage(entry: PageEntry): void {
+  entry.lastActivityAt = Date.now();
+}
+
+/**
+ * Close pages that have been idle past {@link PAGE_IDLE_TTL_MS}, plus any
+ * already closed. Best-effort; reclaims slots before the cap is enforced.
+ */
+async function sweepIdlePages(): Promise<void> {
+  const now = Date.now();
+  const toRemove: Array<[string, PageEntry]> = [];
+  for (const [id, entry] of pageRegistry) {
+    if (entry.page.isClosed() || now - entry.lastActivityAt > PAGE_IDLE_TTL_MS) {
+      toRemove.push([id, entry]);
+    }
+  }
+  for (const [id, entry] of toRemove) {
+    await destroyPage(id, entry);
+  }
 }
 
 // ── Browser Navigate Tool ──
@@ -1037,7 +1117,7 @@ export function createBrowserNavigateTool(): FunctionTool<WebToolContext> {
     handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
       const url = String(args[0] ?? "");
       const waitUntil = (args[1] as "load" | "domcontentloaded" | "networkidle") ?? "load";
-      const timeout = args[2] != null ? Number(args[2]) : 30;
+      const timeout = clampWebTimeoutSeconds(args[2] != null ? Number(args[2]) : undefined, 30);
       const policy = getSandboxPolicy(_ctx);
 
       if (policy && !isDomainAllowed(url, policy)) {
@@ -1045,14 +1125,9 @@ export function createBrowserNavigateTool(): FunctionTool<WebToolContext> {
       }
 
       // Enforce a maximum number of concurrent pages to prevent resource
-      // exhaustion. Clean up closed pages first before refusing.
+      // exhaustion. Reap closed AND idle pages first before refusing.
       if (pageRegistry.size >= MAX_BROWSER_PAGES) {
-        for (const [id, entry] of pageRegistry) {
-          if (entry.page.isClosed()) {
-            try { await entry.context.close(); } catch { /* ignore */ }
-            pageRegistry.delete(id);
-          }
-        }
+        await sweepIdlePages();
         if (pageRegistry.size >= MAX_BROWSER_PAGES) {
           return {
             content: [{ type: "text", text: `error: Maximum number of open pages (${MAX_BROWSER_PAGES}) reached. Use browser_close_page to close unused pages, or browser_list_pages to inspect.` }],
@@ -1074,7 +1149,14 @@ export function createBrowserNavigateTool(): FunctionTool<WebToolContext> {
         const page = await ctx.newPage();
         await page.goto(url, { waitUntil, timeout: timeout * 1000 });
 
-        const pageId = generatePageId();
+        // Collision-proof id: re-draw if the 8-char prefix is already live.
+        // Without this, a collision silently overwrites the previous registry
+        // entry (leaking its context) and the old page's close handler would
+        // delete the NEW entry when the old page closes.
+        let pageId = generatePageId();
+        while (pageRegistry.has(pageId)) {
+          pageId = generatePageId();
+        }
         const title = await page.title().catch(() => "");
         pageRegistry.set(pageId, {
           page,
@@ -1083,6 +1165,7 @@ export function createBrowserNavigateTool(): FunctionTool<WebToolContext> {
           url,
           title,
           owner: getPageOwner(_ctx),
+          lastActivityAt: Date.now(),
         });
 
         // Auto-remove from registry when the page is closed externally.
@@ -1396,11 +1479,52 @@ export function createBrowserExecuteScriptTool(): FunctionTool<WebToolContext> {
         pageRegistry.delete(pageId);
         return { content: [{ type: "text", text: `error: Page ${pageId} has been closed.` }], isError: true };
       }
+      // `page.evaluate` is the one Playwright operation with NO default
+      // timeout, and it cannot be aborted: a script like `while(true){}`
+      // blocks the page's JS main thread forever. Race it against a timeout
+      // and the tool-call abort signal; on timeout/abort the page is
+      // permanently poisoned, so close it (rather than leave it in the
+      // registry to make every later browser_* call hang).
+      const abortSignal = getWebAbortSignal(_ctx);
+      const EVALUATE_TIMEOUT_MS = 30_000;
       try {
         // Wrap the script so that bare 'return' statements work as expected.
         // Playwright's page.evaluate treats the function body as the script.
         const wrapped = `(async () => { ${script} })()`;
-        const result = await entry.page.evaluate(wrapped);
+        const evaluatePromise = entry.page.evaluate(wrapped);
+        // Prevent an eventual rejection from becoming an unhandled rejection
+        // once the race below has already settled.
+        evaluatePromise.catch(() => { /* handled via race */ });
+
+        let timerId: ReturnType<typeof setTimeout> | undefined;
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timerId = setTimeout(
+            () => reject(new Error(`Script execution timed out after ${EVALUATE_TIMEOUT_MS / 1000}s`)),
+            EVALUATE_TIMEOUT_MS,
+          );
+        });
+        let abortListener: (() => void) | undefined;
+        const abortPromise = new Promise<never>((_, reject) => {
+          if (abortSignal) {
+            if (abortSignal.aborted) { reject(new Error("Script execution aborted")); return; }
+            abortListener = () => reject(new Error("Script execution aborted"));
+            abortSignal.addEventListener("abort", abortListener, { once: true });
+          }
+        });
+
+        let result: unknown;
+        try {
+          result = await Promise.race([evaluatePromise, timeoutPromise, abortPromise]);
+        } catch (e) {
+          // evaluate is un-cancellable; the page is now stuck. Tear it down.
+          await destroyPage(pageId, entry);
+          const msg = e instanceof Error ? e.message : String(e);
+          return { content: [{ type: "text", text: `error: Script execution failed and the page was closed: ${msg}` }], isError: true };
+        } finally {
+          if (timerId) clearTimeout(timerId);
+          if (abortSignal && abortListener) abortSignal.removeEventListener("abort", abortListener);
+        }
+
         const text = result === undefined ? "(undefined)" : typeof result === "string" ? result : JSON.stringify(result, null, 2);
         return { content: [{ type: "text", text }] };
       } catch (e) {
