@@ -20,6 +20,7 @@ import { spawn, type ChildProcess } from "child_process";
 import { randomUUID } from "crypto";
 import { createFunctionTool, type FunctionTool } from "./tool.js";
 import type { CallToolResult, ContextWrapper } from "./types.js";
+import { resolveToolContextOwner } from "./types.js";
 import type { ComputerToolContext } from "./computer-tools.js";
 import {
   isPotentialReDoS,
@@ -50,6 +51,29 @@ interface InteractiveSession {
   command: string;
   /** Set when the child emits an async 'spawn' error (e.g. invalid cwd). */
   spawnError: string | null;
+  /**
+   * Session owner (the UMO of the chat session that started it). Used to scope
+   * the registry: a session can only list/read/send/close the shells it started
+   * itself. Empty string means "unowned" (standalone/test callers) and is
+   * matched only by owner-less calls.
+   */
+  owner: string;
+}
+
+/**
+ * Resolve the session owner (UMO) from the raw tool context. Returns
+ * `undefined` when no owner can be determined (standalone/test callers), which
+ * disables filtering; an unrecognized event shape logs a one-time warning.
+ */
+function getSessionOwner(_ctx: unknown): string | undefined {
+  return resolveToolContextOwner(_ctx, { warnLabel: "InteractiveShell" });
+}
+
+/** True when `owner` is allowed to operate on `session`. */
+function ownerMatches(session: InteractiveSession, owner: string | undefined): boolean {
+  // No owner on the call (standalone/tests): no filtering.
+  if (owner === undefined) return true;
+  return session.owner === owner;
 }
 
 const sessions = new Map<string, InteractiveSession>();
@@ -93,7 +117,7 @@ export function cleanupDeadSessions(): number {
 /**
  * List all currently registered interactive sessions.
  */
-export function listInteractiveSessions(): {
+export function listInteractiveSessions(owner?: string): {
   id: string;
   pid: number | undefined;
   command: string;
@@ -112,6 +136,7 @@ export function listInteractiveSessions(): {
     lastActivityAt: number;
   }[] = [];
   for (const [id, s] of sessions) {
+    if (!ownerMatches(s, owner)) continue;
     result.push({
       id,
       pid: s.child.pid,
@@ -137,6 +162,8 @@ export function interactiveShellStart(
     cwd?: string;
     env?: Record<string, string>;
     workspaceRoot?: string;
+    /** Owner (UMO) of the calling session; empty/undefined means unowned. */
+    owner?: string;
   } = {}
 ): string {
   if (sessions.size >= MAX_SESSIONS) {
@@ -196,6 +223,7 @@ export function interactiveShellStart(
     signalCode: null,
     command: command || exe,
     spawnError: null,
+    owner: options.owner ?? "",
   };
 
   child.stdout?.on("data", (data: Buffer) => {
@@ -290,10 +318,11 @@ export async function waitForSessionSpawn(
 export function interactiveShellSend(
   id: string,
   input: string,
-  options: { addNewline?: boolean } = {}
+  options: { addNewline?: boolean; owner?: string } = {}
 ): boolean {
   const session = sessions.get(id);
   if (!session) return false;
+  if (!ownerMatches(session, options.owner)) return false;
   if (session.closed || session.exitCode !== null) return false;
 
   const stdin = session.child.stdin;
@@ -319,10 +348,11 @@ export function interactiveShellSend(
  */
 export async function interactiveShellRead(
   id: string,
-  options: { waitMs?: number; clear?: boolean } = {}
+  options: { waitMs?: number; clear?: boolean; owner?: string } = {}
 ): Promise<{ stdout: string; stderr: string; closed: boolean; exitCode: number | null } | null> {
   const session = sessions.get(id);
   if (!session) return null;
+  if (!ownerMatches(session, options.owner)) return null;
 
   const waitMs = options.waitMs ?? 500;
   const clear = options.clear !== false; // default true
@@ -375,9 +405,10 @@ export async function interactiveShellRead(
 /** Grace period (ms) after stdin EOF before escalating to SIGTERM. */
 const EOF_GRACE_MS = 200;
 
-export function interactiveShellClose(id: string, options: { force?: boolean } = {}): boolean {
+export function interactiveShellClose(id: string, options: { force?: boolean; owner?: string } = {}): boolean {
   const session = sessions.get(id);
   if (!session) return false;
+  if (!ownerMatches(session, options.owner)) return false;
   const child = session.child;
   try {
     if (!session.closed && child.exitCode === null && child.signalCode === null) {
@@ -452,7 +483,7 @@ export function closeAllInteractiveSessions(): number {
  */
 export async function interactiveShellWait(
   id: string,
-  options: { timeoutMs?: number; abortSignal?: AbortSignal } = {}
+  options: { timeoutMs?: number; abortSignal?: AbortSignal; owner?: string } = {}
 ): Promise<{
   exited: boolean;
   exitCode: number | null;
@@ -463,6 +494,7 @@ export async function interactiveShellWait(
 } | null> {
   const session = sessions.get(id);
   if (!session) return null;
+  if (!ownerMatches(session, options.owner)) return null;
 
   const timeoutMs = options.timeoutMs ?? 60_000;
   const abortSignal = options.abortSignal;
@@ -521,7 +553,7 @@ export async function interactiveShellWait(
 export async function interactiveShellWaitForPattern(
   id: string,
   pattern: string,
-  options: { timeoutMs?: number; abortSignal?: AbortSignal; flags?: string } = {}
+  options: { timeoutMs?: number; abortSignal?: AbortSignal; flags?: string; owner?: string } = {}
 ): Promise<{
   matched: boolean;
   reason: "found" | "timeout" | "exited" | "aborted";
@@ -530,6 +562,7 @@ export async function interactiveShellWaitForPattern(
 } | null> {
   const session = sessions.get(id);
   if (!session) return null;
+  if (!ownerMatches(session, options.owner)) return null;
 
   let regex: RegExp;
   try {
@@ -643,6 +676,7 @@ export function createInteractiveShellStartTool(
       const env = (args[2] as Record<string, string>) ?? undefined;
       const context = getToolContext(_ctx);
       const abortSignal = getAbortSignal(_ctx);
+      const owner = getSessionOwner(_ctx);
 
       // 与 execute_shell 一致的破坏性命令守卫（/K command 与一次性命令等价，
       // 不加守卫会让 shutdown / rm -rf / 之类从 start 放行）。
@@ -677,6 +711,7 @@ export function createInteractiveShellStartTool(
           cwd: finalCwd,
           env,
           workspaceRoot,
+          owner,
         });
 
         // spawn() reports failures (bad cwd, missing shell) asynchronously.
@@ -750,7 +785,7 @@ export function createInteractiveShellSendTool(): FunctionTool<ComputerToolConte
       const input = String(args[1] ?? "");
       const addNewline = args[2] !== false;
 
-      const ok = interactiveShellSend(sessionId, input, { addNewline });
+      const ok = interactiveShellSend(sessionId, input, { addNewline, owner: getSessionOwner(_ctx) });
       if (!ok) {
         return {
           content: [
@@ -800,7 +835,7 @@ export function createInteractiveShellReadTool(): FunctionTool<ComputerToolConte
       const waitMs = clampMsArg(args[1] != null ? Number(args[1]) : undefined, 500, 30000);
       const clear = args[2] !== false;
 
-      const result = await interactiveShellRead(sessionId, { waitMs, clear });
+      const result = await interactiveShellRead(sessionId, { waitMs, clear, owner: getSessionOwner(_ctx) });
       if (!result) {
         return {
           content: [
@@ -833,7 +868,7 @@ export function createInteractiveShellListTool(): FunctionTool<ComputerToolConte
     parameters: { type: "object", properties: {}, required: [] },
     active: true,
     handler: async (_ctx: unknown, ..._args: unknown[]): Promise<CallToolResult> => {
-      const list = listInteractiveSessions();
+      const list = listInteractiveSessions(getSessionOwner(_ctx));
       if (list.length === 0) {
         return { content: [{ type: "text", text: "No active interactive sessions." }] };
       }
@@ -861,7 +896,7 @@ export function createInteractiveShellCloseTool(): FunctionTool<ComputerToolCont
     active: true,
     handler: async (_ctx: unknown, ...args: unknown[]): Promise<CallToolResult> => {
       const sessionId = String(args[0] ?? "");
-      const ok = interactiveShellClose(sessionId);
+      const ok = interactiveShellClose(sessionId, { owner: getSessionOwner(_ctx) });
       if (!ok) {
         return {
           content: [{ type: "text", text: `error: Session '${sessionId}' not found.` }],
@@ -914,7 +949,7 @@ export function createInteractiveShellWaitTool(): FunctionTool<ComputerToolConte
       const timeoutMs = clampMsArg(args[1] != null ? Number(args[1]) : undefined, 60000, 600000);
       const abortSignal = getAbortSignal(_ctx);
 
-      const result = await interactiveShellWait(sessionId, { timeoutMs, abortSignal });
+      const result = await interactiveShellWait(sessionId, { timeoutMs, abortSignal, owner: getSessionOwner(_ctx) });
       if (!result) {
         return {
           content: [
@@ -1014,6 +1049,7 @@ export function createInteractiveShellWaitForPatternTool(): FunctionTool<Compute
           flags,
           timeoutMs,
           abortSignal,
+          owner: getSessionOwner(_ctx),
         });
       } catch (e) {
         return {

@@ -4,6 +4,9 @@
  * redirect loop limits).
  */
 
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
+
 export interface SafeFetchOptions extends RequestInit {
   allowedContentTypes?: string[];
   dispatcher?: any;
@@ -22,24 +25,147 @@ export const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024; // 10 MB
  * Hosts that must never be fetched even though LAN access is allowed by
  * business requirements: cloud instance-metadata endpoints are reachable
  * from any VM and leaking their response would hand out credentials.
+ *
+ * IP literals are matched against {@link BLOCKED_METADATA_IPS} after
+ * normalization; this set only carries non-IP aliases (e.g. GCP's DNS name).
  */
 const BLOCKED_METADATA_HOSTS = new Set([
-  "169.254.169.254", // AWS/GCP/Azure/... instance metadata
   "metadata.google.internal", // GCP metadata
-  "100.100.100.200", // Alibaba Cloud ECS metadata
 ]);
 
+/**
+ * Metadata service addresses (normalized to dotted-quad IPv4 or compressed
+ * IPv6) that must never be reachable, even though general LAN access is
+ * permitted. Covers AWS/GCP/Azure/Alibaba IPv4 and AWS IPv6 (`fd00:ec2::254`).
+ */
+const BLOCKED_METADATA_IPS = new Set([
+  "169.254.169.254", // AWS/GCP/Azure/... instance metadata (IPv4)
+  "100.100.100.200", // Alibaba Cloud ECS metadata
+  "fd00:ec2:0:0:0:0:0:254", // AWS EC2 IMDS over IPv6 (fd00:ec2::254)
+]);
+
+/**
+ * Normalize an IP literal so equivalent representations compare equal:
+ * - IPv6 literals are unwrapped (`[::1]` → `::1`) and lowercased.
+ * - IPv4-mapped (`::ffff:169.254.169.254`) IPv6 addresses are collapsed to
+ *   their dotted-quad IPv4 form, since the kernel routes them to the embedded
+ *   IPv4 address. (Deprecated IPv4-compatible `::x.y.z.w` is not collapsed:
+ *   it is not kernel-routed to IPv4, and collapsing it would misclassify
+ *   loopback `::1` as `0.0.0.1`.)
+ *
+ * Returns `null` when `host` is not an IP literal.
+ */
+export function normalizeIpLiteral(host: string): string | null {
+  let value = host.trim().toLowerCase();
+  // Strip the URL brackets and any zone/scope suffix (fe80::1%eth0).
+  if (value.startsWith("[") && value.endsWith("]")) value = value.slice(1, -1);
+  const zoneIdx = value.indexOf("%");
+  if (zoneIdx !== -1) value = value.slice(0, zoneIdx);
+
+  if (isIP(value) === 4) return value;
+  if (isIP(value) !== 6) return null;
+
+  // Expand an IPv6 address to its 8 16-bit groups.
+  const groups = expandIpv6(value);
+  if (!groups) return null;
+
+  // IPv4-mapped addresses (::ffff:0:0/96) carry an embedded IPv4 in the last
+  // 32 bits; compare them as IPv4 so `[::ffff:a9fe:a9fe]` cannot bypass the
+  // 169.254.169.254 block.
+  const firstFiveZero = groups.slice(0, 5).every((g) => g === 0);
+  if (firstFiveZero && groups[5] === 0xffff) {
+    const a = (groups[6] >> 8) & 0xff;
+    const b = groups[6] & 0xff;
+    const c = (groups[7] >> 8) & 0xff;
+    const d = groups[7] & 0xff;
+    return `${a}.${b}.${c}.${d}`;
+  }
+
+  return groups.map((g) => g.toString(16)).join(":");
+}
+
+/** Expand an IPv6 address string into its 8 numeric groups, or null if invalid. */
+function expandIpv6(address: string): number[] | null {
+  // An embedded dotted-quad may appear as the final 32 bits (`::ffff:1.2.3.4`).
+  let normalized = address;
+  const lastColon = address.lastIndexOf(":");
+  if (lastColon !== -1 && address.slice(lastColon + 1).includes(".")) {
+    const dotted = address.slice(lastColon + 1);
+    if (isIP(dotted) !== 4) return null;
+    const octets = dotted.split(".").map((o) => Number(o));
+    const hi = ((octets[0] << 8) | octets[1]).toString(16);
+    const lo = ((octets[2] << 8) | octets[3]).toString(16);
+    normalized = `${address.slice(0, lastColon + 1)}${hi}:${lo}`;
+  }
+
+  const doubleColon = normalized.indexOf("::");
+  if (doubleColon !== -1 && normalized.indexOf("::", doubleColon + 1) !== -1) {
+    return null; // more than one "::" is invalid
+  }
+
+  const head = doubleColon === -1 ? normalized : normalized.slice(0, doubleColon);
+  const tail = doubleColon === -1 ? "" : normalized.slice(doubleColon + 2);
+  const headGroups = head === "" ? [] : head.split(":");
+  const tailGroups = tail === "" ? [] : tail.split(":");
+
+  const groups: number[] = [];
+  for (const g of headGroups) {
+    if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+    groups.push(parseInt(g, 16));
+  }
+  const missing = 8 - headGroups.length - tailGroups.length;
+  if (doubleColon === -1 && missing !== 0) return null;
+  if (doubleColon !== -1 && missing < 1) return null;
+  for (let i = 0; i < missing; i++) groups.push(0);
+  for (const g of tailGroups) {
+    if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+    groups.push(parseInt(g, 16));
+  }
+
+  return groups.length === 8 ? groups : null;
+}
+
+/**
+ * Assert a URL is safe to fetch: allowed scheme, and neither the literal host
+ * nor any DNS-resolved address is a cloud metadata endpoint. Resolution is
+ * performed so a DNS name pointing at `169.254.169.254` (or an IPv4-mapped
+ * IPv6 literal) cannot bypass the blocklist.
+ */
 export async function assertSafeUrl(rawUrl: string): Promise<void> {
   const parsed = new URL(rawUrl);
   if (!ALLOWED_SCHEMES.has(parsed.protocol)) {
     throw new Error(`Disallowed URL scheme: ${parsed.protocol}`);
   }
   // Strip a single trailing dot: DNS treats "host." as the same name as "host",
-  // so without normalization "169.254.169.254." / "metadata.google.internal."
-  // bypass the exact-match blocklist below.
+  // so without normalization "metadata.google.internal." bypasses the
+  // exact-match blocklist below.
   const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
   if (BLOCKED_METADATA_HOSTS.has(host)) {
     throw new Error(`Blocked metadata host: ${parsed.hostname}`);
+  }
+
+  const literal = normalizeIpLiteral(parsed.hostname);
+  if (literal !== null) {
+    if (BLOCKED_METADATA_IPS.has(literal)) {
+      throw new Error(`Blocked metadata address: ${parsed.hostname}`);
+    }
+    return;
+  }
+
+  // Hostname: resolve and reject if any address is a metadata endpoint.
+  let addresses: Array<{ address: string }>;
+  try {
+    addresses = await lookup(host, { all: true });
+  } catch {
+    // Unresolvable host: let the actual fetch surface the network error rather
+    // than masking it as an SSRF rejection.
+    return;
+  }
+  for (const { address } of addresses) {
+    const normalized = normalizeIpLiteral(address);
+    if (normalized !== null && BLOCKED_METADATA_IPS.has(normalized)) {
+      throw new Error(`Blocked metadata address for host ${parsed.hostname}: ${address}`);
+    }
   }
 }
 

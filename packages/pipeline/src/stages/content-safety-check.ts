@@ -84,8 +84,13 @@ export class ContentSafetyCheckStage extends PipelineStage {
     // of defense for non-streaming responses and edge cases.
     if (this.strategySelector.checkResponse) {
       const result = event.getResult();
+      // Prefer the live result; fall back to the cached assistant text and then
+      // to the delivered-utterance list. Both extras are set by ProcessStage,
+      // so the check no longer depends on a single producer-specific field.
+      const utterances = event.getExtra<string[]>("_runAssistantUtterances");
       const outputText = result?.getPlainText()?.trim()
         || event.getExtra<string>("_cachedAssistantText")?.trim()
+        || (Array.isArray(utterances) ? utterances.join("\n").trim() : "")
         || "";
       if (outputText) {
         const outputCheck = this.strategySelector.check(outputText);

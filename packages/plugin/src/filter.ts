@@ -76,7 +76,14 @@ export class CommandGroupFilter extends HandlerFilter {
 
   filter(event: MessageEvent, _cfg: Record<string, unknown>): boolean {
     const msg = event.getMessageStr();
-    return this.commands.some(cmd => msg.startsWith(cmd));
+    // Require end-of-line or whitespace after the command, matching
+    // CommandFilter. Without this, command "help" also matched "helpme xxx".
+    const matches = (cmd: string): boolean => {
+      if (!msg.startsWith(cmd)) return false;
+      const rest = msg.slice(cmd.length);
+      return rest.length === 0 || /^\s/.test(rest);
+    };
+    return this.commands.some(matches);
   }
 }
 

@@ -206,6 +206,16 @@ export class ProcessStage extends PipelineStage {
           // Record provider token stats after agent run completes
           await this.recordTokenStats(agentRunner);
 
+          // Expose the run's reasoning/thinking text to the decoration stage
+          // (`displayReasoningText`). `MainAgentHooks` is exported but was never
+          // wired into `buildMainAgent`, so nothing populated this extra and the
+          // "[思考过程]" feature could never activate. Populate it here from the
+          // final LLM response.
+          const reasoningContent = runResult.finalResponse?.reasoningContent;
+          if (reasoningContent) {
+            event.setExtra("reasoning_content", reasoningContent);
+          }
+
           await this.applyNonStreamingResult(event, runResult);
 
           // Append-only persistence of the messages this run produced. The
@@ -319,8 +329,7 @@ export class ProcessStage extends PipelineStage {
   private async buildSystemPrompt(): Promise<string | undefined> {
     let systemPrompt: string | undefined;
 
-    const personaId = this.ctx.config.defaultPersonaId;
-    const persona = await this.ctx.personaManager.resolveSelectedPersona(personaId || null);
+    const persona = await this.resolveActivePersona();
     if (persona) {
       systemPrompt = persona.prompt;
     }
@@ -333,7 +342,14 @@ export class ProcessStage extends PipelineStage {
         : `[Extra Context]\n${extraContext}`;
     }
 
-    const activeSkills = this.ctx.skillManager.listSkills({ activeOnly: true });
+    // Restrict the advertised skills to the persona's selection when it has one
+    // (`skills === null` means "all"). Previously the persona's `skills` list
+    // was never read, so the Dashboard setting had no effect.
+    let activeSkills = this.ctx.skillManager.listSkills({ activeOnly: true });
+    if (persona && Array.isArray(persona.skills)) {
+      const allowed = new Set(persona.skills.map((s) => String(s).trim()).filter(Boolean));
+      activeSkills = activeSkills.filter((s) => allowed.has(s.name));
+    }
     const skillsPrompt = buildSkillsPrompt(activeSkills);
     if (skillsPrompt) {
       systemPrompt = systemPrompt
@@ -342,6 +358,17 @@ export class ProcessStage extends PipelineStage {
     }
 
     return systemPrompt;
+  }
+
+  /**
+   * Resolve the persona active for this request: the config default, falling
+   * back to the manager's default persona. Shared by the system-prompt builder
+   * (prompt + skills) and the agent builder (tool allowlist) so both read the
+   * same persona consistently.
+   */
+  private async resolveActivePersona(): Promise<import("@yachiyo/persona/manager.js").Personality | null> {
+    const personaId = this.ctx.config.defaultPersonaId;
+    return this.ctx.personaManager.resolveSelectedPersona(personaId || null);
   }
 
   /**
@@ -523,6 +550,9 @@ export class ProcessStage extends PipelineStage {
       // `llm_compress` produces a summary at a fixed position (cache-friendly),
       // while the `truncate_by_turns` fallback drops old rounds.
       const cfg = this.ctx.config;
+      // Persona tool allowlist: `null`/undefined = all tools. Resolved here (not
+      // in buildSystemPrompt) so the agent builder can filter the tool set.
+      const persona = await this.resolveActivePersona();
       const result = await buildMainAgent({
         provider,
         request: providerRequest,
@@ -530,6 +560,7 @@ export class ProcessStage extends PipelineStage {
         toolManager: this.ctx.toolManager,
         fallbackProviders,
         config: {
+          allowedTools: persona?.tools ?? null,
           streaming: useStreaming,
           providerCaching,
           // AgentConfig stores this in MILLISECONDS (dashboard label: 毫秒,
@@ -589,14 +620,24 @@ export class ProcessStage extends PipelineStage {
 
     // System-generated events (e.g. proactive reminders) carry internal
     // instructions in messageStr that should NOT be persisted to the user's
-    // conversation history. Skip saving the user message entirely — the
-    // model's reply is appended afterwards by saveRunHistory, and the run's
-    // prompt (this internal instruction) is excluded there as well.
-    if (event.getExtra<string>("_historyUserMessage") !== undefined) {
-      return { convId, umo };
-    }
+    // conversation history. Instead of skipping the user entry entirely (which
+    // lost the turn), persist the clean summary the adapter attached via
+    // `_historyUserMessage` — the platform layer documents that "ProcessStage
+    // will save this version". An explicitly empty summary skips the write.
+    const historyUserMessage = event.getExtra<string>("_historyUserMessage");
 
     const history: Array<{ role: string; content: string }> = conv ? (() => { try { return JSON.parse(conv.history); } catch { return []; } })() : [];
+
+    if (historyUserMessage !== undefined) {
+      if (!historyUserMessage.trim()) return { convId, umo };
+      history.push({ role: "user", content: historyUserMessage });
+
+      await this.ctx.conversationManager.updateConversation(umo, convId, {
+        history: JSON.stringify(history),
+      });
+
+      return { convId, umo };
+    }
 
     let userContent = event.messageStr ?? "";
     const hasImageUrls = event.messageObj.components.some(c => c.type === ComponentType.Image);
@@ -776,6 +817,13 @@ export class ProcessStage extends PipelineStage {
         }
       }
 
+      // Clamp to 0: some providers report cache-read tokens that are not a
+      // subset of `promptTokens` (Gemini reports `cachedContentTokenCount`
+      // separately from `promptTokenCount`), so the subtraction can go negative
+      // and corrupt the aggregated dashboard stats.
+      const cachedInput = stats.tokenUsage.cacheReadInputTokens ?? 0;
+      const otherInput = Math.max(0, stats.tokenUsage.promptTokens - cachedInput);
+
       const stat: ProviderStat = {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         providerId: agentRunner.getProviderId(),
@@ -784,8 +832,8 @@ export class ProcessStage extends PipelineStage {
         // (cache-read + cache-write + uncached). Non-hit input therefore is the
         // total minus the cache-read portion; cache-write tokens stay counted as
         // "other" input so the overall input total is preserved.
-        tokenInputOther: stats.tokenUsage.promptTokens - (stats.tokenUsage.cacheReadInputTokens ?? 0),
-        tokenInputCached: stats.tokenUsage.cacheReadInputTokens ?? 0,
+        tokenInputOther: otherInput,
+        tokenInputCached: cachedInput,
         tokenOutput: stats.tokenUsage.completionTokens,
         startTime: stats.startTime,
         endTime: stats.endTime || Date.now(),

@@ -45,13 +45,9 @@ function contentPartToOpenAI(part: ContentPart): OpenAIContentPart | null {
       // Drop it — reasoning is only meaningful on the turn that produced it.
       return null;
     case "image_url": {
-      const url = part.image_url.url;
-      const parsed = parseDataUri(url);
-      if (parsed) {
-        // OpenAI image_url also accepts data: URIs directly
-        return { type: "image_url", image_url: { url } };
-      }
-      return { type: "image_url", image_url: { url } };
+      // OpenAI's image_url accepts both remote URLs and data: URIs directly,
+      // so no parsing/conversion is needed here.
+      return { type: "image_url", image_url: { url: part.image_url.url } };
     }
     case "audio_url": {
       const url = part.audio_url.url;

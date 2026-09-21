@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Provider, ProviderRequest } from "./types.js";
 import { createContextWrapper } from "./types.js";
 import type { BaseAgentRunHooks } from "./hooks.js";
@@ -38,6 +39,13 @@ export interface MainAgentBuildConfig {
   toolResultOverflowDir?: string;
   readTool?: FunctionTool;
   fallbackProviderIds?: string[];
+  /**
+   * Persona-level tool allowlist. `null`/undefined means "all tools" (the
+   * default); an explicit array restricts the main agent to exactly those
+   * tool names. Applied to the base tool set before sub-agent handoff tools
+   * are added, so orchestration handoffs remain available regardless.
+   */
+  allowedTools?: string[] | null;
   /** Reasoning/thinking intensity forwarded to every LLM call of this run. */
   reasoningEffort?: import("@yachiyo/common/llm-types.js").ReasoningEffort;
   /**
@@ -92,6 +100,19 @@ export async function buildMainAgent<TContext = unknown>(
     funcTool.merge(fullToolSet);
   } else if (toolManager && !request.funcTool) {
     request.funcTool = toolManager.getFullToolSet();
+  }
+
+  // Apply the persona tool allowlist. `null`/undefined means "all tools". This
+  // runs BEFORE handoff tools are added below, so sub-agent orchestration
+  // (transfer_to_*) stays available even when a persona restricts the base
+  // tool set. Without this, the union above always restored the full tool set
+  // and the per-persona "tools" setting was silently inert.
+  if (Array.isArray(config.allowedTools) && request.funcTool) {
+    const allowed = new Set(
+      config.allowedTools.map((t) => String(t).trim()).filter(Boolean),
+    );
+    const base = request.funcTool as ToolSet;
+    request.funcTool = new ToolSet(base.tools.filter((t) => allowed.has(t.name)));
   }
 
   // Apply sub-agent handoff tools
@@ -191,6 +212,17 @@ export async function buildMainAgent<TContext = unknown>(
   if (toolManager) {
     runContext._toolMgr = toolManager;
   }
+  // Give every main-agent run its own file-lock holder. Previously the main
+  // agent fell back to the singleton "__main__" holder (computer-tools
+  // `getLockHolderId`), and FileLockManager treats same-holder acquisitions as
+  // re-entrant — so two concurrent sessions editing the same workspace file
+  // both "acquired" the exclusive write lock and clobbered each other. A
+  // per-run unique id keeps a single run's own re-entrant accesses fast while
+  // making distinct sessions contend. (The UMO is included for diagnostics
+  // only; it is not the identity, otherwise two runs in the same session
+  // would still share the holder.)
+  const umo = (context as { unifiedMsgOrigin?: string } | null | undefined)?.unifiedMsgOrigin;
+  runContext._lockHolderId = `main#${umo ?? "anon"}#${randomUUID()}`;
 
   await agentRunner.reset(runContext, agentHooks ?? new EmptyAgentHooks(), {
     provider,

@@ -107,7 +107,7 @@ export class KBHelper {
     await this.uploadText(text, docName, finalUrl);
   }
 
-  async uploadText(text: string, docName: string, _url?: string | null): Promise<void> {
+  async uploadText(text: string, docName: string, url?: string | null): Promise<void> {
     const chunks = this.chunker.chunk(text);
     if (chunks.length === 0) {
       throw new KnowledgeBaseUploadError({
@@ -146,6 +146,9 @@ export class KBHelper {
       docName,
       index,
       kbId: this.kb.id,
+      // Persist the source URL so the document can be re-fetched/re-indexed.
+      // Previously dropped, leaving KBDocument.url permanently null.
+      url: url ?? null,
     }));
 
     try {

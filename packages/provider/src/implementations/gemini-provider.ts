@@ -155,7 +155,7 @@ export class GeminiProvider implements Provider {
         headers: { "x-goog-api-key": this.apiKey },
         signal: AbortSignal.timeout(10000),
         ...(dispatcher ? { dispatcher } : {}),
-      } as any);
+      });
       if (!res.ok) {
         console.warn(`[GeminiProvider] Failed to delete context cache ${cacheName}: ${res.status}`);
       }
@@ -233,6 +233,9 @@ export class GeminiProvider implements Provider {
     }
 
     const dispatcher = await getProxyAgent(this.proxy);
+    // Bound the cache-create POST. Unlike deleteContextCache (10s) and the chat
+    // calls, this request previously had no timeout: a hung gateway stalled the
+    // entire agent step before the LLM request was even made.
     const response = await safeFetch(url, {
       method: "POST",
       headers: {
@@ -240,8 +243,9 @@ export class GeminiProvider implements Provider {
         "x-goog-api-key": this.apiKey,
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30000),
       ...(dispatcher ? { dispatcher } : {}),
-    } as any);
+    });
 
     if (!response.ok) {
       const errText = await response.text();

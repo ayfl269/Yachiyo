@@ -133,7 +133,12 @@ export class ConfigManager {
     this.sqliteStore = sqliteStore;
 
     if (this.sqliteStore) {
-      this.configs = this.sqliteStore.getAllConfigs();
+      this.configs = new Map(
+        [...this.sqliteStore.getAllConfigs().entries()].map(([id, cfg]) => [
+          id,
+          this.normalizeConfig(cfg),
+        ]),
+      );
     } else if (filePath) {
       this.loadFromFile().catch((e) => {
         // Surface load failures: a corrupted/missing config file previously
@@ -166,6 +171,7 @@ export class ConfigManager {
   }
 
   addConfig(config: AgentConfig): void {
+    config = this.normalizeConfig(config);
     this.configs.set(config.id, config);
     if (this.sqliteStore) {
       this.sqliteStore.saveConfig(config);
@@ -175,6 +181,7 @@ export class ConfigManager {
   }
 
   updateConfig(config: AgentConfig): void {
+    config = this.normalizeConfig(config);
     this.configs.set(config.id, config);
     if (this.sqliteStore) {
       this.sqliteStore.saveConfig(config);
@@ -237,6 +244,30 @@ export class ConfigManager {
     if (!this.sqliteStore && this.filePath) {
       this.saveToFile().catch(() => {});
     }
+  }
+
+  /**
+   * Fill in any fields missing from a persisted config with defaults.
+   *
+   * `parseConfigJson` only guarantees a string `id`; every other field can be
+   * absent on a partially-migrated/corrupt row. Merging over
+   * {@link createDefaultConfig} means downstream code never observes a config
+   * with missing required properties, which previously surfaced as deep,
+   * confusing crashes. Explicit values in the stored config always win.
+   *
+   * `AgentConfig` is intentionally flat (no nested objects), so a shallow merge
+   * is sufficient. The one hazard of a shallow merge is a key present with an
+   * explicit `undefined` value (reachable from programmatic callers, not from
+   * `JSON.parse`) shadowing the default — so those keys are dropped before the
+   * merge. Unknown extra keys are preserved.
+   */
+  normalizeConfig(config: AgentConfig): AgentConfig {
+    const defined: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(config)) {
+      if (value !== undefined) defined[key] = value;
+    }
+    const defaults = this.createDefaultConfig(config.id ?? "default");
+    return { ...defaults, ...defined, id: config.id ?? defaults.id } as AgentConfig;
   }
 
   createDefaultConfig(id: string): AgentConfig {

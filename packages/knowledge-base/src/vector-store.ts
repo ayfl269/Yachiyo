@@ -27,6 +27,8 @@ export abstract class VectorStore {
       docName: string;
       index: number;
       kbId: string;
+      /** Source URL the document was fetched from, when applicable. */
+      url?: string | null;
     }>,
   ): Promise<void>;
   abstract search(queryEmbedding: number[], topK: number, kbId?: string): Promise<VectorSearchResult[]>;

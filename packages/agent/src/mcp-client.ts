@@ -109,6 +109,15 @@ const JS_INLINE_CODE_FLAGS = new Set(["-e", "--eval", "-p", "--print"]);
 const DENIED_DOCKER_ARGS = new Set([
   "--privileged", "--pid=host", "--network=host", "--net=host", "--ipc=host",
 ]);
+/**
+ * Package runners execute arbitrary published code by design — that is their
+ * purpose, and an MCP server config is trusted admin input. These flags,
+ * however, turn them into a raw shell/eval escape and are never needed to
+ * launch a real MCP server, so they are rejected outright.
+ */
+const RUNNER_INLINE_EVAL_FLAGS = new Set([
+  "-c", "--call", "--eval", "-e", "--shell",
+]);
 const STDIO_ALLOWLIST_ENV = "MCP_STDIO_ALLOWED_COMMANDS";
 
 function normalizeStdioCommandName(command: string): string {
@@ -211,22 +220,87 @@ function validateStdioArgs(commandName: string, args: unknown): void {
   } else if (commandName === "docker") {
     const denied: string[] = [];
     const argList = args as string[];
+
+    // A bind-mount spec's host part escapes the container; named volumes
+    // (`-v myvol:/data`) never look like host paths, so they stay allowed.
+    const isHostPath = (p: string): boolean =>
+      p.startsWith("/") || p.startsWith("~") || /^[A-Za-z]:[\\/]/.test(p);
+    const isHostBind = (spec: string): boolean => {
+      const parts = spec.split(":");
+      const first = parts[0] ?? "";
+      // `C:\data:/data` / `C:/data:/data`: the drive letter is its own
+      // `:`-separated segment, so `first` alone is just "C".
+      if (/^[A-Za-z]$/.test(first) && parts.length >= 3) return true;
+      return isHostPath(first);
+    };
+    /** Read `key=` values out of a `--mount` spec (`type=bind,src=/x,...`). */
+    const mountField = (spec: string, key: string): string => {
+      for (const pair of spec.split(",")) {
+        const eq = pair.indexOf("=");
+        if (eq > 0 && pair.slice(0, eq) === key) return pair.slice(eq + 1);
+      }
+      return "";
+    };
+
     for (let i = 0; i < argList.length; i++) {
       const arg = argList[i];
       if (DENIED_DOCKER_ARGS.has(arg)) {
         denied.push(arg);
-      } else if (
-        (arg === "--network" || arg === "--net" || arg === "--pid" || arg === "--ipc") &&
-        i + 1 < argList.length &&
-        argList[i + 1] === "host"
+        continue;
+      }
+      // Split `--flag=value` so `--volume=/etc:/x` and `--mount=type=bind,...`
+      // are validated the same as their separated two-argument forms.
+      const eq = arg.indexOf("=");
+      const flag = eq === -1 ? arg : arg.slice(0, eq);
+      const inlineValue = eq === -1 ? undefined : arg.slice(eq + 1);
+      const nextValue = (): string => argList[i + 1] ?? "";
+
+      if (
+        (flag === "--network" || flag === "--net" || flag === "--pid" || flag === "--ipc") &&
+        (inlineValue === "host" || (!inlineValue && nextValue() === "host"))
       ) {
-        denied.push(`${arg} ${argList[i + 1]}`);
+        denied.push(`${flag} ${inlineValue ?? nextValue()}`);
+      } else if (
+        // Mounting the Docker socket grants full control of the host daemon.
+        arg.includes("/var/run/docker.sock") ||
+        arg.includes("//./pipe/docker_engine")
+      ) {
+        denied.push(arg);
+      } else if (flag === "-v" || flag === "--volume") {
+        if (isHostBind(inlineValue ?? nextValue())) {
+          denied.push(`${flag} ${inlineValue ?? nextValue()}`);
+        }
+      } else if (flag === "--mount") {
+        // `--mount` is the modern equivalent of `-v`: bind mounts (and any
+        // source that looks like a host path) escape the container.
+        const spec = inlineValue ?? nextValue();
+        const source = mountField(spec, "source") || mountField(spec, "src");
+        if (mountField(spec, "type") === "bind" || isHostPath(source)) {
+          denied.push(`${flag} ${spec}`);
+        }
       }
     }
     if (denied.length > 0) {
       throw new Error(
         `MCP stdio Docker args are unsafe and not allowed: ${denied.join(", ")}.`
       );
+    }
+  } else if (
+    commandName === "npx" ||
+    commandName === "pnpm" ||
+    commandName === "yarn" ||
+    commandName === "bunx" ||
+    commandName === "uvx"
+  ) {
+    // Package runners are allowlisted because MCP servers are commonly
+    // distributed as packages, but flags that inject inline code/shell turn
+    // them into an arbitrary-command primitive.
+    for (const arg of args as string[]) {
+      if (RUNNER_INLINE_EVAL_FLAGS.has(arg)) {
+        throw new Error(
+          `MCP stdio runner \`${commandName}\` does not allow inline eval/shell flags (${arg}).`
+        );
+      }
     }
   }
 }

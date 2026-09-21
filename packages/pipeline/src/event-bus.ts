@@ -59,6 +59,11 @@ export class EventBus {
    * instead of processed by the (new) dispatch loop (#88).
    */
   private dispatchAbort: AbortController | null = null;
+  /**
+   * confIds that have already logged a "scheduler not found, using default"
+   * warning, so the message is emitted once per config rather than per event.
+   */
+  private warnedFallbackConfIds: Set<string> = new Set();
 
   constructor(
     eventQueue: AsyncQueue<MessageEvent>,
@@ -118,10 +123,43 @@ export class EventBus {
 
         const confInfo = this.configManager.getConfInfo(event.unifiedMsgOrigin);
         const confId = confInfo.id;
-        const scheduler = this.schedulerMapping.get(confId);
+        // Fall back to the "default" scheduler when the exact config id has no
+        // mapping. Bootstrap only registers one scheduler (under "default"),
+        // while `getConfInfo` returns the first config's id — which can be any
+        // user-created id. Without the fallback, every event for a non-default
+        // config was silently dropped with only a console.error.
+        //
+        // The fallback is safe only while a single scheduler exists. Once
+        // multiple schedulers are registered, routing a non-matching confId to
+        // "default" could dispatch the event to the wrong pipeline, so warn
+        // (once per confId) whenever the fallback actually fires.
+        let scheduler = this.schedulerMapping.get(confId);
+        if (!scheduler) {
+          scheduler = this.schedulerMapping.get("default");
+          // Warn once per confId so a misconfigured mapping is visible without
+          // spamming the log on every event.
+          if (scheduler && !this.warnedFallbackConfIds.has(confId)) {
+            this.warnedFallbackConfIds.add(confId);
+            if (this.schedulerMapping.size > 1) {
+              console.warn(
+                `PipelineScheduler for config "${confId}" not found; falling back to the ` +
+                `"default" scheduler. With ${this.schedulerMapping.size} schedulers registered ` +
+                `this may route the event to the wrong pipeline.`
+              );
+            } else {
+              console.warn(
+                `PipelineScheduler for config "${confId}" not found; using the single ` +
+                `"default" scheduler.`
+              );
+            }
+          }
+        }
 
         if (!scheduler) {
-          console.error(`PipelineScheduler not found for config: ${confId}, event ignored.`);
+          console.error(
+            `PipelineScheduler not found for config "${confId}" and no "default" scheduler ` +
+            `is registered; event ignored.`
+          );
           continue;
         }
 

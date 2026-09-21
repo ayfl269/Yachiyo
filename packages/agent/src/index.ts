@@ -82,7 +82,7 @@ export { EmptyAgentHooks } from "./hooks.js";
 export type { BaseAgentRunHooks } from "./hooks.js";
 
 // Tool executor
-export { FunctionToolExecutor, backgroundTaskBus } from "./tool-executor.js";
+export { FunctionToolExecutor, backgroundTaskBus, extractOrderedArgs } from "./tool-executor.js";
 export type { BaseFunctionToolExecutor, BackgroundTaskResult, BackgroundTaskWaker } from "./tool-executor.js";
 
 // Handoff

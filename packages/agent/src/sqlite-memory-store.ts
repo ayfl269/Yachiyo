@@ -1413,10 +1413,38 @@ export class SqliteMemoryStore {
       "SELECT tag FROM memory_tags WHERE memory_key = ?"
     ).all(row.key) as { tag: string }[];
 
+    return this.rowToEntryWithTags(row, tags.map((t) => t.tag));
+  }
+
+  /**
+   * Load tags for many memory keys in a single query, returning a
+   * key → tags map. Keys with no tags are absent (callers default to []).
+   */
+  private loadTagsForKeys(keys: string[]): Map<string, string[]> {
+    const map = new Map<string, string[]>();
+    if (keys.length === 0) return map;
+    const placeholders = keys.map(() => "?").join(", ");
+    const rows = this.db.prepare(
+      `SELECT memory_key, tag FROM memory_tags WHERE memory_key IN (${placeholders})`
+    ).all(...keys) as { memory_key: string; tag: string }[];
+    for (const row of rows) {
+      const list = map.get(row.memory_key);
+      if (list) list.push(row.tag);
+      else map.set(row.memory_key, [row.tag]);
+    }
+    return map;
+  }
+
+  /**
+   * Build a {@link MemoryEntry} from a row whose tags are already known. Used
+   * by batch paths (e.g. the similarity scan) that pre-fetch all tags in one
+   * query instead of issuing a per-row SELECT.
+   */
+  private rowToEntryWithTags(row: MemoryRow, tags: string[]): MemoryEntry {
     return {
       key: row.key,
       value: row.value,
-      tags: tags.map((t) => t.tag),
+      tags,
       memoryType: row.memory_type ?? "long_term",
       scope: row.scope ?? "global",
       scopeId: row.scope_id ?? "",
@@ -1725,6 +1753,11 @@ export class SqliteMemoryStore {
     queryNorm = Math.sqrt(queryNorm);
     if (queryNorm === 0) return [];
 
+    // Pre-fetch tags for every candidate in ONE query. `rowToEntry` otherwise
+    // issues a SELECT per row, turning the scan (up to `maxScan` = 1000 rows)
+    // into 1000 synchronous queries on every dirty-memory consolidation pass.
+    const tagMap = this.loadTagsForKeys(rows.map((r) => r.key));
+
     const hits: SimilarMemoryHit[] = [];
     for (const row of rows) {
       if (row.memory_id === excludeId) continue;
@@ -1740,7 +1773,7 @@ export class SqliteMemoryStore {
       if (norm === 0) continue;
       const similarity = dot / (norm * queryNorm);
       if (similarity >= threshold) {
-        hits.push({ entry: this.rowToEntry(row), similarity });
+        hits.push({ entry: this.rowToEntryWithTags(row, tagMap.get(row.key) ?? []), similarity });
       }
     }
 

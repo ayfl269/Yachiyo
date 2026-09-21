@@ -80,6 +80,15 @@ export class FilePersonaStore extends PersonaStore {
   private dirty: boolean = false;
   private writeTimer: ReturnType<typeof setTimeout> | null = null;
   private writeDelay: number;
+  /**
+   * Monotonic revision bumped on every mutation. `flush()` snapshots it before
+   * the async write and only clears `dirty` when the revision is unchanged
+   * afterwards, so a mutation that lands mid-write is not marked clean (which
+   * previously let `close()` skip persisting the last change).
+   */
+  private revision: number = 0;
+  /** In-flight flush, awaited by close() so a write cannot be lost on shutdown. */
+  private inFlightFlush: Promise<void> | null = null;
 
   constructor(filePath: string, writeDelay = 500) {
     super();
@@ -124,6 +133,11 @@ export class FilePersonaStore extends PersonaStore {
       clearTimeout(this.writeTimer);
       this.writeTimer = null;
     }
+    // Wait for any in-flight flush before deciding whether another is needed;
+    // otherwise close() could race the flush and observe a stale `dirty=false`.
+    if (this.inFlightFlush) {
+      try { await this.inFlightFlush; } catch { /* logged by flush caller */ }
+    }
     if (this.dirty) {
       await this.flush();
     }
@@ -132,30 +146,46 @@ export class FilePersonaStore extends PersonaStore {
   private scheduleWrite(): void {
     if (this.writeTimer) clearTimeout(this.writeTimer);
     this.dirty = true;
+    this.revision++;
     this.writeTimer = setTimeout(() => {
       this.flush().catch((e) => console.error("FilePersonaStore flush error:", e));
     }, this.writeDelay);
   }
 
   private async flush(): Promise<void> {
-    const dir = dirname(this.filePath);
-    if (!existsSync(dir)) {
-      await mkdir(dir, { recursive: true });
-    }
-    // Atomic write: write to a temp file in the same directory, then rename
-    // over the target. A crash mid-write previously left a truncated JSON
-    // file behind (bricking the store on every later startup); rename is
-    // atomic within a filesystem.
-    const tmpPath = `${this.filePath}.tmp-${process.pid}-${Date.now()}`;
-    await writeFile(tmpPath, JSON.stringify(this.data, null, 2), "utf-8");
+    // Snapshot the revision and payload before the async write. If a mutation
+    // arrives while writing, `this.revision` advances and we must keep `dirty`
+    // set so the change is written by the next scheduled/close flush.
+    const snapshotRevision = this.revision;
+    const payload = JSON.stringify(this.data, null, 2);
+    const run = (async () => {
+      const dir = dirname(this.filePath);
+      if (!existsSync(dir)) {
+        await mkdir(dir, { recursive: true });
+      }
+      // Atomic write: write to a temp file in the same directory, then rename
+      // over the target. A crash mid-write previously left a truncated JSON
+      // file behind (bricking the store on every later startup); rename is
+      // atomic within a filesystem.
+      const tmpPath = `${this.filePath}.tmp-${process.pid}-${Date.now()}`;
+      await writeFile(tmpPath, payload, "utf-8");
+      try {
+        await rename(tmpPath, this.filePath);
+      } catch (e) {
+        // Best-effort cleanup of the orphaned temp file if rename failed.
+        try { await unlink(tmpPath); } catch { /* ignore */ }
+        throw e;
+      }
+      if (this.revision === snapshotRevision) {
+        this.dirty = false;
+      }
+    })();
+    this.inFlightFlush = run;
     try {
-      await rename(tmpPath, this.filePath);
-    } catch (e) {
-      // Best-effort cleanup of the orphaned temp file if rename failed.
-      try { await unlink(tmpPath); } catch { /* ignore */ }
-      throw e;
+      await run;
+    } finally {
+      if (this.inFlightFlush === run) this.inFlightFlush = null;
     }
-    this.dirty = false;
   }
 
   async getPersona(personaId: string): Promise<Personality | null> {

@@ -537,9 +537,46 @@ async function testSqliteVectorStore(): Promise<void> {
 
   // 4.8 count
   const total = await store.count();
-  assert(total === 4, "count() 总数 4");
+  assert(total === 4, "count() ���� 4");
   const kb2Count = await store.count("kb2");
   assertEqual(kb2Count, 2, "count(kb2)=2");
+
+  // 4.8b Regression: retrieval must scan the WHOLE kb, not just the first
+  // MAX_SCAN_ROWS (previously max(topK*50, 5000)). Seed >5000 chunks where the
+  // best match is inserted LAST, then assert it is still found.
+  {
+    const bigKb = "kb-big";
+    metaStore.saveKb({
+      id: bigKb, name: "BigKB", description: "", emoji: "",
+      embeddingProviderId: "emb", rerankProviderId: null,
+      chunkSize: 500, chunkOverlap: 50,
+      topKDense: 10, topKSparse: 10, topMFinal: 5,
+    });
+    const N = 5200;
+    const items = [];
+    for (let i = 0; i < N; i++) {
+      // All filler chunks are orthogonal to the query [1,0,0]; the final one
+      // matches it exactly. Insertion order puts the match beyond 5000 rows.
+      items.push({
+        chunkId: `big-${i}`,
+        embedding: i === N - 1 ? [1, 0, 0] : [0, 1, 0],
+        content: `filler ${i}`,
+        docId: "bigdoc",
+        docName: "bigdoc",
+        index: i,
+        kbId: bigKb,
+      });
+    }
+    await store.batchUpsert(items);
+    const bigResults = await store.search([1, 0, 0], 5, bigKb);
+    assert(bigResults.length > 0, "large-KB (>5000) search returns results");
+    assertEqual(bigResults[0].chunkId, `big-${N - 1}`,
+      "large-KB search finds the best match inserted after row 5000 (no silent truncation)");
+
+    // Clean up so the later count()/delete assertions are unaffected.
+    await store.deleteByKbId(bigKb);
+    assertEqual(await store.count(bigKb), 0, "large-KB cleanup");
+  }
 
   // 4.9 deleteByDocId
   await store.deleteByDocId("d3");

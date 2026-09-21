@@ -846,10 +846,13 @@ export async function executeParallelSubAgents(
         manager.completeTask(taskId, result);
       } catch (e) {
         manager.failTask(taskId, (e as Error).message ?? String(e));
-      } finally {
-        // Release file locks held by this sub-agent
-        fileLockManager.releaseAll(task.agentName);
       }
+      // NOTE: this used to call `fileLockManager.releaseAll(task.agentName)`,
+      // but locks are never held under the bare agent name — the handoff
+      // executor acquires them with a per-invocation id (`${agentName}#${uuid}`)
+      // and releases them in its own `finally`. That call matched no holder and
+      // was a silent no-op, so it has been removed rather than left as
+      // misleading cleanup.
     };
 
     executionPromises.push(executeWhenReady());

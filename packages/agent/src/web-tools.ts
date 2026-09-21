@@ -1008,10 +1008,21 @@ const MAX_BROWSER_PAGES = 10;
 /**
  * Owner session of the current tool call. Used to scope the page registry:
  * a session can only list and operate pages it opened itself.
+ *
+ * When invoked from the pipeline, the wrapper's `context` IS the MessageEvent
+ * (it exposes `unifiedMsgOrigin` directly), not a `WebToolContext` with a
+ * nested `event`. Reading `context.event` therefore always yielded `""`, so
+ * every page was owned by the empty string and cross-session isolation was
+ * dead. Normalize both shapes: the direct event field, then the nested shape
+ * used by tests/standalone callers.
  */
 function getPageOwner(_ctx: unknown): string {
-  const webCtx = (_ctx as { context?: WebToolContext } | undefined)?.context;
-  return webCtx?.event?.unifiedMsgOrigin ?? "";
+  const wrapper = _ctx as { context?: WebToolContext & { unifiedMsgOrigin?: string } } | undefined;
+  const context = wrapper?.context;
+  if (typeof context?.unifiedMsgOrigin === "string" && context.unifiedMsgOrigin) {
+    return context.unifiedMsgOrigin;
+  }
+  return context?.event?.unifiedMsgOrigin ?? "";
 }
 
 /**

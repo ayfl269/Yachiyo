@@ -718,9 +718,15 @@ export class OneBot11Adapter extends PlatformAdapter {
     if (this.httpServer) {
       try {
         await new Promise<void>(resolve => {
-          this.httpServer!.close(() => resolve());
-          // Force resolve after 3s if close hangs
-          setTimeout(resolve, 3000);
+          // Force resolve after 3s if close hangs. Clear the fallback timer when
+          // close() succeeds so it doesn't linger, and unref it so it can never
+          // itself keep the process alive.
+          const fallback = setTimeout(resolve, 3000);
+          fallback.unref?.();
+          this.httpServer!.close(() => {
+            clearTimeout(fallback);
+            resolve();
+          });
         });
       } catch { /* ignore */ }
       this.httpServer = null;
@@ -835,6 +841,9 @@ export class OneBot11Adapter extends PlatformAdapter {
         this.pendingRequests.delete(echo);
         reject(new Error(`API call '${action}' timed out after ${timeoutMs}ms`));
       }, timeoutMs);
+      // Don't let a pending API timeout keep the process alive during shutdown
+      // (each in-flight call would otherwise hold the loop for up to 30s).
+      timer.unref?.();
 
       this.pendingRequests.set(echo, { resolve, reject, timer, ws });
 

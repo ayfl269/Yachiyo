@@ -124,40 +124,55 @@ export class ProviderManager {
     if (provider.providerConfig.modalities == null) {
       provider.providerConfig.modalities = ["text", "tool_use"];
     }
-    this.providerInsts.push(provider);
     const id = this.extractId(provider.providerConfig);
+    if (id) {
+      // Deduplicate by ID. Without this, re-registering the same ID pushed a
+      // second instance into `providerInsts` while `instMap` was overwritten,
+      // leaving the first instance alive and undisposable (and double-counted
+      // in logs / fallback scans). AdapterRegistry.createAdapter already guards
+      // this; providers should behave consistently.
+      const existing = this.instMap.get(id);
+      if (existing && existing !== provider) {
+        this.removeProviderInstance(id);
+        void this.disposeInstance(existing);
+      }
+    }
+    this.providerInsts.push(provider);
     if (id) {
       this.instMap.set(id, provider);
     }
   }
 
   registerEmbeddingProvider(provider: EmbeddingProvider): void {
-    this.embeddingInsts.push(provider);
-    const id = this.extractId(provider.providerConfig);
-    if (id) {
-      this.instMap.set(id, provider);
-    }
+    this.registerTypedProvider(provider, this.embeddingInsts);
   }
 
   registerRerankProvider(provider: RerankProvider): void {
-    this.rerankInsts.push(provider);
-    const id = this.extractId(provider.providerConfig);
-    if (id) {
-      this.instMap.set(id, provider);
-    }
+    this.registerTypedProvider(provider, this.rerankInsts);
   }
 
   registerSttProvider(provider: STTProvider): void {
-    this.sttInsts.push(provider);
-    const id = this.extractId(provider.providerConfig);
-    if (id) {
-      this.instMap.set(id, provider);
-    }
+    this.registerTypedProvider(provider, this.sttInsts);
   }
 
   registerTtsProvider(provider: TTSProvider): void {
-    this.ttsInsts.push(provider);
+    this.registerTypedProvider(provider, this.ttsInsts);
+  }
+
+  /**
+   * Shared registration for non-chat providers: dedupe by ID (disposing the
+   * superseded instance) then push into the category array and the ID map.
+   */
+  private registerTypedProvider<T extends AnyProvider>(provider: T, target: T[]): void {
     const id = this.extractId(provider.providerConfig);
+    if (id) {
+      const existing = this.instMap.get(id);
+      if (existing && existing !== provider) {
+        this.removeProviderInstance(id);
+        void this.disposeInstance(existing);
+      }
+    }
+    target.push(provider);
     if (id) {
       this.instMap.set(id, provider);
     }
@@ -188,13 +203,18 @@ export class ProviderManager {
   // ── Provider Selection ──
 
   /**
-   * Get the currently active provider.
-   * Priority: defaultProviderId > first registered non-disabled provider.
-   * @param providerType 请求的 provider 类型（当前仅支持 chat_completion）
+   * Get the currently active chat provider.
+   *
+   * Priority: `defaultProviderId` > first registered non-disabled provider.
+   *
+   * NOTE: `providerType` and `umo` are currently RESERVED / no-ops. All chat
+   * providers are reached through the same `textChat` interface, and there is
+   * no per-session (UMO) or per-subtype routing configured anywhere in the
+   * codebase. They are kept in the signature because callers already pass them
+   * and because per-UMO routing is a plausible future extension; do not rely
+   * on them affecting the result today.
    */
   getUsingProvider(_providerType: ProviderType, _umo?: string): Provider | null {
-    // 当前所有 chat provider 都通过 textChat 接口访问，providerType 参数保留用于未来扩展
-    // 如需按子类型（如 streaming 能力）区分，可在此处添加过滤逻辑
     if (this.defaultProviderId && !this.disabledIds.has(this.defaultProviderId)) {
       const found = this.instMap.get(this.defaultProviderId);
       if (found && "textChat" in found) return found as Provider;
@@ -207,18 +227,22 @@ export class ProviderManager {
     return null;
   }
 
+  /** Active TTS provider. `umo` is reserved/no-op (see {@link getUsingProvider}). */
   getUsingTtsProvider(_umo?: string): TTSProvider | null {
     return this.ttsInsts.find((p) => !this.disabledIds.has(this.extractId(p.providerConfig) ?? "")) ?? null;
   }
 
+  /** Active STT provider. `umo` is reserved/no-op (see {@link getUsingProvider}). */
   getUsingSttProvider(_umo?: string): STTProvider | null {
     return this.sttInsts.find((p) => !this.disabledIds.has(this.extractId(p.providerConfig) ?? "")) ?? null;
   }
 
+  /** Active embedding provider. `umo` is reserved/no-op (see {@link getUsingProvider}). */
   getUsingEmbeddingProvider(_umo?: string): EmbeddingProvider | null {
     return this.embeddingInsts.find((p) => !this.disabledIds.has(this.extractId(p.providerConfig) ?? "")) ?? null;
   }
 
+  /** Active rerank provider. `umo` is reserved/no-op (see {@link getUsingProvider}). */
   getUsingRerankProvider(_umo?: string): RerankProvider | null {
     return this.rerankInsts.find((p) => !this.disabledIds.has(this.extractId(p.providerConfig) ?? "")) ?? null;
   }
@@ -364,6 +388,8 @@ export class ProviderManager {
     "apiKey", "api_key", "apiSecret", "api_secret", "secretKey", "secret_key",
     "secret", "token", "accessToken", "access_token", "refreshToken", "refresh_token",
     "password", "passwd", "key",
+    // Proxy URLs may embed credentials (user:pass@host); encrypt/mask them.
+    "proxy",
   ]);
 
   /** Return a shallow copy of `config` with secret fields masked as `"***"`. */
@@ -450,7 +476,10 @@ export class ProviderManager {
     // Dispose all provider instances (release server-side resources, caches, etc.)
     await this.disposeAllProviders();
 
-    // Clear all provider instances
+    // Clear all provider instances and selection state. Leaving
+    // defaultProviderId / fallbackProviderIds / disabledIds behind meant a
+    // re-initialized manager could point its default at a removed ID, keep
+    // resurrecting a stale fallback, or leave a provider silently disabled.
     this.providerInsts = [];
     this.ttsInsts = [];
     this.sttInsts = [];
@@ -459,6 +488,10 @@ export class ProviderManager {
     this.instMap.clear();
     this.providerConfigs.clear();
     this.mcpServerConfig = null;
+    this.defaultProviderId = null;
+    this.fallbackProviderIds = [];
+    this.disabledIds.clear();
+    this.changeCallbacks = [];
     this.initialized = false;
 
     console.info("[ProviderManager] Terminated. All providers and MCP config cleared.");
@@ -852,7 +885,7 @@ export class ProviderManager {
     const type = String(config.type ?? "");
     const chatTypes = new Set(["openai", "openai_responses", "gemini", "anthropic"]);
     const embeddingTypes = new Set(["openai_embedding", "gemini_embedding"]);
-    const rerankTypes = new Set(["cohere", "jina", "voyage", "generic"]);
+    const rerankTypes = new Set(["cohere", "jina", "voyage", "siliconflow", "generic"]);
     const ttsTypes = new Set(["openai_tts"]);
     const sttTypes = new Set(["openai_stt"]);
     // The typed arrays hold the provider instances directly (not wrapped),
@@ -885,7 +918,7 @@ export class ProviderManager {
     // Determine category based on type string
     const chatTypes = new Set(["openai", "openai_responses", "gemini", "anthropic"]);
     const embeddingTypes = new Set(["openai_embedding", "gemini_embedding"]);
-    const rerankTypes = new Set(["cohere", "jina", "voyage", "generic"]);
+    const rerankTypes = new Set(["cohere", "jina", "voyage", "siliconflow", "generic"]);
     const ttsTypes = new Set(["openai_tts"]);
     const sttTypes = new Set(["openai_stt"]);
 
@@ -969,7 +1002,7 @@ export class ProviderManager {
     if (["openai", "openai_responses", "gemini", "anthropic"].includes(type))
       return "chat_completion" as ProviderType;
     if (type.includes("embedding")) return "embedding" as ProviderType;
-    if (type.includes("rerank") || ["cohere", "jina", "voyage", "generic"].includes(type))
+    if (type.includes("rerank") || ["cohere", "jina", "voyage", "siliconflow", "generic"].includes(type))
       return "rerank" as ProviderType;
     if (type.includes("tts")) return "text_to_speech" as ProviderType;
     if (type.includes("stt")) return "speech_to_text" as ProviderType;

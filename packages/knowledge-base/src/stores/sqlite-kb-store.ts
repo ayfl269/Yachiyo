@@ -330,27 +330,35 @@ export class SqliteVectorStore extends VectorStore {
       docName: string;
       index: number;
       kbId: string;
+      url?: string | null;
     }>,
   ): Promise<void> {
     if (items.length === 0) return;
 
     // Group items by docId to calculate chunk counts and insert documents
-    const docMap = new Map<string, { kbId: string; name: string; count: number }>();
+    const docMap = new Map<string, { kbId: string; name: string; count: number; url: string | null }>();
     for (const item of items) {
       const existing = docMap.get(item.docId);
       if (existing) {
         existing.count = Math.max(existing.count, item.index + 1);
+        if (item.url) existing.url = item.url;
       } else {
-        docMap.set(item.docId, { kbId: item.kbId, name: item.docName, count: item.index + 1 });
+        docMap.set(item.docId, {
+          kbId: item.kbId,
+          name: item.docName,
+          count: item.index + 1,
+          url: item.url ?? null,
+        });
       }
     }
 
     const docStmt = this.db.prepare(`
-      INSERT INTO kb_documents (id, kb_id, name, type, chunk_count, created_at)
-      VALUES (?, ?, ?, '', ?, ?)
+      INSERT INTO kb_documents (id, kb_id, name, url, type, chunk_count, created_at)
+      VALUES (?, ?, ?, ?, '', ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         kb_id = excluded.kb_id,
         name = excluded.name,
+        url = COALESCE(excluded.url, kb_documents.url),
         type = excluded.type,
         chunk_count = excluded.chunk_count,
         created_at = excluded.created_at
@@ -383,7 +391,7 @@ export class SqliteVectorStore extends VectorStore {
       // 1. Insert documents
       const now = Date.now();
       for (const [docId, doc] of docMap.entries()) {
-        docStmt.run(docId, doc.kbId, doc.name, doc.count, now);
+        docStmt.run(docId, doc.kbId, doc.name, doc.url, doc.count, now);
       }
 
       // 2. Insert chunks and vectors
@@ -403,23 +411,19 @@ export class SqliteVectorStore extends VectorStore {
   }
 
   async search(queryEmbedding: number[], topK: number, kbId?: string): Promise<VectorSearchResult[]> {
-    // Cap the number of rows scanned to prevent O(N) memory blowup on large
-    // knowledge bases. We fetch up to MAX_SCAN_ROWS, compute cosine similarity
-    // incrementally, and keep only the top-K by score using a partial sort.
-    // This is a pragmatic mitigation until an ANN index (sqlite-vec/FAISS) is
-    // available.
-    const MAX_SCAN_ROWS = Math.max(topK * 50, 5000);
-
+    // Scan EVERY row in the (optionally kb-scoped) vector table, but keep only
+    // the running top-K in memory. The previous implementation capped the scan
+    // at MAX_SCAN_ROWS = max(topK*50, 5000) rows, so any knowledge base with
+    // more than 5 000 chunks permanently ignored everything beyond the first
+    // 5 000 (in rowid order) — silent, unbounded recall loss on exactly the
+    // large corpora RAG is meant for. Streaming via `iterate()` keeps memory
+    // bounded to O(topK) regardless of corpus size, until a real ANN index
+    // (sqlite-vec/FAISS) is available.
+    //
     // 1. 根据是否传入 kbId，决定是否仅筛选当前知识库的向量，减少数据库 I/O 和内存开销
-    // ORDER BY rowid：LIMIT 截断必须建立在确定性顺序上，否则超过扫描上限的库
-    // 每次检索覆盖到的行不同，结果不完整且不可复现。
     const sql = kbId
-      ? "SELECT chunk_id, embedding, content, doc_name FROM kb_vectors WHERE kb_id = ? ORDER BY rowid LIMIT ?"
-      : "SELECT chunk_id, embedding, content, doc_name FROM kb_vectors ORDER BY rowid LIMIT ?";
-
-    const rows = (kbId
-      ? this.db.prepare(sql).all(kbId, MAX_SCAN_ROWS)
-      : this.db.prepare(sql).all(MAX_SCAN_ROWS)) as KbVectorRow[];
+      ? "SELECT chunk_id, embedding, content, doc_name FROM kb_vectors WHERE kb_id = ?"
+      : "SELECT chunk_id, embedding, content, doc_name FROM kb_vectors";
 
     const queryArr = new Float32Array(queryEmbedding);
     const len = queryArr.length;
@@ -435,8 +439,15 @@ export class SqliteVectorStore extends VectorStore {
       return [];
     }
 
-    const results: Array<{ chunkId: string; score: number; content: string; docName: string }> = [];
+    // Bounded top-K buffer, kept sorted ascending by score so index 0 is the
+    // weakest of the current winners and can be evicted in O(1).
+    const top: Array<{ chunkId: string; score: number; content: string; docName: string }> = [];
+    const limit = Math.max(0, Math.floor(topK));
     let dimensionMismatchCount = 0;
+
+    const rows = (kbId
+      ? this.db.prepare(sql).iterate(kbId)
+      : this.db.prepare(sql).iterate()) as IterableIterator<KbVectorRow>;
 
     for (const row of rows) {
       const vecArr = bufferToEmbedding(row.embedding);
@@ -460,12 +471,14 @@ export class SqliteVectorStore extends VectorStore {
       const normB = Math.sqrt(normBSq);
       const score = normB === 0 ? 0 : dot / (queryNorm * normB);
 
-      results.push({
-        chunkId: row.chunk_id,
-        score,
-        content: row.content,
-        docName: row.doc_name,
-      });
+      if (limit === 0) continue;
+      if (top.length < limit) {
+        top.push({ chunkId: row.chunk_id, score, content: row.content, docName: row.doc_name });
+        top.sort((a, b) => a.score - b.score);
+      } else if (score > top[0].score) {
+        top[0] = { chunkId: row.chunk_id, score, content: row.content, docName: row.doc_name };
+        top.sort((a, b) => a.score - b.score);
+      }
     }
 
     if (dimensionMismatchCount > 0) {
@@ -474,14 +487,14 @@ export class SqliteVectorStore extends VectorStore {
       );
     }
 
-    results.sort((a, b) => b.score - a.score);
-
-    return results.slice(0, topK).map((r) => ({
-      chunkId: r.chunkId,
-      content: r.content,
-      score: r.score,
-      docName: r.docName,
-    }));
+    return top
+      .sort((a, b) => b.score - a.score)
+      .map((r) => ({
+        chunkId: r.chunkId,
+        content: r.content,
+        score: r.score,
+        docName: r.docName,
+      }));
   }
 
   async deleteByDocId(docId: string): Promise<void> {

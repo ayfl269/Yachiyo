@@ -262,15 +262,31 @@ export async function* runLiveAgent<TContext = unknown>(
     console.error(`Live agent error: ${e}`);
   });
 
-  // Yield text chunks as they arrive
-  while (!done || textQueue.length > 0) {
-    const chunk = textQueue.shift();
-    if (chunk === null || chunk === undefined) {
-      if (done) break;
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      continue;
+  // Yield text chunks as they arrive. Wrapped in try/finally so an early
+  // consumer break / external `.return()` stops the background agent and
+  // detaches the queue instead of leaking the run and letting `textQueue`
+  // grow unbounded until the agent finishes on its own.
+  let completedNormally = false;
+  try {
+    while (!done || textQueue.length > 0) {
+      const chunk = textQueue.shift();
+      if (chunk === null || chunk === undefined) {
+        if (done) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        continue;
+      }
+      yield { type: "text", text: chunk };
     }
-    yield { type: "text", text: chunk };
+    completedNormally = true;
+  } finally {
+    if (!completedNormally) {
+      // Consumer stopped consuming (break / .return() / throw): cancel the run
+      // and stop feeding the queue. Swallow the resulting rejection — nobody is
+      // listening to `agentPromise` anymore.
+      try { agentRunner.requestStop(); } catch { /* ignore */ }
+      textQueue.length = 0;
+      agentPromise.catch(() => { /* surfaced to the original consumer only */ });
+    }
   }
 
   // Wait for agent to fully complete

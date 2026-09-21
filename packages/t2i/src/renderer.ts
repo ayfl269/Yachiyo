@@ -128,13 +128,14 @@ const TEMPLATES: Record<string, string> = {
 </style>
 </head>
 <body><div id="content">{{CONTENT}}</div>
-<!-- NOTE (supply chain): marked is loaded from a public CDN without SRI pinning.
-       This is a deliberate, accepted dependency: the script executes in a throwaway
-       headless page whose only input is HTML-escaped text, and all page network
-       requests are SSRF-filtered (see ssrfGuardRoute). A CDN compromise could still
-       alter the rendered output, so pin/unvendor marked if this ever renders
-       security-sensitive content. -->
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<!-- NOTE (supply chain): marked is loaded from a public CDN. It is pinned to an
+       exact version and integrity-checked with SRI (sha384), so a compromised or
+       mutated CDN response is rejected by the browser rather than executed. The
+       script runs in a throwaway headless page whose only input is HTML-escaped
+       text, and all page network requests are SSRF-filtered (see ssrfGuardRoute). -->
+<script src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js"
+        integrity="sha384-948ahk4ZmxYVYOc+rxN1H2gM1EJ2Duhp7uHtZ4WSLkV4Vtx5MUqnV+l7u9B+jFv+"
+        crossorigin="anonymous"></script>
 <script>
   const el = document.getElementById('content');
   el.innerHTML = marked.parse(el.textContent || el.innerText);
@@ -206,13 +207,14 @@ const TEMPLATES: Record<string, string> = {
 </style>
 </head>
 <body><div id="content">{{CONTENT}}</div>
-<!-- NOTE (supply chain): marked is loaded from a public CDN without SRI pinning.
-       This is a deliberate, accepted dependency: the script executes in a throwaway
-       headless page whose only input is HTML-escaped text, and all page network
-       requests are SSRF-filtered (see ssrfGuardRoute). A CDN compromise could still
-       alter the rendered output, so pin/unvendor marked if this ever renders
-       security-sensitive content. -->
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<!-- NOTE (supply chain): marked is loaded from a public CDN. It is pinned to an
+       exact version and integrity-checked with SRI (sha384), so a compromised or
+       mutated CDN response is rejected by the browser rather than executed. The
+       script runs in a throwaway headless page whose only input is HTML-escaped
+       text, and all page network requests are SSRF-filtered (see ssrfGuardRoute). -->
+<script src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js"
+        integrity="sha384-948ahk4ZmxYVYOc+rxN1H2gM1EJ2Duhp7uHtZ4WSLkV4Vtx5MUqnV+l7u9B+jFv+"
+        crossorigin="anonymous"></script>
 <script>
   const el = document.getElementById('content');
   el.innerHTML = marked.parse(el.textContent || el.innerText);
@@ -341,11 +343,18 @@ export class MarkdownToImageRenderer {
     if (this.browser && this.browser.isConnected()) return Promise.resolve(this.browser);
     if (this.launchPromise) return this.launchPromise;
     const launch = (async () => {
+      // Renderer sandbox: keep Chromium's own sandbox enabled by default —
+      // this page renders model-controlled markdown. `--no-sandbox` is only
+      // forced when the process runs as root (Chromium refuses to start
+      // sandboxed as root, e.g. in a container) or when explicitly opted in via
+      // T2I_CHROMIUM_NO_SANDBOX=1. Disabling it unconditionally removed a real
+      // defense-in-depth layer for a content-rendering surface.
+      const runningAsRoot = typeof process.getuid === "function" && process.getuid() === 0;
+      const noSandbox = runningAsRoot || process.env.T2I_CHROMIUM_NO_SANDBOX === "1";
       const browser = await chromium.launch({
         headless: true,
         args: [
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
+          ...(noSandbox ? ["--no-sandbox", "--disable-setuid-sandbox"] : []),
           "--disable-gpu",
           "--font-render-hinting=none",
         ],

@@ -10,11 +10,23 @@ export class MessageSession {
   }
 
   static fromStr(s: string): MessageSession {
-    const parts = s.split(":");
+    // Format: `${platformId}:${messageType}:${sessionId}`. The session id may
+    // itself contain colons (e.g. a UMO-style `onebot11:group:123`), so only
+    // the first two separators are structural — the remainder is the session
+    // id. The previous `parts[2]` truncated such ids to their first segment.
+    const first = s.indexOf(":");
+    const second = first === -1 ? -1 : s.indexOf(":", first + 1);
     const session = new MessageSession();
-    session.platformId = parts[0] ?? "";
-    session.messageType = (parts[1] ?? "") as MessageType;
-    session.sessionId = parts[2] ?? "";
+    if (second === -1) {
+      // Malformed / legacy single-field string: keep it whole as the session id.
+      session.platformId = s;
+      session.messageType = "" as MessageType;
+      session.sessionId = "";
+      return session;
+    }
+    session.platformId = s.slice(0, first);
+    session.messageType = s.slice(first + 1, second) as MessageType;
+    session.sessionId = s.slice(second + 1);
     return session;
   }
 }

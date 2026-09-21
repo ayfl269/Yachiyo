@@ -158,7 +158,7 @@ pnpm frontend:dev
 pnpm test
 ```
 
-包含的测试文件（全部 21 个由 `pnpm test` 运行）：
+包含的测试文件（全部 22 个由 `pnpm test` 运行）：
 
 | 测试文件 | 测试内容 |
 |----------|---------|
@@ -183,6 +183,8 @@ pnpm test
 | `tests/onebot11-extended-test.ts` | OneBot11 适配器扩展 API（消息/文件/工具/群管扩展） |
 | `tests/qq-platform-tools-test.ts` | QQ 平台工具 |
 | `tests/qqofficial-test.ts` | QQ Official Bot 适配器（富媒体、扩展发送、撤回、表态、频道/公告/权限） |
+| `tests/review-fixes-test.ts` | 代码审查修复回归（SSRF 元数据绕过、会话归属隔离、插件工具派发、Provider 去重） |
+| `tests/dashboard-security-test.ts` | 管理后台安全助手（路径包含校验、ZIP 条目净化） |
 
 另可通过独立脚本运行：
 
@@ -201,7 +203,7 @@ pnpm test
 | `tests/proxy-tool-test.ts` | proxy_manage 工具（运行时代理切换） |
 | `tests/scheduler-system-test.ts` | 定时任务两阶段触发与状态机 |
 
-全部测试文件（含上表 21 个与独立脚本）均纳入 `pnpm typecheck` 的 `tsconfig.tests.json` 类型检查，无白名单排除。
+全部测试文件（含上表 23 个与独立脚本）均纳入 `pnpm typecheck` 的 `tsconfig.tests.json` 类型检查，无白名单排除。
 
 ---
 
@@ -307,7 +309,7 @@ Dashboard 的 `/api/debug/chat` 端点用于集成测试。调试对话会被标
 | `pnpm typecheck` | 类型检查（`tsc -b` 覆盖根工程 + 14 个子包、`tsconfig.tests.json` 覆盖 tests、frontend 独立工程） |
 | `pnpm lint` | ESLint 代码规范检查（含 `frontend/src`） |
 | `pnpm dev` | 启动开发服务器（`tsx watch`） |
-| `pnpm test` | 运行核心测试套件（21 个测试） |
+| `pnpm test` | 运行核心测试套件（23 个测试） |
 | `pnpm frontend:install` | 安装前端依赖（独立 lockfile） |
 | `pnpm frontend:dev` | 启动前端 Vite 开发服务器 |
 | `pnpm frontend:build` | 构建前端生产版本 |

@@ -252,8 +252,17 @@ export class WeixinOCAdapter extends PlatformAdapter {
   private token: string | null = null;
   private accountId: string | null = null;
   private syncBuf: string = "";
+  /**
+   * Per-user `context_token` used for proactive sends. Bounded to
+   * {@link MAX_CONTEXT_TOKENS} entries with LRU eviction: one entry is added
+   * per distinct user ever seen, and the map was previously never evicted,
+   * so a long-running bot accumulated memory without bound. Tokens are not
+   * persisted (they are re-established when the user next messages), so
+   * eviction only affects users who have been idle the longest.
+   */
   private contextTokens: Map<string, string> = new Map();
   private contextTokensDirty: boolean = false;
+  private static readonly MAX_CONTEXT_TOKENS = 5000;
 
   // Login state
   private loginSession: LoginSession | null = null;
@@ -585,8 +594,16 @@ export class WeixinOCAdapter extends PlatformAdapter {
     if (contextToken) {
       const prev = this.contextTokens.get(fromUserId);
       if (prev !== contextToken) {
-        this.contextTokens.set(fromUserId, contextToken);
         this.contextTokensDirty = true;
+      }
+      // Delete + set moves the key to the end, refreshing its LRU position.
+      this.contextTokens.delete(fromUserId);
+      this.contextTokens.set(fromUserId, contextToken);
+      // Evict least-recently-used entries once over the cap.
+      while (this.contextTokens.size > WeixinOCAdapter.MAX_CONTEXT_TOKENS) {
+        const oldest = this.contextTokens.keys().next().value;
+        if (oldest === undefined) break;
+        this.contextTokens.delete(oldest);
       }
     }
 

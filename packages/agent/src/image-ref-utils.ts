@@ -4,7 +4,7 @@
  */
 
 import { existsSync } from "fs";
-import { resolve, extname, relative } from "path";
+import { resolve, extname, relative, isAbsolute } from "path";
 import { fileURLToPath } from "url";
 import { tmpdir } from "os";
 
@@ -59,7 +59,13 @@ function isPathWithinRoots(filePath: string, roots: readonly string[]): boolean 
     for (const root of roots) {
       const rootPath = resolve(root);
       const rel = relative(rootPath, candidate);
-      if (!rel.startsWith("..") && !rel.startsWith("/")) return true;
+      // `isAbsolute(rel)` catches the Windows cross-drive case: on a different
+      // drive `relative("C:\\root", "D:\\evil")` returns the absolute
+      // `D:\\evil`, which neither starts with ".." nor "/" and would otherwise
+      // be misclassified as "inside root". Mirrors sandbox.ts's containment
+      // check.
+      if (isAbsolute(rel)) continue;
+      if (!rel.startsWith("..") && !rel.startsWith("/") && !rel.startsWith("\\")) return true;
     }
   } catch { /* ignore */ }
   return false;

@@ -7,4 +7,7 @@ export type { NotGiven } from "./sentinel.js";
 export { TraceSpan, setTraceEnabled, isTraceEnabled } from "./trace.js";
 export { compressImage, convertAudioFormat, convertAudioToOpus, convertAudioToWav, convertVideoFormat, ensureWav, extractVideoCover, getMediaDuration, IMAGE_COMPRESS_DEFAULT_MAX_SIZE, IMAGE_COMPRESS_DEFAULT_MIN_FILE_SIZE_MB, IMAGE_COMPRESS_DEFAULT_OPTIMIZE, IMAGE_COMPRESS_DEFAULT_QUALITY } from "./media.js";
 export { getProxyAgent, normalizeProxyUrl } from "./proxy-agent.js";
+export { deriveKey, encryptSecret, decryptSecret, loadEncryptionKey } from "./secret-crypto.js";
+export { assertSafeUrl, normalizeIpLiteral, safeFetch, ALLOWED_SCHEMES, DEFAULT_MAX_RESPONSE_BYTES, MAX_REDIRECTS } from "./ssrf-guard.js";
+export type { SafeFetchOptions } from "./ssrf-guard.js";
 

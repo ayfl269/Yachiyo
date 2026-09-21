@@ -84,6 +84,11 @@ export class JsonFileConversationStore extends ConversationStore {
     this.loadAll();
     this.loadAux();
     this.saveTimer = setInterval(() => this.flush(), 30_000);
+    // Don't keep the event loop alive for the flush timer. Every other timer in
+    // the codebase is unref'd (session-lock, follow-up, task-scheduler,
+    // rate-limit); without this, a store whose close() is skipped blocks
+    // shutdown for up to 30s.
+    this.saveTimer.unref?.();
   }
 
   private loadAll(): void {

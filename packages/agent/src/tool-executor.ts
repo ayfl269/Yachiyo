@@ -367,7 +367,7 @@ export abstract class BaseFunctionToolExecutor<TContext = unknown> {
  * silently misorder arguments. Passing the object lets the handler
  * destructure named fields explicitly and predictably.
  */
-function extractOrderedArgs(
+export function extractOrderedArgs(
   tool: FunctionTool,
   toolArgs: Record<string, unknown>
 ): unknown[] {
@@ -941,34 +941,35 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
 
   /**
    * Extract image URLs from the current message event in the run context.
-   * Walks the context's event message chain, finds Image components,
-   * and resolves them to local file paths.
    *
-   * This default implementation looks for a `messageImages` array on the context.
-   * Framework-specific subclasses should override this to extract from their
-   * actual message event structure.
+   * When invoked from the pipeline, the wrapper's `context` IS the MessageEvent
+   * and the images live on `context.messageObj.components` (filtered to
+   * `type === "Image"`). The previous implementation looked for
+   * `ctx.event.message_obj.message`, neither of which exists on a real event,
+   * so it always returned `[]` and message-attached images were silently
+   * dropped from handoffs.
+   *
+   * `@yachiyo/agent` deliberately does not depend on `@yachiyo/message`, so
+   * the event is inspected structurally.
    */
   protected collectImageUrlsFromMessage(
     runContext: ContextWrapper<TContext>
   ): string[] {
-    const ctx = runContext.context as Record<string, unknown>;
-    const event = ctx.event as Record<string, unknown> | undefined;
-    if (!event) return [];
+    const ctx = runContext.context as Record<string, unknown> | null | undefined;
+    if (!ctx) return [];
 
-    // Try to get image URLs from message_obj.message Image components
-    const messageObj = event.message_obj as Record<string, unknown> | undefined;
-    const message = messageObj?.message;
-    if (!Array.isArray(message)) return [];
+    const components = (ctx.messageObj as { components?: unknown } | undefined)?.components;
+    if (!Array.isArray(components)) return [];
 
     const urls: string[] = [];
-    for (const component of message) {
+    for (const component of components) {
       if (typeof component !== "object" || component == null) continue;
       const comp = component as Record<string, unknown>;
-      // Check for Image-like component with url or file property
-      if (comp.url && typeof comp.url === "string") {
-        urls.push(comp.url);
-      } else if (comp.file && typeof comp.file === "string") {
-        urls.push(comp.file);
+      if (comp.type !== "Image") continue;
+      // Prefer the remote URL, then the platform file id / local path.
+      const candidate = comp.url ?? comp.file ?? comp.path;
+      if (typeof candidate === "string" && candidate) {
+        urls.push(candidate);
       }
     }
     return urls;

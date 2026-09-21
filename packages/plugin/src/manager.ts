@@ -58,6 +58,13 @@ export class PluginManager {
   }
 
   registerStar(metadata: StarMetadata): void {
+    // Dedupe by modulePath, mirroring restoreFromStore(). Blindly pushing
+    // produced duplicate entries in getAllStars() (and repeated activation
+    // toggles) when a plugin was registered more than once, e.g. on hot reload.
+    if (this.starMap.has(metadata.modulePath)) {
+      const idx = this.starRegistry.findIndex(s => s.modulePath === metadata.modulePath);
+      if (idx >= 0) this.starRegistry.splice(idx, 1);
+    }
     this.starRegistry.push(metadata);
     this.starMap.set(metadata.modulePath, metadata);
     this.sqliteStore?.saveStar(metadata);

@@ -35,12 +35,19 @@ export class SessionLockManager {
     release: () => void;
     acquiredAt: number;
     ttlMs: number;
-    watchdog: ReturnType<typeof setInterval>;
     /** Unique per-acquisition identity used to validate release calls. */
     token: object;
   }> = new Map();
   private defaultTtlMs: number;
   private watchdogIntervalMs: number;
+  /**
+   * Single shared sweep timer for all locks. A per-acquisition `setInterval`
+   * created one timer per active lock; with many concurrent sessions that was
+   * O(active locks) timers churning. The sweep is started lazily on first
+   * acquisition and stopped when the last lock is released, and is unref'd so
+   * it never keeps the process alive.
+   */
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options?: { defaultTtlMs?: number; watchdogIntervalMs?: number }) {
     this.defaultTtlMs = options?.defaultTtlMs ?? 5 * 60 * 1000; // 5 minutes
@@ -59,21 +66,8 @@ export class SessionLockManager {
     const ttlMs = this.defaultTtlMs;
     const token: object = {};
 
-    // Per-lock watchdog: periodically check if the lock has exceeded its
-    // TTL and force-release it if so. This handles crashes/forgotten releases.
-    // The token check ensures the watchdog only forces out the acquisition
-    // it was created for (defensive — the entry is cleared in forceRelease).
-    const watchdog = setInterval(() => {
-      const entry = this.locks.get(umo);
-      if (entry && entry.token === token && Date.now() - entry.acquiredAt > entry.ttlMs) {
-        console.warn(`[SessionLockManager] Lock '${umo}' exceeded TTL (${entry.ttlMs}ms), force-releasing.`);
-        this.forceRelease(umo, token);
-      }
-    }, this.watchdogIntervalMs);
-    // Don't keep the event loop alive just for the watchdog.
-    watchdog.unref();
-
-    this.locks.set(umo, { promise, release, acquiredAt, ttlMs, watchdog, token });
+    this.locks.set(umo, { promise, release, acquiredAt, ttlMs, token });
+    this.ensureSweepTimer();
 
     // Identity-bound release: only removes the entry if this acquisition
     // still owns the lock. A stale holder's release is a no-op (its own
@@ -129,8 +123,33 @@ export class SessionLockManager {
       );
       return;
     }
-    clearInterval(entry.watchdog);
     this.locks.delete(umo);
     entry.release();
+    // Stop the sweep once no locks remain; it restarts on the next acquisition.
+    if (this.locks.size === 0 && this.sweepTimer) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = null;
+    }
+  }
+
+  /**
+   * Start the shared TTL sweep timer if it is not already running. Each tick
+   * force-releases every lock whose TTL has elapsed. The token check inside
+   * {@link forceRelease} ensures a lock re-acquired during the sweep is not
+   * accidentally dropped.
+   */
+  private ensureSweepTimer(): void {
+    if (this.sweepTimer) return;
+    this.sweepTimer = setInterval(() => {
+      const now = Date.now();
+      for (const [umo, entry] of this.locks) {
+        if (now - entry.acquiredAt > entry.ttlMs) {
+          console.warn(`[SessionLockManager] Lock '${umo}' exceeded TTL (${entry.ttlMs}ms), force-releasing.`);
+          this.forceRelease(umo, entry.token);
+        }
+      }
+    }, this.watchdogIntervalMs);
+    // Don't keep the event loop alive just for the watchdog.
+    this.sweepTimer.unref();
   }
 }

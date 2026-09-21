@@ -958,8 +958,13 @@ function decryptQQOfficialSecret(encryptedSecret: string, bindKey: string): stri
       decipher.final()
     ]);
     return decrypted.toString("utf8");
-  } catch (exc: any) {
-    throw new Error(`QQ 机器人凭证解密失败: ${exc.message}`);
+  } catch (exc: unknown) {
+    // Preserve the real failure cause: a thrown non-Error previously rendered
+    // as "undefined" via `exc.message`.
+    throw new Error(
+      `QQ 机器人凭证解密失败: ${exc instanceof Error ? exc.message : String(exc)}`,
+      { cause: exc },
+    );
   }
 }
 
@@ -984,7 +989,15 @@ export class QQOfficialAdapter extends PlatformAdapter {
   private sessionId: string | null = null;
   private lastSeq: number | null = null;
   private reconnectAttempts: number = 0;
-  private maxReconnectAttempts: number = 10;
+  /**
+   * Number of consecutive failed reconnect attempts after which the backoff is
+   * clamped to {@link MAX_RECONNECT_DELAY_MS}. This is a backoff cap, NOT a
+   * give-up threshold: the adapter keeps retrying indefinitely (like the
+   * OneBot11 and WeChat adapters), so it recovers from a long QQ-side outage
+   * without a manual restart.
+   */
+  private static readonly MAX_BACKOFF_ATTEMPTS: number = 6;
+  private static readonly MAX_RECONNECT_DELAY_MS: number = 60000;
   private msgSeqCounter: number = 0;
   // #55: 心跳 ACK 超时检测 —— 记录最近一次收到 HEARTBEAT_ACK（或服务端心跳
   // 请求）的时间；TCP 半开时 ACK 不会到来，超过 N 个心跳间隔即判定假活，
@@ -1787,15 +1800,16 @@ export class QQOfficialAdapter extends PlatformAdapter {
 
   private scheduleReconnect(): void {
     if (this._status !== "running") return;
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error(`[QQOfficial] Max reconnect attempts (${this.maxReconnectAttempts}) reached, giving up`);
-      this._status = "error";
-      return;
-    }
 
-    // Exponential backoff: 1s, 2s, 4s, 8s, ... up to 60s
+    // Exponential backoff: 1s, 2s, 4s, 8s, ... capped at 60s. Unlike before,
+    // exhausting the attempt count does NOT set status to "error" and stop:
+    // that permanently disabled reconnection (every later call early-returns
+    // on `_status !== "running"`), so after a 10-failure QQ-side outage the
+    // adapter could never recover without a manual restart. Keep retrying at
+    // the capped interval forever, matching the other adapters.
     const baseDelay = 1000;
-    const delay = Math.min(baseDelay * Math.pow(2, this.reconnectAttempts), 60000);
+    const exponent = Math.min(this.reconnectAttempts, QQOfficialAdapter.MAX_BACKOFF_ATTEMPTS);
+    const delay = Math.min(baseDelay * Math.pow(2, exponent), QQOfficialAdapter.MAX_RECONNECT_DELAY_MS);
     this.reconnectAttempts++;
 
     // Reconnecting — no log here to avoid noise on routine reconnects
@@ -3422,7 +3436,12 @@ export class QQOfficialAdapter extends PlatformAdapter {
       throw new Error(`[QQOfficial] create_bind_task failed: ${response.status} ${response.statusText}`);
     }
 
-    const data = await response.json() as any;
+    const data = await response.json() as {
+      retcode?: number;
+      msg?: string;
+      message?: string;
+      data?: { task_id?: string };
+    };
     if (data.retcode !== undefined && Number(data.retcode) !== 0) {
       throw new Error(data.msg || data.message || "QQ 机器人绑定接口返回失败");
     }
@@ -3464,7 +3483,12 @@ export class QQOfficialAdapter extends PlatformAdapter {
       throw new Error(`[QQOfficial] poll_bind_result failed: ${response.status} ${response.statusText}`);
     }
 
-    const data = await response.json() as any;
+    const data = await response.json() as {
+      retcode?: number;
+      msg?: string;
+      message?: string;
+      data?: { status?: number; bot_appid?: string; bot_encrypt_secret?: string };
+    };
     if (data.retcode !== undefined && Number(data.retcode) !== 0) {
       throw new Error(data.msg || data.message || "QQ 机器人绑定结果查询失败");
     }

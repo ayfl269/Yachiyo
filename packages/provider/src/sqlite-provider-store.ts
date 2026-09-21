@@ -26,6 +26,10 @@ const SECRET_FIELDS = [
   "refreshToken", "refresh_token",
   "password", "passwd",
   "key",
+  // A proxy URL may embed credentials (user:pass@host) and is treated as a
+  // secret everywhere else (dashboard `maskSecret`, ProviderManager.redact).
+  // Omitting it here stored proxy credentials in plaintext at rest.
+  "proxy",
 ] as const;
 
 // ── Migrations ──

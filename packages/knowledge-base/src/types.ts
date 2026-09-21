@@ -7,8 +7,16 @@ export interface KnowledgeBase {
   rerankProviderId: string | null;
   chunkSize: number;
   chunkOverlap: number;
+  /** Number of dense (vector) candidates retrieved before rerank. */
   topKDense: number;
+  /**
+   * @reserved Number of sparse (keyword/BM25) candidates. Sparse retrieval is
+   * NOT implemented yet — the store has no FTS index and `KBHelper.search`
+   * only performs dense vector search. This value is persisted and surfaced in
+   * the dashboard but has no effect until hybrid retrieval is added.
+   */
   topKSparse: number;
+  /** Number of final results returned after fusion/rerank. */
   topMFinal: number;
 }
 

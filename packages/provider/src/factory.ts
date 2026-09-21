@@ -67,7 +67,7 @@ export function createEmbeddingProvider(type: EmbeddingProviderType, config: Emb
 
 // ─── Rerank Provider Factory ────────────────────────────────────────────────
 
-export type RerankProviderType = "cohere" | "jina" | "voyage" | "generic";
+export type RerankProviderType = "cohere" | "jina" | "voyage" | "siliconflow" | "generic";
 
 export type RerankProviderConfig = GenericRerankProviderConfig;
 
@@ -129,6 +129,9 @@ registerEmbeddingFactory("gemini_embedding", (config) => new GeminiEmbeddingProv
 registerRerankFactory("cohere", (config) => new GenericRerankProvider(config));
 registerRerankFactory("jina", (config) => new GenericRerankProvider(config));
 registerRerankFactory("voyage", (config) => new GenericRerankProvider(config));
+// PRESET_RERANK_CONFIGS.siliconflow exists, so the type must be resolvable or
+// selecting the preset throws "Unknown rerank provider type".
+registerRerankFactory("siliconflow", (config) => new GenericRerankProvider(config));
 registerRerankFactory("generic", (config) => new GenericRerankProvider(config));
 
 // ─── TTS Provider Factory ────────────────────────────────────────────────────

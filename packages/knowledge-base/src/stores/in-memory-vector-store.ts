@@ -42,6 +42,7 @@ export class InMemoryVectorStore extends VectorStore {
       docName: string;
       index: number;
       kbId: string;
+      url?: string | null;
     }>,
   ): Promise<void> {
     for (const item of items) {

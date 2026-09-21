@@ -127,11 +127,13 @@ export interface ContextWrapper<TContext = unknown> {
   _agentName?: string;
   /**
    * Identity used as the {@link import("./coordination.js").FileLockManager}
-   * holder for file operations in this run. Unique per handoff invocation so
-   * two concurrent invocations of the same sub-agent do not share a lock
-   * holder (which would defeat write exclusion and let one invocation release
-   * the other's locks). Undefined for the main agent, which is treated as the
-   * singleton `"__main__"` holder.
+   * holder for file operations in this run. Unique per run: the main agent
+   * gets `main#<umo>#<uuid>` (set by `buildMainAgent`) and each handoff
+   * invocation gets `<agentName>#<uuid>` (set by the tool executor). Without a
+   * per-run identity, concurrent sessions shared the singleton `"__main__"`
+   * holder and `FileLockManager.canGrant`'s same-holder re-entrancy let them
+   * both take the "exclusive" write lock. When undefined (e.g. standalone tool
+   * usage in tests), tools fall back to the `"__main__"` holder.
    */
   _lockHolderId?: string;
 }
@@ -164,6 +166,62 @@ export function createContextWrapper<TContext = unknown>(
 
 // No-context type alias
 export type NoContext = ContextWrapper<null>;
+
+/**
+ * Labels for which the "could not resolve an owner" warning has already been
+ * emitted, so a context-shape refactor is logged once per tool family rather
+ * than on every call.
+ */
+const ownerResolutionWarnedLabels = new Set<string>();
+
+/**
+ * Resolve the session owner (UMO) from a raw tool context.
+ *
+ * When invoked from the pipeline, the wrapper's `context` IS the MessageEvent
+ * (it exposes `unifiedMsgOrigin` directly); standalone/test callers may instead
+ * pass a `{ event: { unifiedMsgOrigin } }` shape or a non-event object such as
+ * `createContextWrapper(null)`. Returns `undefined` when no owner can be
+ * determined.
+ *
+ * A missing owner is legitimate for standalone callers. But if a `context`
+ * object IS present yet exposes no recognizable `unifiedMsgOrigin`, that means
+ * an unknown context shape — warn once (per `warnLabel`) so a future context
+ * refactor that silently disables per-session isolation is visible in logs.
+ */
+export function resolveToolContextOwner(
+  ctx: unknown,
+  options?: { warnLabel?: string; warnOnUnknownContext?: boolean },
+): string | undefined {
+  const wrapper = ctx as {
+    context?: { unifiedMsgOrigin?: string; event?: { unifiedMsgOrigin?: string } };
+  } | undefined;
+  const context = wrapper?.context;
+
+  if (typeof context?.unifiedMsgOrigin === "string" && context.unifiedMsgOrigin) {
+    return context.unifiedMsgOrigin;
+  }
+  const nested = context?.event?.unifiedMsgOrigin;
+  if (typeof nested === "string" && nested) {
+    return nested;
+  }
+
+  if (
+    options?.warnOnUnknownContext !== false &&
+    context != null &&
+    typeof context === "object"
+  ) {
+    const label = options?.warnLabel ?? "tool";
+    if (!ownerResolutionWarnedLabels.has(label)) {
+      ownerResolutionWarnedLabels.add(label);
+      console.warn(
+        `[${label}] Could not resolve a session owner from the tool context; ` +
+        `per-session isolation is disabled for this tool. ` +
+        `This likely means the tool context shape changed — update resolveToolContextOwner.`,
+      );
+    }
+  }
+  return undefined;
+}
 
 // Agent response data
 export interface AgentResponseData {

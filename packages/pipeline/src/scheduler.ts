@@ -117,8 +117,14 @@ export class PipelineScheduler {
           // re-executed on subsequent yields — see repeat guard above).
           genResult = await result.next();
         }
-        // Generator is done (or stopped); skip remaining stages since
-        // they were already executed inside the recursive call above.
+        // If the generator completed without ever yielding (e.g. a plugin
+        // stage that does work and returns silently), the recursive
+        // processStages(i + 1) above never ran — so all downstream stages
+        // (Decorate, Respond) would be skipped. Run them now. When the
+        // generator DID yield, downstream already ran and must not repeat.
+        if (!downstreamRan && !event.isStopped()) {
+          await this.processStages(event, i + 1);
+        }
         break;
       } else {
         await result;

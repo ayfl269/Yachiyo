@@ -11,6 +11,7 @@ import type { Message } from "@yachiyo/agent/message.js";
 import type { Provider } from "@yachiyo/provider/provider.js";
 import type { ProviderType } from "@yachiyo/provider/types.js";
 import { createContextWrapper } from "@yachiyo/agent/types.js";
+import { extractOrderedArgs } from "@yachiyo/agent/tool-executor.js";
 
 export class PluginContext {
   private providerManager: ProviderManager;
@@ -170,13 +171,27 @@ export class PluginContext {
         let toolResult: string;
         try {
           const tool = toolSet.getTool(toolName);
-          if (tool && tool.call) {
-            const parsedArgs = typeof toolArgs === "string" ? this.safeParseJson(toolArgs) : toolArgs;
-            const ctx = createContextWrapper(null);
-            const result = await tool.call(ctx, parsedArgs);
-            toolResult = typeof result === "string" ? result : JSON.stringify(result);
-          } else {
+          if (!tool) {
             toolResult = JSON.stringify({ error: `Tool '${toolName}' not found` });
+          } else {
+            const parsedArgs = typeof toolArgs === "string" ? this.safeParseJson(toolArgs) : toolArgs;
+            const argObj = (parsedArgs && typeof parsedArgs === "object")
+              ? (parsedArgs as Record<string, unknown>)
+              : {};
+            const ctx = createContextWrapper(null);
+            // Prefer the `handler` (positional dispatch in schema order), the
+            // same way FunctionToolExecutor.executeLocal does. `createFunctionTool`
+            // always installs a throwing default `call`, so testing `tool.call`
+            // alone (as before) made every handler-based tool fail with
+            // "FunctionTool.call() must be implemented..." and silently degraded
+            // this loop to a no-tool chat.
+            let result: unknown;
+            if (tool.handler) {
+              result = await tool.handler(ctx, ...extractOrderedArgs(tool, argObj));
+            } else {
+              result = await tool.call(ctx, argObj);
+            }
+            toolResult = typeof result === "string" ? result : JSON.stringify(result);
           }
         } catch (err: unknown) {
           toolResult = JSON.stringify({ error: err instanceof Error ? err.message : String(err) });

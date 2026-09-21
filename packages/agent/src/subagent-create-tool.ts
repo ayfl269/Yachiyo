@@ -7,6 +7,7 @@ import { createFunctionTool, type FunctionTool } from "./tool.js";
 import { createAgent, type Agent } from "./agent.js";
 import { createHandoffTool, type HandoffTool } from "./handoff.js";
 import type { ContextWrapper, CallToolResult } from "./types.js";
+import { resolveToolContextOwner } from "./types.js";
 
 // ── Context type ──
 
@@ -24,11 +25,18 @@ export interface SubAgentCreateToolContext {
  * discovered by the tool executor and tool manager.
  */
 export class DynamicSubAgentRegistry {
-  private agents: Map<string, { agent: Agent; handoff: HandoffTool }> = new Map();
+  /**
+   * Registered sub-agents, keyed by name. Each entry records the owning session
+   * (UMO) so one session cannot enumerate or delete another session's dynamic
+   * sub-agents. `owner === undefined` means "unowned" (standalone/test callers,
+   * or callers whose context carried no UMO) and is visible to owner-less calls
+   * only, mirroring interactive-shell session scoping.
+   */
+  private agents: Map<string, { agent: Agent; handoff: HandoffTool; owner?: string }> = new Map();
 
   /** Register a dynamically created sub-agent and its handoff tool. */
-  register(agent: Agent, handoff: HandoffTool): void {
-    this.agents.set(agent.name, { agent, handoff });
+  register(agent: Agent, handoff: HandoffTool, owner?: string): void {
+    this.agents.set(agent.name, { agent, handoff, owner });
   }
 
   /** Unregister a sub-agent by name. */
@@ -41,24 +49,49 @@ export class DynamicSubAgentRegistry {
     return this.agents.get(name);
   }
 
-  /** Get all registered sub-agents. */
-  getAll(): { agent: Agent; handoff: HandoffTool }[] {
-    return [...this.agents.values()];
+  /** True when `owner` may operate on an entry (undefined owner = no filter). */
+  private ownedBy(entry: { owner?: string }, owner?: string): boolean {
+    if (owner === undefined) return true;
+    return entry.owner === owner;
   }
 
-  /** Get all handoff tools for registered sub-agents. */
-  getHandoffTools(): HandoffTool[] {
-    return [...this.agents.values()].map((entry) => entry.handoff);
+  /**
+   * Get all registered sub-agents, optionally scoped to an owning session.
+   * Passing `undefined` returns everything (standalone callers).
+   */
+  getAll(owner?: string): { agent: Agent; handoff: HandoffTool }[] {
+    return [...this.agents.values()].filter((e) => this.ownedBy(e, owner));
   }
 
-  /** Check if a sub-agent with the given name exists. */
-  has(name: string): boolean {
-    return this.agents.has(name);
+  /** Get all handoff tools for registered sub-agents (optionally scoped). */
+  getHandoffTools(owner?: string): HandoffTool[] {
+    return [...this.agents.values()].filter((e) => this.ownedBy(e, owner)).map((entry) => entry.handoff);
   }
 
-  /** List all registered sub-agent names. */
-  names(): string[] {
-    return [...this.agents.keys()];
+  /** Check if a sub-agent with the given name exists (optionally scoped). */
+  has(name: string, owner?: string): boolean {
+    const entry = this.agents.get(name);
+    if (!entry) return false;
+    return this.ownedBy(entry, owner);
+  }
+
+  /** List registered sub-agent names (optionally scoped). */
+  names(owner?: string): string[] {
+    return [...this.agents.entries()]
+      .filter(([, e]) => this.ownedBy(e, owner))
+      .map(([name]) => name);
+  }
+
+  /**
+   * Unregister a sub-agent only when it is owned by `owner` (or `owner` is
+   * undefined). Returns false if the name is absent OR owned by someone else,
+   * so a cross-session delete is rejected.
+   */
+  unregisterOwned(name: string, owner?: string): boolean {
+    const entry = this.agents.get(name);
+    if (!entry) return false;
+    if (!this.ownedBy(entry, owner)) return false;
+    return this.agents.delete(name);
   }
 
   /** Clear all registered sub-agents. */
@@ -134,6 +167,8 @@ export function createSubAgentCreateTool(_workspaceRoot?: string): FunctionTool<
         return { content: [{ type: "text", text: `error: Sub-agent instructions too long (${instructions.length} chars, max ${MAX_INSTRUCTIONS_LENGTH}).` }], isError: true };
       }
 
+      const owner = resolveToolContextOwner(_ctx, { warnLabel: "SubAgentTool" });
+
       // Enforce maximum sub-agent count to prevent resource exhaustion
       if (dynamicSubAgentRegistry.getAll().length >= MAX_DYNAMIC_SUBAGENTS) {
         return { content: [{ type: "text", text: `error: Maximum number of dynamic sub-agents (${MAX_DYNAMIC_SUBAGENTS}) reached. Delete unused sub-agents before creating new ones.` }], isError: true };
@@ -157,8 +192,9 @@ export function createSubAgentCreateTool(_workspaceRoot?: string): FunctionTool<
       const handoffDescription = description ?? instructions.slice(0, 120).trim();
       const handoff = createHandoffTool(agent, handoffDescription);
 
-      // Register in the global registry
-      dynamicSubAgentRegistry.register(agent, handoff);
+      // Register in the global registry, tagged with the owning session so
+      // other sessions cannot enumerate or delete it.
+      dynamicSubAgentRegistry.register(agent, handoff, owner);
 
       // Also register with the FunctionToolManager and ToolSet if available.
       // `handoff` is an already-built FunctionTool instance; addFunc() is
@@ -205,7 +241,8 @@ export function createListSubAgentsTool(): FunctionTool<SubAgentCreateToolContex
     },
     active: true,
     handler: async (_ctx: unknown): Promise<CallToolResult> => {
-      const entries = dynamicSubAgentRegistry.getAll();
+      const owner = resolveToolContextOwner(_ctx, { warnLabel: "SubAgentTool" });
+      const entries = dynamicSubAgentRegistry.getAll(owner);
 
       if (entries.length === 0) {
         return { content: [{ type: "text", text: "No dynamic sub-agents have been created yet. Use create_subagent to create one." }] };
@@ -255,12 +292,17 @@ export function createDeleteSubAgentTool(): FunctionTool<SubAgentCreateToolConte
         return { content: [{ type: "text", text: "error: Sub-agent name is required." }], isError: true };
       }
 
+      const owner = resolveToolContextOwner(_ctx, { warnLabel: "SubAgentTool" });
+
       if (!dynamicSubAgentRegistry.has(name)) {
         return { content: [{ type: "text", text: `error: Sub-agent "${name}" not found.` }], isError: true };
       }
 
-      // Remove from registry
-      dynamicSubAgentRegistry.unregister(name);
+      // Remove from registry, but only if this session owns it. A cross-session
+      // delete must not remove another session's sub-agent.
+      if (!dynamicSubAgentRegistry.unregisterOwned(name, owner)) {
+        return { content: [{ type: "text", text: `error: Sub-agent "${name}" belongs to another session.` }], isError: true };
+      }
 
       // Also remove from FunctionToolManager and ToolSet if available
       const wrapper = _ctx as ContextWrapper<SubAgentCreateToolContext> | undefined;

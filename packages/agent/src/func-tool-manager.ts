@@ -38,6 +38,14 @@ export class FunctionToolManager {
   /** Provider instances for lookup by ID */
   providers: Provider[] = [];
   /**
+   * Optional late-bound provider resolver. `providers` is never populated by
+   * the agent package itself (the ProviderManager owns the instances), so
+   * without this hook {@link getProviderById} always returned null and the
+   * `llmCompressProviderId` / sub-agent `provider_id` configuration knobs were
+   * silently inert. Bootstrap wires this to the ProviderManager.
+   */
+  private providerLookup?: (providerId: string) => Provider | null;
+  /**
    * Name → tools-with-that-name index. Each array holds tools in insertion
    * order, mirroring `funcList`. Used by {@link getFunc} to avoid O(N)
    * scans on every tool dispatch — important when MCP servers register
@@ -63,8 +71,19 @@ export class FunctionToolManager {
     return this.funcList.length === 0;
   }
 
+  /**
+   * Wire a resolver used by {@link getProviderById}. Set once at bootstrap to
+   * the ProviderManager's ID lookup so compression providers and sub-agent
+   * providers actually resolve.
+   */
+  setProviderLookup(lookup: (providerId: string) => Provider | null): void {
+    this.providerLookup = lookup;
+  }
+
   getProviderById(providerId: string): Provider | null {
-    return this.providers.find(p => p.providerConfig?.id === providerId) ?? null;
+    const fromList = this.providers.find(p => p.providerConfig?.id === providerId);
+    if (fromList) return fromList;
+    return this.providerLookup?.(providerId) ?? null;
   }
 
   // ---- Plugin Tool Management ----

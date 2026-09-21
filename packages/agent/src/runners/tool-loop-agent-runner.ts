@@ -1057,7 +1057,10 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
         content: parts.length > 0 ? parts : undefined,
         tool_calls: llmResp.toolsCallName.map((name, i) => ({
           type: "function" as const,
-          id: llmResp.toolsCallIds![i],
+          // Synthesize an id when the provider omitted one. A non-null assertion
+          // here threw mid-run for gateways that return tool names without ids;
+          // the MCP path already falls back to `call_${i}`.
+          id: llmResp.toolsCallIds?.[i] ?? `call_${i}`,
           function: {
             name,
             arguments: JSON.stringify(llmResp.toolsCallArgs?.[i] ?? {}),
@@ -1705,13 +1708,13 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
     // state dependencies on previous tool calls in the same batch
     // (e.g. shell sessions, memory writes) and must remain serial.
     //
-    // Cancellation: if the for-loop breaks early (e.g. hard stop),
-    // any still-running pre-launched handoffs are abandoned. Their
-    // sub-context AbortController is independent of the foreground
-    // agent's, so they will run to completion in the background
-    // unless explicitly cancelled. This matches the existing
-    // behaviour for non-prelaunched tools that were already in
-    // flight when a hard stop fires.
+    // Cancellation: pre-launched handoffs are all awaited here (Promise.all)
+    // before the for-loop below runs, so by the time a hard stop breaks the
+    // loop they have already completed — there is nothing left to cancel. The
+    // cost is that a batch containing one loop-tripping tool still pays for
+    // every handoff in that batch; propagating cancellation into a handoff
+    // mid-flight would require restructuring the pre-launch to a streaming
+    // join, which is out of scope here.
     const handoffResults = await this.prelaunchHandoffs(req, llmResponse);
 
     // Index of the tool call that tripped the loop-detection hard limit, or -1
@@ -1719,11 +1722,18 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
     // for any remaining tool calls (see below).
     let hardStopAtIndex = -1;
     let hardStopReasonText = "";
+    // Index at which the tool set was found to be absent (e.g. the max-steps
+    // final step strips `funcTool`). The model may still emit tool calls in
+    // that step; without backfilling, the assistant message would record
+    // `tool_calls` with no matching results and the next request would 400.
+    let toolsDisabledAtIndex = -1;
 
     for (let i = 0; i < (llmResponse.toolsCallName?.length ?? 0); i++) {
       const funcToolName = llmResponse.toolsCallName![i];
       let funcToolArgs = llmResponse.toolsCallArgs?.[i] ?? {};
-      const funcToolId = llmResponse.toolsCallIds![i];
+      // Must match the id recorded on the assistant message above (which also
+      // synthesizes `call_${i}`), or the tool result won't pair with its call.
+      const funcToolId = llmResponse.toolsCallIds?.[i] ?? `call_${i}`;
 
       const toolResultBlocksStart = toolCallResultBlocks.length;
       const toolCallStreak = this.trackToolCallStreak(funcToolName);
@@ -1774,7 +1784,16 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
       );
 
       try {
-        if (!req.funcTool) return;
+        if (!req.funcTool) {
+          // Tools are unavailable for this step (e.g. the max-steps final
+          // step). Do NOT `return` — that would leave this and every later
+          // tool call without a result while the assistant message still
+          // records them, producing a dangling tool_use that the provider
+          // rejects on the next request. Break and let the backfill below
+          // emit a result for each skipped call.
+          toolsDisabledAtIndex = i;
+          break;
+        }
 
         let funcTool: FunctionTool | undefined;
         let availableTools: string[];
@@ -1910,19 +1929,30 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
       }
     }
 
-    // Backfill results for tool calls skipped by the hard-stop `break`. The
-    // assistant message below records ALL tool_calls from this LLM response, so
-    // every one must have a matching tool result or the next request fails
-    // validation (dangling tool_use). Emit a short "not executed" result.
+    // Backfill results for tool calls skipped by a `break`. The assistant
+    // message below records ALL tool_calls from this LLM response, so every one
+    // must have a matching tool result or the next request fails validation
+    // (dangling tool_use). Emit a short "not executed" result for each.
+    const allNames = llmResponse.toolsCallName ?? [];
+    const allIds = llmResponse.toolsCallIds ?? [];
+    const idAt = (i: number): string => allIds[i] ?? `call_${i}`;
     if (hardStopAtIndex >= 0) {
-      const allNames = llmResponse.toolsCallName ?? [];
-      const allIds = llmResponse.toolsCallIds ?? [];
       for (let i = hardStopAtIndex + 1; i < allNames.length; i++) {
         appendToolCallResult(
-          allIds[i],
+          idAt(i),
           `Tool "${allNames[i]}" was not executed: the loop-detection hard limit ` +
           `was triggered (${hardStopReasonText}). Tool calls are now disabled; ` +
           `summarize your findings and reply to the user.`
+        );
+      }
+    } else if (toolsDisabledAtIndex >= 0) {
+      // The loop broke before appending anything for this index, so start at
+      // `toolsDisabledAtIndex` itself (not +1).
+      for (let i = toolsDisabledAtIndex; i < allNames.length; i++) {
+        appendToolCallResult(
+          idAt(i),
+          `Tool "${allNames[i]}" was not executed: tool calls are disabled for ` +
+          `this step. Summarize your findings and reply to the user.`
         );
       }
     }

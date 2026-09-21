@@ -371,20 +371,47 @@ export class SqliteSchedulerTaskStore {
 
     const merged: SchedulerTask = { ...existing, ...updates, updatedAt: now, createdAt: existing.createdAt };
 
-    this.db.transaction(() => {
-      this.db.prepare(`
-        UPDATE scheduler_tasks SET
-          type = ?, title = ?, description = ?, status = ?, priority = ?,
-          scheduled_at = ?, recurrence = ?, goal = ?, plan = ?, current_step = ?,
-          umo = ?, session_id = ?, platform_id = ?, payload = ?,
-          last_fired_at = ?, next_fire_at = ?, updated_at = ?
-        WHERE id = ?
-      `).run(
-        merged.type, merged.title, merged.description, merged.status, merged.priority,
-        merged.scheduledAt, merged.recurrence, merged.goal, JSON.stringify(merged.plan),
-        merged.currentStep, merged.umo, merged.sessionId, merged.platformId, merged.payload,
-        merged.lastFiredAt, merged.nextFireAt, now, id,
-      );
+    // Only write the columns the caller actually supplied. The previous
+    // implementation rewrote every column from a stale read, so a concurrent
+    // `markFired`/`cancelTask` landing between the read and the write was
+    // silently reverted (resurrecting a completed/cancelled task). Restricting
+    // the SET clause leaves untouched columns (notably `status`,
+    // `last_fired_at`, `next_fire_at`) to whatever the current row holds.
+    const columnMap: Record<string, string> = {
+      type: "type",
+      title: "title",
+      description: "description",
+      status: "status",
+      priority: "priority",
+      scheduledAt: "scheduled_at",
+      recurrence: "recurrence",
+      goal: "goal",
+      plan: "plan",
+      currentStep: "current_step",
+      umo: "umo",
+      sessionId: "session_id",
+      platformId: "platform_id",
+      payload: "payload",
+      lastFiredAt: "last_fired_at",
+      nextFireAt: "next_fire_at",
+    };
+    const valueFor = (key: string): unknown =>
+      key === "plan" ? JSON.stringify(merged.plan) : (merged as unknown as Record<string, unknown>)[key];
+
+    const setClauses: string[] = [];
+    const params: unknown[] = [];
+    for (const [key, column] of Object.entries(columnMap)) {
+      if (updates[key as keyof typeof updates] === undefined) continue;
+      setClauses.push(`${column} = ?`);
+      params.push(valueFor(key));
+    }
+    setClauses.push("updated_at = ?");
+    params.push(now, id);
+
+    const changed = this.db.transaction(() => {
+      const info = this.db.prepare(
+        `UPDATE scheduler_tasks SET ${setClauses.join(", ")} WHERE id = ?`
+      ).run(...params);
 
       if (updates.tags !== undefined) {
         this.db.prepare("DELETE FROM scheduler_tags WHERE task_id = ?").run(id);
@@ -395,9 +422,11 @@ export class SqliteSchedulerTaskStore {
           insertTag.run(id, tag);
         }
       }
+
+      return info.changes > 0;
     })();
 
-    return true;
+    return changed;
   }
 
   count(options?: { type?: TaskType; status?: TaskStatus; umo?: string }): number {

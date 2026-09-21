@@ -70,6 +70,7 @@ import {
 import { OneBot11Adapter } from "@yachiyo/platform/implementations/onebot11-adapter.js";
 import { TaskScheduler } from "@yachiyo/pipeline/task-scheduler.js";
 import { ProviderType } from "@yachiyo/provider/types.js";
+import type { Provider } from "@yachiyo/provider/provider.js";
 import type { DashboardServer } from "@yachiyo/dashboard/server.js";
 
 export interface BootstrapOptions {
@@ -264,6 +265,12 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
 
   // 5.1 创建 FunctionToolManager 并注册所有内置工具
   const toolManager = new FunctionToolManager();
+  // 让工具层能按 ID 解析 Provider（压缩模型、子代理 provider_id 等）。
+  // FunctionToolManager 自身不持有 Provider 实例，必须由 ProviderManager 提供。
+  toolManager.setProviderLookup((providerId) => {
+    const found = providerManager.getProviderById(providerId);
+    return found && "textChat" in found ? (found as Provider) : null;
+  });
   const workspaceRoot = workspaceDir;
 
   // 注册 Web 工具 (web_fetch, web_search, http_request)

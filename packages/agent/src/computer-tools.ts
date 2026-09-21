@@ -962,8 +962,21 @@ function runCodeProcess(
       current = child;
 
       if (abortSignal) {
-        if (abortSignal.aborted) killProcessTree(child);
-        else abortSignal.addEventListener("abort", () => killAndFlag("abort"), { once: true });
+        if (abortSignal.aborted) {
+          killProcessTree(child);
+        } else {
+          // Named handler so it can be removed when this candidate fails and we
+          // fall back to the next launcher. The previous anonymous listener was
+          // never removed, so an abort could fire against a stale `current` and
+          // each fallback leaked a listener on the long-lived signal.
+          const onAbort = (): void => {
+            abortSignal.removeEventListener("abort", onAbort);
+            killAndFlag("abort");
+          };
+          abortSignal.addEventListener("abort", onAbort, { once: true });
+          child.once("error", () => abortSignal.removeEventListener("abort", onAbort));
+          child.once("close", () => abortSignal.removeEventListener("abort", onAbort));
+        }
       }
 
       child.stdout?.on("data", (data: Buffer) => { stdout += data.toString(); });

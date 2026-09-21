@@ -1646,10 +1646,23 @@ export class DashboardServer {
           return;
         }
 
-        const results = await this.processZipFiles(files);
-
-        for (const file of files) {
-          try { await unlink(file.tempPath); } catch { /* cleanup best effort */ }
+        let results;
+        try {
+          results = await this.processZipFiles(files);
+        } finally {
+          // Remove the per-file temp files AND their parent `skill-upload-*`
+          // directories. Deleting only the files (the previous behaviour) left
+          // an empty directory behind on every upload, and an aborted upload
+          // before this loop leaked the files too.
+          const tempDirs = new Set<string>();
+          for (const file of files) {
+            if (!file.tempPath) continue;
+            try { await unlink(file.tempPath); } catch { /* cleanup best effort */ }
+            tempDirs.add(dirname(file.tempPath));
+          }
+          for (const dir of tempDirs) {
+            try { await rm(dir, { recursive: true, force: true }); } catch { /* cleanup best effort */ }
+          }
         }
 
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -3023,8 +3036,9 @@ export class DashboardServer {
             }
             apiKey = source.key || apiKey;
             apiBase = source.api_base || apiBase;
-            if (!proxy && source.extra_config && (source.extra_config as any).proxy) {
-              proxy = String((source.extra_config as any).proxy || "");
+            const extraProxy = source.extra_config?.proxy;
+            if (!proxy && extraProxy) {
+              proxy = String(extraProxy);
             }
           }
         }
@@ -4305,26 +4319,34 @@ export class DashboardServer {
         // Push to event queue
         this.ctx.eventQueue.put(event);
 
-        // Wait for response with timeout
-        const timeout = setTimeout(() => { responseResolve?.(); }, 180000);
+        // Wait for response with timeout. `timeout` and `pollInterval` are
+        // declared before the try/finally so BOTH are always cleared even if
+        // `put`/the await path throws — previously they were only cleared after
+        // the await, so an error left the 100ms interval running until exit.
+        let timeout: ReturnType<typeof setTimeout> | null = null;
+        let pollInterval: ReturnType<typeof setInterval> | null = null;
+        try {
+          timeout = setTimeout(() => { responseResolve?.(); }, 180000);
 
-        // Poll for result
-        const pollInterval = setInterval(() => {
-          if (event.getResult()) {
-            const r = event.getResult();
-            if (r?.resultContentType === RCT.LLM_RESULT) {
-              const text = r.getPlainText();
-              if (text) responseText = text;
+          // Poll for result
+          pollInterval = setInterval(() => {
+            if (event.getResult()) {
+              const r = event.getResult();
+              if (r?.resultContentType === RCT.LLM_RESULT) {
+                const text = r.getPlainText();
+                if (text) responseText = text;
+              }
+              if (pollInterval) clearInterval(pollInterval);
+              if (timeout) clearTimeout(timeout);
+              responseResolve?.();
             }
-            clearInterval(pollInterval);
-            clearTimeout(timeout);
-            responseResolve?.();
-          }
-        }, 100);
+          }, 100);
 
-        await responsePromise;
-        clearInterval(pollInterval);
-        clearTimeout(timeout);
+          await responsePromise;
+        } finally {
+          if (pollInterval) clearInterval(pollInterval);
+          if (timeout) clearTimeout(timeout);
+        }
 
         res.writeHead(200);
         res.end(JSON.stringify({ response: responseText, session_id: sessionId, umo }));

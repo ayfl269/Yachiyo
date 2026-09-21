@@ -65,5 +65,10 @@
       "@yachiyo/t2i/*.js": ["./packages/t2i/src/*.ts"]
     }
   },
-  "include": ["tests/**/*.ts"]
+  // tests/**/*.ts is the suite; the dashboard `types/` ambient declarations are
+  // pulled in because a test imports `@yachiyo/dashboard/server.js`, which
+  // dynamically imports the optional `archiver` package. Its ambient module
+  // declaration lives under packages/dashboard/src/types and must be part of
+  // this project too, otherwise TS2307 "Cannot find module 'archiver'".
+  "include": ["tests/**/*.ts", "packages/dashboard/src/types/**/*.d.ts"]
 }
