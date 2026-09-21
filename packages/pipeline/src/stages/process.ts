@@ -12,10 +12,34 @@ import type { ProviderStat } from "@yachiyo/conversation/store.js";
 import { registerActiveRunner, unregisterActiveRunner } from "../follow-up.js";
 import { buildSkillsPrompt } from "@yachiyo/skill/manager.js";
 import { EstimateTokenCounter } from "@yachiyo/agent/context/token-counter.js";
+import type { Message } from "@yachiyo/common/llm-message.js";
 
 /** Build a typed PlainComponent without duplicating the text or using `as any`. */
 function plainText(text: string): PlainComponent {
   return { type: ComponentType.Plain, text, toDict: () => ({ type: "text", data: { text } }) };
+}
+
+/**
+ * Remove reasoning/thinking content parts from a message before it is written
+ * to the conversation transcript.
+ *
+ * Thinking is provider-internal: it must not be part of the persisted record
+ * because (a) replaying it on every later turn wastes tokens and bloats
+ * storage / background memory indexing, and (b) its signature can go stale
+ * (Anthropic thinking signature, Gemini thoughtSignature), so a persisted
+ * signature may be rejected by the provider on replay. The visible text is
+ * preserved unchanged.
+ *
+ * Returns the content without `think` parts: the original string for
+ * string-only content, the filtered array for part arrays, or `undefined` when
+ * nothing but thinking remains (the caller then drops the message). Non-array,
+ * non-string content (checkpoint data) is returned as-is.
+ */
+function stripThinkParts(content: Message["content"]): Message["content"] {
+  if (typeof content === "string" || content === undefined) return content;
+  if (!Array.isArray(content)) return content;
+  const filtered = content.filter((part) => part.type !== "think");
+  return filtered.length > 0 ? filtered : undefined;
 }
 
 @registerStage
@@ -613,7 +637,14 @@ export class ProcessStage extends PipelineStage {
    * message. That gives every message exactly one writer, which is what makes
    * append-only writes idempotent without needing per-message ids.
    *
-   * Filtering is unchanged: tool-call mechanics are not conversation content.
+   * Filtering: tool-call mechanics and reasoning/thinking content are not
+   * conversation content. `think` parts are stripped before persisting — see
+   * {@link stripThinkParts} — because they are provider-internal:
+   *   - replaying them every later turn wastes tokens and storage/memory, and
+   *   - their signatures (Anthropic thinking signature, Gemini thoughtSignature)
+   *     can go stale, so replaying a persisted signature can make the provider
+   *     reject the request.
+   * The visible text of each turn is preserved unchanged.
    */
   private async saveRunHistory(
     agentRunner: ToolLoopAgentRunner,
@@ -635,15 +666,19 @@ export class ProcessStage extends PipelineStage {
       if (msg.role === "system" || msg.role === "_checkpoint") continue;
       if (msg.role === "tool") continue;
       if (msg._noSave) continue;
-      // Skip assistant messages that are pure tool-call requests (no visible
-      // text) — they belong to the tool loop, not the conversation record.
-      const hasText = typeof msg.content === "string"
-        ? msg.content.trim().length > 0
-        : Array.isArray(msg.content) && msg.content.length > 0;
-      if (msg.role === "assistant" && !hasText) continue;
+
+      // Strip reasoning parts and decide whether any *visible* content remains.
+      // A message whose only content is thinking (a tool-loop intermediate
+      // step, or a reasoning-only turn) has no conversation value and must not
+      // be persisted as a standalone assistant entry.
+      const content = stripThinkParts(msg.content);
+      const hasVisibleText = typeof content === "string"
+        ? content.trim().length > 0
+        : Array.isArray(content) && content.length > 0;
+      if (msg.role === "assistant" && !hasVisibleText) continue;
 
       const entry: Record<string, unknown> = { role: msg.role };
-      if (msg.content !== undefined) entry.content = msg.content;
+      if (content !== undefined) entry.content = content;
       produced.push(entry);
     }
 

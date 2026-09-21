@@ -217,6 +217,57 @@ async function main() {
     assert(Array.isArray(parts) && parts[0]?.type === "text" && parts[0]?.text === "多模态回复", "ContentPart 数组内容原样保留");
   }
 
+  // ── 思考内容（think part）不得进入历史 ──
+  console.log("\n=== 思考内容不得进入历史 ===");
+  {
+    const { stage, updates } = await createStage();
+    const messages: Message[] = [
+      // 纯思考的中间态（tool-loop 步骤）→ 整条跳过
+      msg("assistant", [{ type: "think", think: "中间推理", encrypted: "SIG-STEP" }], {
+        tool_calls: toolCall("call_t", "t"),
+      }),
+      msg("tool", "r", { tool_call_id: "call_t" }),
+      // 思考 + 可见文本 → 仅保留可见文本
+      msg("assistant", [
+        { type: "think", think: "最终推理", encrypted: "SIG-FINAL" },
+        { type: "text", text: "可见回复" },
+      ]),
+      // 纯思考且无工具调用 → 整条跳过
+      msg("assistant", [{ type: "think", think: "只有思考", encrypted: "SIG-ONLY" }]),
+    ];
+    await saveHistory(stage, createRunner(messages));
+
+    assert(updates.length === 1, "存在可见内容时触发一次写入");
+    const history = updates[0].history;
+    assert(history.length === 1, `仅保留 1 条含可见文本的 assistant（实际=${history.length}）`);
+    const json = JSON.stringify(history);
+    assert(!json.includes("think"), "历史中不含 think 部分");
+    assert(!json.includes("中间推理"), "中间步骤的思考未落库");
+    assert(!json.includes("最终推理"), "最终回复的思考未落库");
+    assert(!json.includes("SIG-FINAL") && !json.includes("SIG-STEP") && !json.includes("SIG-ONLY"), "思考签名未落库");
+    const parts = history[0].content as Array<{ type: string; text?: string }>;
+    assert(
+      Array.isArray(parts) && parts.length === 1 && parts[0].type === "text" && parts[0].text === "可见回复",
+      "可见文本原样保留、且不含思考",
+    );
+  }
+
+  // ── 仅含思考的运行不落库（走兜底文本） ──
+  console.log("\n=== 仅含思考的运行 ===");
+  {
+    const { stage, updates } = await createStage();
+    await saveHistory(
+      stage,
+      createRunner([
+        msg("assistant", [{ type: "think", think: "纯思考", encrypted: "SIG" }]),
+      ]),
+      { fallbackAssistantText: "兜底回复" },
+    );
+    const history = updates[0].history;
+    assert(history.length === 1 && history[0].content === "兜底回复", "纯思考运行改用兜底可见文本");
+    assert(!JSON.stringify(history).includes("纯思考"), "纯思考内容未落库");
+  }
+
   // ── 空消息 / 纯中间态 → 不触发保存 ──
   console.log("\n=== 空消息与纯中间态 ===");
   {
