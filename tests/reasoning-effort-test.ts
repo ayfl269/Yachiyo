@@ -77,6 +77,10 @@ function testMappingHelpers(): void {
   assert(!modelSupportsReasoning("gpt-4o"), "gpt-4o 不支持推理");
   assert(!modelSupportsReasoning("claude-3-5-sonnet"), "Claude 3.5 不支持推理");
   assert(!modelSupportsReasoning(undefined), "undefined 模型不支持");
+  // 显式 opt-in：未识别模型在开启「推理模式」后应视为支持
+  assert(!modelSupportsReasoning("deepseek-reasoner"), "未识别模型默认不支持");
+  assert(modelSupportsReasoning("deepseek-reasoner", true), "explicitCapable=true 覆盖名称识别");
+  assert(modelSupportsReasoning(undefined, true), "explicitCapable=true 且无 modelId 也视为支持");
 
   // Anthropic
   const a = anthropicThinkingConfig("high", "claude-sonnet-4-5", 64000);
@@ -118,6 +122,16 @@ function testMappingHelpers(): void {
   const g3low = geminiThinkingConfig("off", "gemini-3-flash");
   assert(!!g3low && "thinkingLevel" in g3low && g3low.thinkingLevel === "low", "Gemini 3 off → thinkingLevel=low（不可完全关闭）");
   assert(geminiThinkingConfig("high", "gemini-1.5-flash") === undefined, "Gemini 非推理模型 → undefined");
+
+  // 显式 opt-in：未识别模型可强制下发（各自映射仍生效）
+  const aExp = anthropicThinkingConfig("high", "my-custom-claude", 64000, true);
+  assert(aExp?.type === "enabled" && aExp.budget_tokens === 24576, "Anthropic explicitCapable 强制下发预算");
+  assert(openaiReasoningEffort("medium", "deepseek-reasoner", true) === "medium", "OpenAI explicitCapable 强制下发");
+  assert(responsesReasoningEffort("high", "custom-o", true) === "high", "Responses explicitCapable 强制下发");
+  const gExp = geminiThinkingConfig("low", "my-gemini-proxy", true);
+  assert(!!gExp && "thinkingBudget" in gExp && gExp.thinkingBudget === 4096, "Gemini explicitCapable 强制下发（非 3.x 走 budget）");
+  // off + explicitCapable 仍受 "none" 门控约束（未识别模型不发 none）
+  assert(openaiReasoningEffort("off", "deepseek-reasoner", true) === undefined, "OpenAI off+explicitCapable 未识别模型仍不发 none");
 }
 
 // ── 2. Provider request bodies ──
@@ -182,6 +196,36 @@ async function testConfigFallback(): Promise<void> {
   const openaiNone = new OpenAIProvider({ apiKey: "k", model: "o3-mini" } as any);
   await openaiNone.textChat({ contexts: [{ role: "user", content: "hi" }] as Message[] });
   assert(lastBody?.reasoning_effort === undefined, "未配置时不发送字段（保留模型默认）");
+}
+
+// ── 3b. reasoning:true 显式 opt-in（未识别模型）──
+async function testExplicitReasoningOptIn(): Promise<void> {
+  console.log("\n=== 3b. 推理模式 opt-in（未识别模型）===");
+
+  // 未识别模型，默认不发
+  const openaiDefault = new OpenAIProvider({ apiKey: "k", model: "deepseek-reasoner" } as any);
+  await openaiDefault.textChat({ contexts: [{ role: "user", content: "hi" }] as Message[], reasoningEffort: "medium" });
+  assert(lastBody?.reasoning_effort === undefined, "未识别模型默认不下发 reasoning_effort");
+
+  // 开启「推理模式」→ 下发
+  const openaiOptIn = new OpenAIProvider({ apiKey: "k", model: "deepseek-reasoner", reasoning: true } as any);
+  await openaiOptIn.textChat({ contexts: [{ role: "user", content: "hi" }] as Message[], reasoningEffort: "medium" });
+  assert(lastBody?.reasoning_effort === "medium", "开启推理模式后未识别模型下发 reasoning_effort");
+
+  // Gemini 未识别模型 + opt-in
+  const geminiOptIn = new GeminiProvider({ apiKey: "k", model: "my-gemini-proxy", reasoning: true } as any);
+  await geminiOptIn.textChat({ contexts: [{ role: "user", content: "hi" }] as Message[], reasoningEffort: "low" });
+  assert(lastBody?.generationConfig?.thinkingConfig?.thinkingBudget === 4096, "Gemini 未识别模型 + 推理模式下发 thinkingBudget");
+
+  // Anthropic 未识别模型 + opt-in
+  const anthropicOptIn = new AnthropicProvider({ apiKey: "k", model: "my-custom-claude", maxTokens: 64000, reasoning: true } as any);
+  await anthropicOptIn.textChat({ contexts: [{ role: "user", content: "hi" }] as Message[], reasoningEffort: "high" });
+  assert(lastBody?.thinking?.type === "enabled", "Anthropic 未识别模型 + 推理模式下发 thinking");
+
+  // Responses 未识别模型 + opt-in
+  const responsesOptIn = new OpenAIResponsesProvider({ apiKey: "k", model: "custom-o", reasoning: true } as any);
+  await responsesOptIn.textChat({ contexts: [{ role: "user", content: "hi" }] as Message[], reasoningEffort: "high" });
+  assert(lastBody?.reasoning?.effort === "high", "Responses 未识别模型 + 推理模式下发 reasoning.effort");
 }
 
 // ── 4. Auto reasoning-effort controller ──
@@ -345,6 +389,7 @@ async function main(): Promise<void> {
     testMappingHelpers();
     await testProviderBodies();
     await testConfigFallback();
+    await testExplicitReasoningOptIn();
     await testAutoController();
     await testRunnerAutoWiring();
     await testSubAgentInheritsLiveEffort();

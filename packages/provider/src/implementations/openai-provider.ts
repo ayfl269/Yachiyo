@@ -68,6 +68,7 @@ export class OpenAIProvider implements Provider {
     const reasoningEffort = openaiReasoningEffort(
       resolveReasoningEffort(params.reasoningEffort, this.providerConfig.reasoningEffort),
       useModel,
+      this.providerConfig.reasoning === true,
     );
     if (reasoningEffort !== undefined) {
       body.reasoning_effort = reasoningEffort;
@@ -140,6 +141,7 @@ export class OpenAIProvider implements Provider {
     const reasoningEffort = openaiReasoningEffort(
       resolveReasoningEffort(params.reasoningEffort, this.providerConfig.reasoningEffort),
       useModel,
+      this.providerConfig.reasoning === true,
     );
     if (reasoningEffort !== undefined) {
       body.reasoning_effort = reasoningEffort;

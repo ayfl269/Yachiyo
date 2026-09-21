@@ -294,6 +294,8 @@ export class GeminiProvider implements Provider {
     const thinkingConfig = geminiThinkingConfig(
       resolveReasoningEffort(params.reasoningEffort, this.providerConfig.reasoningEffort),
       useModel,
+      // Operator opt-in for models not recognized by the name heuristic.
+      this.providerConfig.reasoning === true,
     );
     if (thinkingConfig) {
       generationConfig.thinkingConfig = thinkingConfig;

@@ -128,6 +128,8 @@ export class AnthropicProvider implements Provider {
       resolveReasoningEffort(params.reasoningEffort, this.providerConfig.reasoningEffort),
       useModel,
       this.maxTokens,
+      // Operator opt-in for models not recognized by the name heuristic.
+      this.providerConfig.reasoning === true,
     );
     if (thinking) {
       body.thinking = thinking;

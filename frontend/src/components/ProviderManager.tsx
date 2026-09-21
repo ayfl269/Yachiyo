@@ -1661,6 +1661,10 @@ export default function ProviderManager() {
                 <input type="checkbox" checked={Boolean(providerEditData.reasoning)} onChange={e => setProviderEditField('reasoning', e.target.checked)} />
                 <span>{providerEditData.reasoning ? '开启' : '关闭'}</span>
               </label>
+              <span className="help-text">
+                标记该模型支持思考。对系统未内置识别的模型（如自建/第三方推理模型），
+                开启后才会下发思考强度参数。
+              </span>
             </div>
             <div className="form-group">
               <label>思考强度 (Reasoning Effort)</label>

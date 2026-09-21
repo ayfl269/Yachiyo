@@ -73,15 +73,20 @@ function indexOfToken(tokens: string[], name: string): number {
 /**
  * Heuristic: does this model id look like a reasoning-capable model?
  *
- * Vendor id conventions change over time, so this is intentionally broad and
- * errs toward enabling when a provider has explicitly configured a reasoning
- * effort (the operator opted in). It is used only to *gate* sending a native
- * reasoning field, never to force one on.
+ * Vendor id conventions change over time, so this is intentionally broad. The
+ * name list cannot cover every model (custom/self-hosted/OpenAI-compatible
+ * gateways, new releases), so `explicitCapable` is an operator opt-in escape
+ * hatch: when `true`, the model is treated as reasoning-capable regardless of
+ * its id. This lets an unrecognized model still receive a reasoning field.
  *
  * Implemented via tokenization (see {@link tokenizeModelId}) rather than
  * regexes over the raw id to keep matching linear in the input length.
  */
-export function modelSupportsReasoning(modelId: string | undefined): boolean {
+export function modelSupportsReasoning(
+  modelId: string | undefined,
+  explicitCapable?: boolean,
+): boolean {
+  if (explicitCapable === true) return true;
   if (!modelId) return false;
   const tokens = tokenizeModelId(modelId);
   if (tokens.length === 0) return false;
@@ -142,11 +147,12 @@ export function anthropicThinkingConfig(
   effort: ReasoningEffort | undefined,
   modelId: string | undefined,
   maxTokens: number,
+  explicitCapable?: boolean,
 ): { type: "enabled"; budget_tokens: number } | undefined {
   if (!effort) return undefined;
   // Opt-in feature: omitting the field disables thinking.
   if (effort === "off") return undefined;
-  if (!modelSupportsReasoning(modelId)) return undefined;
+  if (!modelSupportsReasoning(modelId, explicitCapable)) return undefined;
   const budget = ANTHROPIC_BUDGET_TOKENS[effort];
   if (budget === undefined) return undefined;
   // budget_tokens must be strictly less than max_tokens; clamp to leave room
@@ -185,10 +191,13 @@ export function openaiSupportsReasoningNone(modelId: string | undefined): boolea
 export function openaiReasoningEffort(
   effort: ReasoningEffort | undefined,
   modelId: string | undefined,
+  explicitCapable?: boolean,
 ): string | undefined {
   if (!effort) return undefined;
-  if (!modelSupportsReasoning(modelId)) return undefined;
+  if (!modelSupportsReasoning(modelId, explicitCapable)) return undefined;
   if (effort === "off") {
+    // "none" is only valid on newer models; an explicit opt-in cannot make an
+    // older model accept it, so still omit rather than risk a 400.
     return openaiSupportsReasoningNone(modelId) ? "none" : undefined;
   }
   // OpenAI's documented values are minimal/low/medium/high.
@@ -203,9 +212,10 @@ export function openaiReasoningEffort(
 export function responsesReasoningEffort(
   effort: ReasoningEffort | undefined,
   modelId: string | undefined,
+  explicitCapable?: boolean,
 ): string | undefined {
   if (!effort) return undefined;
-  if (!modelSupportsReasoning(modelId)) return undefined;
+  if (!modelSupportsReasoning(modelId, explicitCapable)) return undefined;
   if (effort === "off") {
     return openaiSupportsReasoningNone(modelId) ? "none" : undefined;
   }
@@ -279,10 +289,11 @@ function isGeminiPro(id: string): boolean {
 export function geminiThinkingConfig(
   effort: ReasoningEffort | undefined,
   modelId: string | undefined,
+  explicitCapable?: boolean,
 ): GeminiThinkingConfig | undefined {
   if (!effort) return undefined;
-  if (!modelSupportsReasoning(modelId)) return undefined;
-  const id = modelId!.toLowerCase();
+  if (!modelSupportsReasoning(modelId, explicitCapable)) return undefined;
+  const id = (modelId ?? "").toLowerCase();
 
   if (isGemini3(id)) {
     const level: "low" | "high" = effort === "high" || effort === "medium" ? "high" : "low";
