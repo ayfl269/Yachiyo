@@ -1489,7 +1489,82 @@ async function testSubAgentBudgetNotClipped(): Promise<void> {
   const plainTimeout = (runner as any).resolveToolCallTimeout(plainTool) as number;
   assert(plainTimeout === 120, `普通工具保持 120s (timeout=${plainTimeout})`);
 
+  // 工具自带 timeout 参数（秒）应被 runner 尊重：不再被 120s 提前 race-kill。
+  const shellLikeTool = (await import("../src/index.js")).createFunctionTool({
+    name: "shell_like",
+    description: "shell-like",
+    parameters: {
+      type: "object",
+      properties: {
+        command: { type: "string" },
+        timeout: { type: "integer", default: 300 },
+      },
+    },
+  });
+  // 模型显式传 timeout=300 → runner 至少 300+grace，且大于全局 120
+  const declaredTimeout = (runner as any).resolveToolCallTimeout(shellLikeTool, { timeout: 300 }) as number;
+  assert(declaredTimeout === 305, `显式 timeout=300 → 305s (timeout=${declaredTimeout})`);
+  assert(declaredTimeout > 120, "声明的 timeout 不被全局 120s 截断");
+  // 模型省略 timeout → 采用 schema 默认 300
+  const schemaDefaultTimeout = (runner as any).resolveToolCallTimeout(shellLikeTool, {}) as number;
+  assert(schemaDefaultTimeout === 305, `schema 默认 timeout=300 → 305s (timeout=${schemaDefaultTimeout})`);
+  // 声明更短的 timeout（如 30s）不缩短全局下限
+  const shortTimeout = (runner as any).resolveToolCallTimeout(shellLikeTool, { timeout: 30 }) as number;
+  assert(shortTimeout === 120, `较短的声明 timeout 不缩短全局 120s (timeout=${shortTimeout})`);
+  // 超过工具层上限时夹紧到 3600 + grace
+  const hugeTimeout = (runner as any).resolveToolCallTimeout(shellLikeTool, { timeout: 999999 }) as number;
+  assert(hugeTimeout === 3605, `超大 timeout 夹紧到 3605s (timeout=${hugeTimeout})`);
+
   console.log("  ✅ H1 子代理预算不被截断测试通过");
+}
+
+// ============================================================
+// 19b. 测试: 工具调用超时配置透传（毫秒→秒）与默认值
+// ============================================================
+
+async function testToolCallTimeoutPlumbing(): Promise<void> {
+  console.log("\n=== 测试: 工具调用超时配置透传 ===");
+  const { buildMainAgent, createContextWrapper } = await import("../src/index.js");
+
+  const provider = createMockProvider([
+    { role: "assistant", completionText: "done", isChunk: false },
+  ]);
+
+  // buildMainAgent 的 toolCallTimeout 单位是秒，直接透传到 runContext。
+  const built = await buildMainAgent({
+    provider,
+    request: { prompt: "hi", imageUrls: [], audioUrls: [], contexts: [], extraUserContentParts: [] },
+    config: { toolCallTimeout: 300 },
+  });
+  assert(
+    built.agentRunner.currentRunContext.toolCallTimeout === 300,
+    `buildMainAgent toolCallTimeout=300 透传 (actual=${built.agentRunner.currentRunContext.toolCallTimeout})`,
+  );
+
+  // 未配置 → 默认 120s
+  const builtDefault = await buildMainAgent({
+    provider,
+    request: { prompt: "hi", imageUrls: [], audioUrls: [], contexts: [], extraUserContentParts: [] },
+  });
+  assert(
+    builtDefault.agentRunner.currentRunContext.toolCallTimeout === 120,
+    `buildMainAgent 默认 120s (actual=${builtDefault.agentRunner.currentRunContext.toolCallTimeout})`,
+  );
+
+  // 0/NaN/负值 → 回退默认（而非 0，否则工具调用立即超时）
+  for (const bad of [0, -5, Number.NaN]) {
+    const b = await buildMainAgent({
+      provider,
+      request: { prompt: "hi", imageUrls: [], audioUrls: [], contexts: [], extraUserContentParts: [] },
+      config: { toolCallTimeout: bad as number },
+    });
+    assert(
+      b.agentRunner.currentRunContext.toolCallTimeout === 120,
+      `非法 toolCallTimeout=${String(bad)} 回退 120s`,
+    );
+  }
+
+  console.log("  ✅ 工具调用超时配置透传测试通过");
 }
 
 // ============================================================
@@ -1854,6 +1929,7 @@ async function main(): Promise<void> {
     await testProviderCachingPlumbing();
     await testDynamicContextPlacement();
     await testSubAgentBudgetNotClipped();
+    await testToolCallTimeoutPlumbing();
     await testFileLockEffective();
     await testBackgroundHandoffCancellable();
     await testParallelSubAgentsTimeout();

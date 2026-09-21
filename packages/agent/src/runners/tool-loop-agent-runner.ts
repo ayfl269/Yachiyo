@@ -108,6 +108,21 @@ const REPEATED_TOOL_NOTICE_L3_THRESHOLD = 5;
  */
 const HANDOFF_TIMEOUT_GRACE_SECONDS = 15;
 
+/**
+ * Absolute ceiling (seconds) for a per-tool-call timeout. Matches the maximum
+ * a tool's own `timeout` parameter can request (see `clampTimeoutSeconds`), so
+ * a declared timeout plus grace is always honored without allowing an
+ * unbounded race timer.
+ */
+const MAX_TOOL_TIMEOUT_SECONDS = 3600;
+
+/**
+ * Extra grace (seconds) added on top of a tool's own declared `timeout` when
+ * sizing the runner's race timer, so the tool can finish its own timeout
+ * handling and return a result before the runner's abort fires.
+ */
+const TOOL_TIMEOUT_GRACE_SECONDS = 5;
+
 const REPEATED_TOOL_NOTICE_L1_TEMPLATE =
   "\n\n[SYSTEM NOTICE] By the way, you have executed the same tool " +
   "`{toolName}` {streak} times consecutively. Double-check whether another " +
@@ -1819,7 +1834,7 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
           const executor = this.toolExecutor.execute(funcTool, this.runContext, validParams);
           for await (const resp of this.iterToolExecutorResults(
             executor,
-            this.resolveToolCallTimeout(funcTool),
+            this.resolveToolCallTimeout(funcTool, validParams),
           )) {
             finalResp = resp;
             yield* this.processToolExecutorResult(
@@ -2079,7 +2094,7 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
         const iter = this.toolExecutor.execute(launch.tool, launchContext, launch.args);
         for await (const resp of this.iterToolExecutorResults(
           iter,
-          this.resolveToolCallTimeout(launch.tool),
+          this.resolveToolCallTimeout(launch.tool, launch.args),
           launchContext,
         )) {
           if (resp) results.push(resp);
@@ -2109,7 +2124,10 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
    * while its result was discarded. All other tools keep the run's configured
    * `toolCallTimeout`.
    */
-  private resolveToolCallTimeout(tool: FunctionTool): number {
+  private resolveToolCallTimeout(
+    tool: FunctionTool,
+    toolArgs?: Record<string, unknown>,
+  ): number {
     const agent = (tool as { agent?: { name?: string; dynamic?: boolean; sandboxPolicy?: Record<string, unknown> } }).agent;
     if (agent && typeof agent === "object") {
       const budget = resolveSubAgentExecutionBudgetSeconds(
@@ -2121,7 +2139,37 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
       );
       return budget + HANDOFF_TIMEOUT_GRACE_SECONDS;
     }
+    // Honor a tool's own declared `timeout` argument (seconds) when present.
+    // Shell/code tools default their `timeout` to 300s, but the runner would
+    // otherwise race-kill them at the shorter global toolCallTimeout (120s),
+    // making the tool's own timeout — and any retry that raises it — silently
+    // unreachable. Add a small grace so the tool's own timeout handling runs
+    // first and returns a result instead of being aborted mid-flight.
+    // Prefer the model-supplied `timeout` arg; fall back to the tool's schema
+    // default (e.g. execute_shell declares `timeout` default 300). The runner's
+    // abort must fire AFTER the tool's own timer so a slow tool is not
+    // race-killed at the shorter global default while its own timeout is still
+    // pending. We only ever EXTEND beyond the global toolCallTimeout — a tool
+    // declaring a shorter default (e.g. web_fetch 30s) keeps the global value,
+    // preserving the previous safety-net behaviour.
+    const declared = toolArgs?.timeout ?? ToolLoopAgentRunner.schemaTimeoutDefault(tool);
+    if (typeof declared === "number" && Number.isFinite(declared) && declared > 0) {
+      const declaredClamped = Math.min(Math.ceil(declared), MAX_TOOL_TIMEOUT_SECONDS);
+      return Math.max(this.runContext.toolCallTimeout, declaredClamped + TOOL_TIMEOUT_GRACE_SECONDS);
+    }
     return this.runContext.toolCallTimeout;
+  }
+
+  /**
+   * Read a tool's schema-declared `timeout` default (seconds), if any. Used so
+   * a tool that documents a long default (e.g. execute_shell: 300s) is not
+   * race-killed at the shorter global toolCallTimeout when the model omits the
+   * argument.
+   */
+  private static schemaTimeoutDefault(tool: FunctionTool): number | undefined {
+    const params = tool.parameters as { properties?: Record<string, { default?: unknown }> } | undefined;
+    const def = params?.properties?.timeout?.default;
+    return typeof def === "number" && Number.isFinite(def) && def > 0 ? def : undefined;
   }
 
   private async *iterToolExecutorResults(

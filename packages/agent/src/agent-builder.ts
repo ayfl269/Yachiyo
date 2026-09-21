@@ -175,9 +175,18 @@ export async function buildMainAgent<TContext = unknown>(
 
   // Create agent runner
   const agentRunner = new ToolLoopAgentRunner<TContext>();
+  // Guard against non-positive/NaN: `?? 120` would let 0 through, and a 0s
+  // timeout makes every tool call abort immediately. Fall back to the 120s
+  // default for any invalid value.
+  const toolCallTimeout =
+    typeof config.toolCallTimeout === "number" &&
+    Number.isFinite(config.toolCallTimeout) &&
+    config.toolCallTimeout > 0
+      ? config.toolCallTimeout
+      : 120;
   const runContext = createContextWrapper<TContext>(
     context ?? (null as unknown as TContext),
-    { toolCallTimeout: config.toolCallTimeout ?? 120 }
+    { toolCallTimeout }
   );
   if (toolManager) {
     runContext._toolMgr = toolManager;

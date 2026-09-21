@@ -481,6 +481,16 @@ export class ProcessStage extends PipelineStage {
         config: {
           streaming: useStreaming,
           providerCaching,
+          // AgentConfig stores this in MILLISECONDS (dashboard label: 毫秒,
+          // default 120000); the agent layer works in SECONDS. Forwarding it
+          // unconverted would set a 120000-second (33h) timeout, so divide.
+          // Guard non-positive/NaN back to undefined → agent default.
+          toolCallTimeout:
+            typeof cfg.toolCallTimeout === "number" &&
+            Number.isFinite(cfg.toolCallTimeout) &&
+            cfg.toolCallTimeout > 0
+              ? Math.round(cfg.toolCallTimeout / 1000)
+              : undefined,
           contextLimitReachedStrategy: cfg.contextLimitReachedStrategy,
           llmCompressInstruction: cfg.llmCompressInstruction,
           llmCompressKeepRecent: cfg.llmCompressKeepRecent,

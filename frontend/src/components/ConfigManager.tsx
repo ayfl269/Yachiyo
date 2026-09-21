@@ -464,7 +464,12 @@ export default function ConfigManager() {
                   value={config.toolCallTimeout}
                   onChange={(e) => updateField('toolCallTimeout', Number(e.target.value))}
                   className="form-control font-mono"
+                  min={1000}
                 />
+                <span className="help-text">
+                  单个工具调用的兜底超时（默认 120000 毫秒 = 120 秒）。工具自身声明的
+                  timeout 参数若更长（如 execute_shell 默认 300 秒）会优先生效。
+                </span>
               </div>
               <div className="form-group">
                 <label>工具定义渲染模式 (Tool Schema Mode)</label>
