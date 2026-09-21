@@ -29,7 +29,17 @@ export interface ComputerToolContext {
 
 function getToolContext(_ctx: unknown): ComputerToolContext {
   const wrapper = _ctx as ContextWrapper<ComputerToolContext> | undefined;
-  return wrapper?.context ?? ({} as ComputerToolContext);
+  const context = wrapper?.context ?? ({} as ComputerToolContext);
+  // The effective sandbox policy for a run lives on the ContextWrapper
+  // (`_sandboxPolicy`), set by the tool executor for sub-agent handoffs. Tools
+  // read it from the event context (`context.sandboxPolicy`), which is never
+  // populated — so the policy was silently inert. Fall back to the wrapper
+  // field so path/domain restrictions are actually enforced. An explicit
+  // `context.sandboxPolicy` still wins.
+  if (context.sandboxPolicy === undefined && wrapper?._sandboxPolicy !== undefined) {
+    return { ...context, sandboxPolicy: wrapper._sandboxPolicy };
+  }
+  return context;
 }
 
 /**
@@ -475,8 +485,12 @@ export function isDestructiveCommand(command: string): boolean {
     /\bfind\s+\/\b[^|]*(?:-delete|-exec\s+rm\b)/,
     // classic fork bomb: :(){ :|:& };:
     /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/,
-    // system shutdown / reboot
-    /\b(?:shutdown|reboot|halt|poweroff|init\s+0)\b/,
+    // system shutdown / reboot: only when the command actually INVOKES one of
+    // these as the program (start of the command or after a shell separator),
+    // not merely mentions the word (e.g. `grep reboot .`,
+    // `git log --grep=shutdown`). The previous unbounded \b match rejected
+    // legitimate read-only commands that happened to contain the word.
+    /(?:^|[;&|]\s*|\bsudo\s+|\bdoas\s+)(?:shutdown|reboot|halt|poweroff|init\s+0)(?:\s|$)/,
     // Windows: recursive directory removal targeting a drive root / wildcard
     /\brd\s+(?:\/s|\/q|\/s\s+\/q)\s+(?:"?[a-z]:[\\/]?|\*|%systemroot%)/i,
     /\brmdir\s+(?:\/s|\/q|\/s\s+\/q)\s+(?:"?[a-z]:[\\/]?|\*)/i,
@@ -871,6 +885,126 @@ export function createBackgroundShellKillTool(): FunctionTool<ComputerToolContex
   });
 }
 
+// ── Code execution helpers (shared by execute_python / execute_node) ──
+
+interface CodeProcessResult {
+  stdout: string;
+  stderr: string;
+  /** Exit code, or null when the process was signal-terminated. */
+  code: number | null;
+  /** Signal that terminated the process, if any. */
+  signal: NodeJS.Signals | null;
+  /** True when our own timeout fired and we killed the process tree. */
+  timedOut: boolean;
+  /** True when the caller's abort signal fired. */
+  aborted: boolean;
+}
+
+/**
+ * Run a code-execution command, trying each candidate launcher in order (e.g.
+ * `python3` then `python` on Windows) when the previous one fails to spawn.
+ *
+ * We deliberately do NOT use `execFile`'s `timeout` option:
+ *   1. it only SIGTERMs the direct child, leaving grandchildren as orphans; and
+ *   2. without a callback it does not throw on timeout — the `close` event
+ *      simply reports `code === null`, which the previous code misread as
+ *      exit 0, so a timed-out run was reported to the model as *success* with
+ *      partial output and no timeout notice.
+ * Here we manage the timer ourselves, kill the whole process tree, and record
+ * `timedOut`/`signal` so the caller can report the outcome honestly.
+ */
+function runCodeProcess(
+  candidates: Array<{ command: string; args: string[] }>,
+  options: { cwd: string; abortSignal?: AbortSignal; timeoutMs: number },
+): Promise<CodeProcessResult> {
+  const { cwd, abortSignal, timeoutMs } = options;
+
+  return new Promise<CodeProcessResult>((resolvePromise) => {
+    let settled = false;
+    let timedOut = false;
+    let aborted = false;
+    let current: ChildProcess | null = null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const resolveOnce = (value: CodeProcessResult): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolvePromise(value);
+    };
+
+    const finish = (code: number | null, signal: NodeJS.Signals | null, stdout: string, stderr: string): void => {
+      resolveOnce({ stdout, stderr, code, signal, timedOut, aborted });
+    };
+
+    const killAndFlag = (why: "timeout" | "abort"): void => {
+      if (why === "timeout") timedOut = true;
+      else aborted = true;
+      if (!current) return;
+      killProcessTree(current, "SIGTERM");
+      const escalation = setTimeout(() => {
+        if (current && current.exitCode === null && current.signalCode === null) {
+          killProcessTree(current, "SIGKILL");
+        }
+      }, KILL_ESCALATION_MS);
+      if (typeof escalation === "object" && escalation && "unref" in escalation) {
+        escalation.unref();
+      }
+    };
+
+    const trySpawn = (index: number): void => {
+      if (settled) return;
+      const { command, args } = candidates[index];
+      let stdout = "";
+      let stderr = "";
+
+      const child = execFile(command, args, { cwd, maxBuffer: 10 * 1024 * 1024 });
+      current = child;
+
+      if (abortSignal) {
+        if (abortSignal.aborted) killProcessTree(child);
+        else abortSignal.addEventListener("abort", () => killAndFlag("abort"), { once: true });
+      }
+
+      child.stdout?.on("data", (data: Buffer) => { stdout += data.toString(); });
+      child.stderr?.on("data", (data: Buffer) => { stderr += data.toString(); });
+
+      child.on("close", (code, signal) => finish(code, signal, stdout, stderr));
+      child.on("error", (err) => {
+        // Launcher not found: fall back to the next candidate (e.g. `python`
+        // after `python3` on Windows). Otherwise surface the spawn error.
+        if (index + 1 < candidates.length) {
+          trySpawn(index + 1);
+        } else {
+          finish(-1, null, "", err.message);
+        }
+      });
+    };
+
+    timer = setTimeout(() => killAndFlag("timeout"), timeoutMs);
+    if (typeof timer === "object" && timer && "unref" in timer) timer.unref();
+
+    trySpawn(0);
+  });
+}
+
+/** Format a code-process result for the model, with honest timeout/exit info. */
+function formatCodeOutput(result: CodeProcessResult): string {
+  let output = "";
+  if (result.stdout) output += result.stdout;
+  if (result.stderr) output += (output ? "\n" : "") + `[stderr]\n${result.stderr}`;
+  if (result.timedOut) {
+    output += `\n[execution timed out and was terminated]`;
+  } else if (result.aborted) {
+    output += `\n[execution aborted]`;
+  } else if (result.signal) {
+    output += `\n[execution terminated by signal ${result.signal}]`;
+  } else if (result.code !== 0) {
+    output += `\n[exit code: ${result.code}]`;
+  }
+  return output || "(no output)";
+}
+
 // ── Python Execute Tool (local) ──
 
 export function createLocalPythonTool(workspaceRoot?: string): FunctionTool<ComputerToolContext> {
@@ -895,69 +1029,25 @@ export function createLocalPythonTool(workspaceRoot?: string): FunctionTool<Comp
       const cwd = workspaceRoot ?? process.cwd();
       const abortSignal = getAbortSignal(_ctx);
 
-      const killOnAbort = (child: ChildProcess): void => {
-        if (!abortSignal) return;
-        if (abortSignal.aborted) killProcessTree(child);
-        else abortSignal.addEventListener("abort", () => killProcessTree(child), { once: true });
-      };
-
       try {
-        const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolvePromise) => {
-          // Guard against double-resolution: when `python3` fails to spawn on
-          // Windows, Node may still emit a `close` event on the failed child
-          // even after we've already started the `python` fallback. Without
-          // this flag, the first `close` would resolve with empty output and
-          // silently drop the real output from `child2`.
-          let resolved = false;
-          const resolveOnce = (value: { stdout: string; stderr: string; code: number }): void => {
-            if (resolved) return;
-            resolved = true;
-            resolvePromise(value);
-          };
-
-          const child = execFile(
-            "python3",
-            ["-c", code],
-            { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }
-          );
-          killOnAbort(child);
-
-          let stdout = "";
-          let stderr = "";
-          child.stdout?.on("data", (data: Buffer) => { stdout += data.toString(); });
-          child.stderr?.on("data", (data: Buffer) => { stderr += data.toString(); });
-          child.on("close", (code) => { resolveOnce({ stdout, stderr, code: code ?? 0 }); });
-          child.on("error", (err) => {
-            // python3 might not exist on Windows, try python.
-            // Remove the close listener from the failed child so its later
-            // `close` event (Node emits one even after a spawn error) cannot
-            // race with child2's result.
-            child.removeAllListeners("close");
-            if (process.platform === "win32" && err.message.includes("python3")) {
-              const child2 = execFile("python", ["-c", code], { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 });
-              killOnAbort(child2);
-              let stdout2 = "";
-              let stderr2 = "";
-              child2.stdout?.on("data", (data: Buffer) => { stdout2 += data.toString(); });
-              child2.stderr?.on("data", (data: Buffer) => { stderr2 += data.toString(); });
-              child2.on("close", (code2) => { resolveOnce({ stdout: stdout2, stderr: stderr2, code: code2 ?? 0 }); });
-              child2.on("error", () => { resolveOnce({ stdout: "", stderr: "Python not found", code: -1 }); });
-            } else {
-              resolveOnce({ stdout: "", stderr: err.message, code: -1 });
-            }
-          });
-        });
+        // Try python3, then python (Windows installs commonly expose only the
+        // latter). runCodeProcess handles the fallback on spawn failure.
+        const result = await runCodeProcess(
+          [
+            { command: "python3", args: ["-c", code] },
+            { command: "python", args: ["-c", code] },
+          ],
+          { cwd, abortSignal, timeoutMs },
+        );
 
         if (silent) {
           return { content: [{ type: "text", text: "Code executed successfully (silent mode)." }] };
         }
 
-        let output = "";
-        if (result.stdout) output += result.stdout;
-        if (result.stderr) output += (output ? "\n" : "") + `[stderr]\n${result.stderr}`;
-        if (result.code !== 0) output += `\n[exit code: ${result.code}]`;
-
-        return { content: [{ type: "text", text: output || "(no output)" }] };
+        return {
+          content: [{ type: "text", text: formatCodeOutput(result) }],
+          ...(result.timedOut || result.code !== 0 ? { isError: true } : {}),
+        };
       } catch (e) {
         return { content: [{ type: "text", text: `error: Python execution failed: ${e}` }], isError: true };
       }
@@ -1176,40 +1266,21 @@ export function createLocalNodeTool(workspaceRoot?: string): FunctionTool<Comput
       const abortSignal = getAbortSignal(_ctx);
 
       try {
-        const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolvePromise) => {
-          const child = execFile(
-            "node",
-            ["-e", code],
-            { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }
-          );
-          if (abortSignal) {
-            if (abortSignal.aborted) killProcessTree(child);
-            else abortSignal.addEventListener("abort", () => killProcessTree(child), { once: true });
-          }
-
-          let stdout = "";
-          let stderr = "";
-          child.stdout?.on("data", (data: Buffer) => { stdout += data.toString(); });
-          child.stderr?.on("data", (data: Buffer) => { stderr += data.toString(); });
-          child.on("close", (code) => { resolvePromise({ stdout, stderr, code: code ?? 0 }); });
-          child.on("error", (err) => { resolvePromise({ stdout: "", stderr: err.message, code: -1 }); });
-        });
+        const result = await runCodeProcess(
+          [{ command: "node", args: ["-e", code] }],
+          { cwd, abortSignal, timeoutMs },
+        );
 
         if (silent) {
           return { content: [{ type: "text", text: "Code executed successfully (silent mode)." }] };
         }
 
-        let output = "";
-        if (result.stdout) output += result.stdout;
-        if (result.stderr) output += (output ? "\n" : "") + `[stderr]\n${result.stderr}`;
-        if (result.code !== 0) output += `\n[exit code: ${result.code}]`;
-
-        return { content: [{ type: "text", text: output || "(no output)" }] };
+        return {
+          content: [{ type: "text", text: formatCodeOutput(result) }],
+          ...(result.timedOut || result.code !== 0 ? { isError: true } : {}),
+        };
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        if (msg.includes("timed out")) {
-          return { content: [{ type: "text", text: `error: Node.js execution timed out after ${timeout ?? 30} seconds.` }], isError: true };
-        }
         return { content: [{ type: "text", text: `error: Node.js execution failed: ${msg}` }], isError: true };
       }
     },

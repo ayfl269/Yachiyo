@@ -587,7 +587,14 @@ function clampMsArg(value: number | undefined, fallback: number, max: number): n
 
 function getToolContext(_ctx: unknown): ComputerToolContext {
   const wrapper = _ctx as ContextWrapper<ComputerToolContext> | undefined;
-  return wrapper?.context ?? ({} as ComputerToolContext);
+  const context = wrapper?.context ?? ({} as ComputerToolContext);
+  // Fall back to the run-level policy (`_sandboxPolicy`, set by the tool
+  // executor for handoffs) since the event context never carries one — see the
+  // matching note in computer-tools.getToolContext.
+  if (context.sandboxPolicy === undefined && wrapper?._sandboxPolicy !== undefined) {
+    return { ...context, sandboxPolicy: wrapper._sandboxPolicy };
+  }
+  return context;
 }
 
 /**

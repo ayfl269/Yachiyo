@@ -171,6 +171,7 @@ export {
   createLocalPythonTool,
   createLocalNodeTool,
   getRuntimeComputerTools,
+  isDestructiveCommand,
 } from "./computer-tools.js";
 export type { ComputerToolContext, ComputerRuntime } from "./computer-tools.js";
 

@@ -245,12 +245,15 @@ export function createCodeSearchTool(workspaceRoot?: string): FunctionTool<CodeS
       // Enforce sandboxPolicy path restrictions the same way grep_tool /
       // file_read_tool do. Without passing it, a sandboxed agent could scan
       // directories that file_read_tool/grep_tool deny and read their source
-      // via the returned symbol context.
-      const context = (_ctx as { context?: CodeSearchToolContext } | undefined)?.context;
+      // via the returned symbol context. The effective policy lives on the
+      // ContextWrapper (`_sandboxPolicy`) for sub-agent handoffs, so fall back
+      // to it when the event context does not carry one.
+      const wrapper = _ctx as { context?: CodeSearchToolContext; _sandboxPolicy?: SandboxPolicy } | undefined;
+      const sandboxPolicy = wrapper?.context?.sandboxPolicy ?? wrapper?._sandboxPolicy;
       let normalizedPath: string;
       try {
         normalizedPath = searchPath
-          ? normalizeRwPath(searchPath, { workspaceRoot: root, sandboxPolicy: context?.sandboxPolicy })
+          ? normalizeRwPath(searchPath, { workspaceRoot: root, sandboxPolicy })
           : root;
       } catch (e) {
         return { content: [{ type: "text", text: `error: ${e}` }], isError: true };

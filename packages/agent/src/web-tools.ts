@@ -220,8 +220,8 @@ export function createWebFetchTool(): FunctionTool<WebToolContext> {
       const screenshot = args[7] === true;
 
       // Enforce sandbox domain restrictions.
-      const webCtx = (_ctx as { context?: WebToolContext } | undefined)?.context;
-      if (webCtx?.sandboxPolicy && !isDomainAllowed(url, webCtx.sandboxPolicy)) {
+      const policy = getSandboxPolicy(_ctx);
+      if (policy && !isDomainAllowed(url, policy)) {
         return { content: [{ type: "text", text: `error: Domain not allowed by sandbox policy for URL: ${url}` }], isError: true };
       }
 
@@ -779,8 +779,7 @@ export function createWebSearchTool(customProvider?: WebSearchProvider, engine: 
       const fetchContent = args[2] === true;
 
       // Enforce sandbox domain restrictions on fetched result URLs.
-      const webCtx = (_ctx as { context?: WebToolContext } | undefined)?.context;
-      const domainPolicy = webCtx?.sandboxPolicy;
+      const domainPolicy = getSandboxPolicy(_ctx);
 
       try {
         const rawResults = await provider.search(query, maxResults);
@@ -887,8 +886,8 @@ export function createHttpRequestTool(): FunctionTool<WebToolContext> {
       const followRedirects = args[6] !== false;
 
       // Enforce sandbox domain restrictions.
-      const webCtx = (_ctx as { context?: WebToolContext } | undefined)?.context;
-      if (webCtx?.sandboxPolicy && !isDomainAllowed(url, webCtx.sandboxPolicy)) {
+      const policy = getSandboxPolicy(_ctx);
+      if (policy && !isDomainAllowed(url, policy)) {
         return { content: [{ type: "text", text: `error: Domain not allowed by sandbox policy for URL: ${url}` }], isError: true };
       }
 
@@ -1029,8 +1028,11 @@ function generatePageId(): string {
  * Used to enforce domain restrictions on navigation URLs.
  */
 function getSandboxPolicy(_ctx: unknown): SandboxPolicy | undefined {
-  const webCtx = (_ctx as { context?: WebToolContext } | undefined)?.context;
-  return webCtx?.sandboxPolicy;
+  const wrapper = _ctx as { context?: WebToolContext; _sandboxPolicy?: SandboxPolicy } | undefined;
+  // The effective policy lives on the ContextWrapper (`_sandboxPolicy`), set by
+  // the tool executor for sub-agent handoffs; the event context field is never
+  // populated. Fall back to the wrapper so domain restrictions are enforced.
+  return wrapper?.context?.sandboxPolicy ?? wrapper?._sandboxPolicy;
 }
 
 /**

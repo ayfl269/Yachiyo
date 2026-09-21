@@ -38,11 +38,14 @@ import {
   TruncateByTurnsCompressor,
   // 新增工具
   createListDirTool,
+  createFileReadTool,
   createFileDeleteTool,
   createFileMoveTool,
   createFileWriteTool,
   createFileEditTool,
+  createGrepTool,
   createLocalNodeTool,
+  isDestructiveCommand,
   createWebFetchTool,
   createWebSearchTool,
   createHttpRequestTool,
@@ -1964,6 +1967,105 @@ async function testLoopHardStopFinalSummary(): Promise<void> {
 }
 
 // ============================================================
+// 26c. 测试: 命令行工具超时报告与沙箱策略生效（regression）
+// ============================================================
+
+async function testCommandToolsAndSandboxPolicy(): Promise<void> {
+  console.log("\n=== 测试: 命令行工具超时报告与沙箱策略 ===");
+
+  const nodeTool = createLocalNodeTool(process.cwd());
+  const ctx = { context: { event: {}, providerSettings: {} }, messages: [], toolCallTimeout: 30 };
+  const textOf = (r: CallToolResult): string =>
+    r.content[0] && "text" in r.content[0] ? (r.content[0] as { text: string }).text : "";
+
+  // 超时必须被如实报告，而不是伪装成 exit 0 的成功。
+  const timedOut = await nodeTool.handler!(ctx, "console.log('PARTIAL'); setTimeout(()=>{}, 10000)", false, 1) as CallToolResult;
+  assert(timedOut.isError === true, "execute_node 超时返回 isError=true（此前伪装成功）");
+  assert(textOf(timedOut).includes("timed out"), `execute_node 超时输出含超时说明（actual=${JSON.stringify(textOf(timedOut).slice(0,80))}）`);
+  assert(textOf(timedOut).includes("PARTIAL"), "execute_node 超时仍保留已产出的输出");
+
+  // 非零退出码应如实报告。
+  const exit3 = await nodeTool.handler!(ctx, "process.exit(3)") as CallToolResult;
+  assert(exit3.isError === true, "execute_node 非零退出 isError=true");
+  assert(textOf(exit3).includes("exit code: 3"), `execute_node 报告退出码 3（actual=${JSON.stringify(textOf(exit3).slice(0,80))}）`);
+
+  // 正常执行仍成功。
+  const ok = await nodeTool.handler!(ctx, "console.log('ok')") as CallToolResult;
+  assert(!ok.isError && textOf(ok).includes("ok"), "execute_node 正常执行成功");
+
+  // 沙箱策略此前挂在 wrapper._sandboxPolicy，工具只读 context.sandboxPolicy，
+  // 导致策略完全失效。现在应回退读取 wrapper 字段并真正拒绝被禁路径。
+  const { mkdir, writeFile, rm } = await import("fs/promises");
+  const { join } = await import("path");
+  const { tmpdir } = await import("os");
+  const dir = join(tmpdir(), `sandbox_policy_${Date.now()}`);
+  await mkdir(join(dir, "denied"), { recursive: true });
+  await writeFile(join(dir, "denied", "secret.txt"), "top secret");
+  await writeFile(join(dir, "ok.txt"), "public");
+
+  const readTool = createFileReadTool(dir);
+  const grepTool = createGrepTool(dir);
+
+  // 策略仅挂在 wrapper._sandboxPolicy（handoff 场景），context 上没有。
+  const ctxWithPolicy = {
+    context: { event: {}, providerSettings: {} },
+    messages: [],
+    toolCallTimeout: 30,
+    _sandboxPolicy: { deniedPaths: [join(dir, "denied")] },
+  };
+
+  let deniedErr: unknown = null;
+  try {
+    await readTool.handler!(ctxWithPolicy, "denied/secret.txt");
+  } catch (e) { deniedErr = e; }
+  assert(deniedErr !== null && String(deniedErr).includes("denied by sandbox policy"),
+    `file_read_tool 拒绝被策略禁止的路径（actual=${String(deniedErr).slice(0,80)}）`);
+
+  let grepDenied: unknown = null;
+  try {
+    await grepTool.handler!(ctxWithPolicy, "top secret", "denied");
+  } catch (e) { grepDenied = e; }
+  assert(grepDenied !== null && String(grepDenied).includes("denied by sandbox policy"),
+    "grep_tool 拒绝被策略禁止的路径");
+
+  // 未被禁止的路径仍可访问。
+  const allowed = await readTool.handler!(ctxWithPolicy, "ok.txt") as CallToolResult;
+  assert(textOf(allowed).includes("public"), "未被禁止的路径仍可读取");
+
+  await rm(dir, { recursive: true, force: true });
+
+  console.log("  ✅ 命令行工具超时报告与沙箱策略测试通过");
+}
+
+// ============================================================
+// 26d. 测试: isDestructiveCommand 不误杀只读命令（regression）
+// ============================================================
+
+async function testDestructiveCommandFalsePositives(): Promise<void> {
+  console.log("\n=== 测试: 破坏性命令守卫不误杀只读命令 ===");
+
+  // 真正危险：仍须拦截
+  for (const dangerous of ["rm -rf /", "rm -rf ~", "mkfs.ext4 /dev/sda", "shutdown -h now", "sudo reboot", "echo hi; shutdown now"]) {
+    assert(isDestructiveCommand(dangerous), `拦截危险命令: ${dangerous}`);
+  }
+
+  // 只读命令：不得误杀（此前 shutdown/reboot/poweroff 的 \b 匹配会误伤）
+  for (const safe of [
+    "grep -r reboot .",
+    "git log --grep=shutdown",
+    'echo "remember to reboot"',
+    "grep -rn 'poweroff' docs/",
+    "git commit -m 'reboot fix'",
+    "ls -la",
+    "npm install",
+  ]) {
+    assert(!isDestructiveCommand(safe), `放行只读命令: ${safe}`);
+  }
+
+  console.log("  ✅ 破坏性命令守卫测试通过");
+}
+
+// ============================================================
 // 27. 测试: L1(ext) — HTML 实体 &#39; 正确解码
 // ============================================================
 
@@ -2022,6 +2124,8 @@ async function main(): Promise<void> {
     testRedactProxyUrl();
     testHtmlEntityDecode();
     await testLoopHardStopFinalSummary();
+    await testCommandToolsAndSandboxPolicy();
+    await testDestructiveCommandFalsePositives();
 
     console.log("\n╔══════════════════════════════════════════╗");
     console.log(`║   通过: ${passCount}  失败: ${failCount}  跳过: ${skipCount}`.padEnd(46) + "║");
