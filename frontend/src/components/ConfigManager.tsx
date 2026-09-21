@@ -35,6 +35,7 @@ interface AgentConfig {
   t2iFormat: 'png' | 'jpeg'
   t2iTemplate: string
   displayReasoningText: boolean
+  sendIntermediateReplies?: boolean
   reasoningEffort?: 'off' | 'minimal' | 'low' | 'medium' | 'high'
   autoReasoningEffort?: boolean
   defaultProviderId: string
@@ -1093,6 +1094,17 @@ export default function ConfigManager() {
                   <label htmlFor="onlyLlmResultSegmented">仅对模型的纯文本执行分段切割</label>
                 </div>
               )}
+              <div className="form-group row-checkbox">
+                <input
+                  type="checkbox"
+                  checked={Boolean(config.sendIntermediateReplies)}
+                  onChange={(e) => updateField('sendIntermediateReplies', e.target.checked)}
+                  id="sendIntermediateReplies"
+                />
+                <label htmlFor="sendIntermediateReplies">
+                  发送中间回复 (Agent 模式：工具调用之间的叙述也逐条发送并入库；关闭时仅发送最终回复)
+                </label>
+              </div>
               <div className="form-group row-checkbox">
                 <input
                   type="checkbox"

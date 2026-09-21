@@ -90,14 +90,14 @@ function createRunner(messages: Message[], runMessagesStartIndex = 0): unknown {
 async function saveHistory(
   stage: ProcessStage,
   runner: unknown,
-  options?: { fallbackAssistantText?: string },
+  options?: { fallbackAssistantText?: string; assistantUtterances?: string[] },
 ): Promise<void> {
   const fn = (stage as unknown as {
     saveRunHistory: (
       runner: unknown,
       umo: string,
       convId: string,
-      options?: { fallbackAssistantText?: string },
+      options?: { fallbackAssistantText?: string; assistantUtterances?: string[] },
     ) => Promise<void>;
   }).saveRunHistory;
   await fn.call(stage, runner, "onebot11:private:888", "conv-1", options);
@@ -428,6 +428,88 @@ async function main() {
       okCase.extras.get("_cachedAssistantText") === "正常回复",
       "成功响应缓存回复文本，供 saveRunHistory 兜底",
     );
+  }
+
+  // ── 投递与持久化同源：中间叙述 + 最终回复 ──
+  console.log("\n=== 投递与持久化同源（agent 模式） ===");
+  {
+    const { stage } = await createStage({ sendIntermediateReplies: true });
+    const apply = (stage as unknown as {
+      applyNonStreamingResult: (event: unknown, runResult: unknown) => Promise<void>;
+    }).applyNonStreamingResult;
+
+    const makeEvent = () => {
+      const extras = new Map<string, unknown>();
+      return {
+        event: {
+          setResult: () => { /* respond 阶段消费 */ },
+          setExtra: (k: string, v: unknown) => { extras.set(k, v); },
+        },
+        extras,
+      };
+    };
+
+    // runResult.chains 携带中间叙述 + 最终回复（顺序保持）。
+    const chains = [
+      { type: "text", message: "我先查一下天气。" },
+      { type: "text", message: "再核对一下日期。" },
+      { type: "text", message: "今天晴天，25 度。" },
+    ];
+
+    // agent 模式：全部投递
+    const agentCase = makeEvent();
+    await apply.call(stage, agentCase.event, {
+      finalResponse: { role: "assistant", completionText: "今天晴天，25 度。" },
+      chains,
+    });
+    const agentUtterances = agentCase.extras.get("_runAssistantUtterances") as string[];
+    assert(Array.isArray(agentUtterances) && agentUtterances.length === 3, "agent 模式投递全部 3 段话语");
+    assert(agentUtterances[0] === "我先查一下天气。" && agentUtterances[2] === "今天晴天，25 度。", "话语顺序与生成顺序一致");
+
+    // 投递内容落库 → 与投递逐条一致
+    const { stage: saveStage, updates } = await createStage({ sendIntermediateReplies: true });
+    await saveHistory(saveStage, createRunner([]), { assistantUtterances: agentUtterances });
+    const agentHistory = updates[0].history;
+    assert(agentHistory.length === 3, `agent 模式落库 3 条（实际=${agentHistory.length}）`);
+    assert(
+      agentHistory.map((e) => e.content).join("|") === "我先查一下天气。|再核对一下日期。|今天晴天，25 度。",
+      "落库内容与投递逐条一致",
+    );
+  }
+
+  // ── 默认（聊天）模式：仅最终回复 ──
+  console.log("\n=== 默认模式仅最终回复 ===");
+  {
+    const { stage } = await createStage({ sendIntermediateReplies: false });
+    const apply = (stage as unknown as {
+      applyNonStreamingResult: (event: unknown, runResult: unknown) => Promise<void>;
+    }).applyNonStreamingResult;
+
+    const extras = new Map<string, unknown>();
+    await apply.call(stage, {
+      setResult: () => { /* noop */ },
+      setExtra: (k: string, v: unknown) => { extras.set(k, v); },
+    }, {
+      finalResponse: { role: "assistant", completionText: "最终答复" },
+      chains: [
+        { type: "text", message: "中间叙述一" },
+        { type: "text", message: "最终答复" },
+      ],
+    });
+
+    const delivered = extras.get("_runAssistantUtterances") as string[];
+    assert(Array.isArray(delivered) && delivered.length === 1 && delivered[0] === "最终答复",
+      "默认模式仅投递最终一段");
+  }
+
+  // ── 显式空话语列表：不落库（err 响应） ──
+  console.log("\n=== 空话语列表不落库 ===");
+  {
+    const { stage, updates } = await createStage();
+    await saveHistory(stage, createRunner([msg("assistant", "不应被扫描到的运行视图文本")]), {
+      assistantUtterances: [],
+    });
+    assert(updates.length === 0, "显式空列表不落库，且不回退扫描运行视图");
   }
 
   // ── 透传参数 ──

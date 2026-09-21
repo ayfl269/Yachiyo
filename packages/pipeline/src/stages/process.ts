@@ -42,6 +42,31 @@ function stripThinkParts(content: Message["content"]): Message["content"] {
   return filtered.length > 0 ? filtered : undefined;
 }
 
+/**
+ * Ordered list of visible assistant utterances produced by a run.
+ *
+ * `runResult.chains` carries every `llm_result` text the runner emitted, in
+ * order: the intermediate narration between tool calls, then the final reply.
+ * It excludes tool mechanics and reasoning. This is the single source of truth
+ * for "what the assistant said this run" — both delivery
+ * ({@link ProcessStage.applyNonStreamingResult}) and persistence
+ * ({@link ProcessStage.saveRunHistory}) consume it, so what the user receives
+ * and what is stored cannot diverge.
+ *
+ * Falls back to the final response text when no text chains were collected
+ * (e.g. a buffered/streaming path that did not populate `chains`).
+ */
+function extractAssistantUtterances(runResult: RunAgentResult): string[] {
+  const fromChains = runResult.chains
+    .filter((c) => c.type === "text" && typeof c.message === "string" && c.message.trim().length > 0)
+    .map((c) => c.message as string);
+  if (fromChains.length > 0) return fromChains;
+
+  const fr = runResult.finalResponse;
+  const text = fr?.completionText ?? fr?.resultChain?.message ?? "";
+  return text.trim().length > 0 ? [text] : [];
+}
+
 @registerStage
 export class ProcessStage extends PipelineStage {
   private ctx!: PipelineContext;
@@ -191,6 +216,10 @@ export class ProcessStage extends PipelineStage {
           // already excludes.
           await this.saveRunHistory(agentRunner, umo, convId, {
             fallbackAssistantText: event.getExtra<string>("_cachedAssistantText"),
+            // Persist exactly what was delivered (set by
+            // applyNonStreamingResult). Undefined for error responses so the
+            // message-scan fallback does not resurrect the error text.
+            assistantUtterances: event.getExtra<string[]>("_runAssistantUtterances"),
           });
           yield;
         } finally {
@@ -237,45 +266,43 @@ export class ProcessStage extends PipelineStage {
     event: MessageEvent,
     runResult: RunAgentResult,
   ): Promise<void> {
-    if (runResult.finalResponse) {
-      const respText = runResult.finalResponse.completionText
+    const utterances = extractAssistantUtterances(runResult);
+
+    if (runResult.finalResponse?.role === "err") {
+      // Error responses are shown to the user but never persisted as
+      // assistant history. `_cachedAssistantText` / `_runAssistantUtterances`
+      // are intentionally left unset so saveRunHistory stores nothing.
+      const errText = runResult.finalResponse.completionText
         ?? (runResult.finalResponse.resultChain?.message ?? "");
-      const chainText = respText || runResult.chains
-        .filter(c => c.type === "text" && c.message)
-        .map(c => c.message)
-        .join("");
-      const assistantText = chainText || respText;
-      if (runResult.finalResponse.role === "err") {
-        // Don't persist error responses as assistant history.
-        event.setResult(
-          new EventResult()
-            .setResultContentType(ResultContentType.LLM_RESULT)
-            .plain(assistantText)
-        );
-      } else {
-        event.setResult(
-          new EventResult()
-            .setResultContentType(ResultContentType.LLM_RESULT)
-            .plain(assistantText)
-        );
-        event.setExtra("_cachedAssistantText", assistantText);
-      }
-    } else {
-      const chainText = runResult.chains
-        .filter(c => c.type === "text" && c.message)
-        .map(c => c.message)
-        .join("");
-      if (chainText) {
-        event.setResult(
-          new EventResult()
-            .setResultContentType(ResultContentType.LLM_RESULT)
-            .plain(chainText)
-        );
-        event.setExtra("_cachedAssistantText", chainText);
-      } else {
-        console.warn("[ProcessStage] No final response from agent!");
-      }
+      event.setResult(
+        new EventResult()
+          .setResultContentType(ResultContentType.LLM_RESULT)
+          .plain(errText)
+      );
+      return;
     }
+
+    if (utterances.length === 0) {
+      console.warn("[ProcessStage] No final response from agent!");
+      return;
+    }
+
+    // Agent mode: deliver every visible utterance (intermediate narration +
+    // final reply) as its own component so the user follows the agent's work.
+    // Chat mode (default): deliver only the final reply. The SAME list is
+    // stashed for saveRunHistory, so delivery and persistence cannot diverge.
+    const sendIntermediate = this.ctx.config.sendIntermediateReplies === true;
+    const delivered = sendIntermediate
+      ? utterances
+      : [utterances[utterances.length - 1]];
+
+    const result = new EventResult().setResultContentType(ResultContentType.LLM_RESULT);
+    for (const text of delivered) {
+      result.plain(text);
+    }
+    event.setResult(result);
+    event.setExtra("_cachedAssistantText", delivered.join("\n\n"));
+    event.setExtra("_runAssistantUtterances", delivered);
   }
 
   /**
@@ -650,48 +677,64 @@ export class ProcessStage extends PipelineStage {
     agentRunner: ToolLoopAgentRunner,
     umo: string,
     convId: string,
-    options?: { fallbackAssistantText?: string },
+    options?: { fallbackAssistantText?: string; assistantUtterances?: string[] },
   ): Promise<void> {
-    const messages = agentRunner.currentRunContext?.messages;
-    // Fall back to "nothing was produced" when a runner does not report a
-    // boundary: skipping is recoverable, re-appending loaded history is not.
-    const startIndex = typeof agentRunner.runMessagesStartIndex === "number"
-      ? agentRunner.runMessagesStartIndex
-      : (messages?.length ?? 0);
-
-    // NOTE: an empty/missing run view must NOT return early — the fallback
-    // below still needs a chance to persist the extracted reply text.
     const produced: Record<string, unknown>[] = [];
-    for (const msg of (messages ?? []).slice(startIndex)) {
-      if (msg.role === "system" || msg.role === "_checkpoint") continue;
-      if (msg.role === "tool") continue;
-      if (msg._noSave) continue;
 
-      // Strip reasoning parts and decide whether any *visible* content remains.
-      // A message whose only content is thinking (a tool-loop intermediate
-      // step, or a reasoning-only turn) has no conversation value and must not
-      // be persisted as a standalone assistant entry.
-      const content = stripThinkParts(msg.content);
-      const hasVisibleText = typeof content === "string"
-        ? content.trim().length > 0
-        : Array.isArray(content) && content.length > 0;
-      if (msg.role === "assistant" && !hasVisibleText) continue;
+    if (options?.assistantUtterances !== undefined) {
+      // Preferred path (production): persist EXACTLY the utterances that were
+      // delivered to the user. One assistant entry per delivered segment, in
+      // order. An explicit empty array means "nothing was delivered" (e.g. an
+      // error response) and persists nothing — it does NOT fall through to the
+      // message scan. This is what keeps delivery and persistence identical.
+      for (const text of options.assistantUtterances) {
+        if (typeof text === "string" && text.trim().length > 0) {
+          produced.push({ role: "assistant", content: text });
+        }
+      }
+    } else {
+      // Fallback path (tests / callers without a delivered-utterance list):
+      // derive storable messages from the run view.
+      const messages = agentRunner.currentRunContext?.messages;
+      // Fall back to "nothing was produced" when a runner does not report a
+      // boundary: skipping is recoverable, re-appending loaded history is not.
+      const startIndex = typeof agentRunner.runMessagesStartIndex === "number"
+        ? agentRunner.runMessagesStartIndex
+        : (messages?.length ?? 0);
 
-      const entry: Record<string, unknown> = { role: msg.role };
-      if (content !== undefined) entry.content = content;
-      produced.push(entry);
+      for (const msg of (messages ?? []).slice(startIndex)) {
+        if (msg.role === "system" || msg.role === "_checkpoint") continue;
+        if (msg.role === "tool") continue;
+        if (msg._noSave) continue;
+
+        // Strip reasoning parts and decide whether any *visible* content
+        // remains. A message whose only content is thinking has no
+        // conversation value and must not be persisted as a standalone entry.
+        const content = stripThinkParts(msg.content);
+        const hasVisibleText = typeof content === "string"
+          ? content.trim().length > 0
+          : Array.isArray(content) && content.length > 0;
+        if (msg.role === "assistant" && !hasVisibleText) continue;
+
+        const entry: Record<string, unknown> = { role: msg.role };
+        if (content !== undefined) entry.content = content;
+        produced.push(entry);
+      }
+
+      if (produced.length === 0) {
+        // Nothing storable came out of the run (the reply was dropped by
+        // compression, or the run context was already consumed). Fall back to
+        // the text extracted by the pipeline so a reply is never lost.
+        const fallback = options?.fallbackAssistantText;
+        if (!fallback || !fallback.trim()) return;
+        produced.push({ role: "assistant", content: fallback });
+      }
     }
 
-    if (produced.length === 0) {
-      // Nothing storable came out of the run (the reply was dropped by
-      // compression, or the run context was already consumed). Fall back to the
-      // text extracted by the pipeline so a reply is never lost entirely. The
-      // pipeline only supplies this for replies that are meant to be persisted
-      // (error responses are deliberately excluded there).
-      const fallback = options?.fallbackAssistantText;
-      if (!fallback || !fallback.trim()) return;
-      produced.push({ role: "assistant", content: fallback });
-    }
+    // Nothing to append (e.g. an explicit empty utterance list for an error
+    // response): skip the write entirely rather than rewriting the transcript
+    // with identical content.
+    if (produced.length === 0) return;
 
     // Read the stored transcript first. If it cannot be read, skip the write
     // entirely: appending blind could duplicate turns and overwriting could

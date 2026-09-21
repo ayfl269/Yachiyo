@@ -23,6 +23,13 @@ export class RespondStage extends PipelineStage {
   private replyWithQuote: boolean = false;
   private enableSegmentedReply: boolean = false;
   private onlyLlmResultSegmented: boolean = false;
+  /**
+   * Agent mode: when on, each LLM-result component (an intermediate narration
+   * utterance or the final reply) is delivered as its own platform message,
+   * independent of `segmentedReply` (which only splits a single text). This
+   * makes the agent's step-by-step speech arrive as separate messages.
+   */
+  private sendIntermediateReplies: boolean = false;
   private ctx!: PipelineContext;
 
   async initialize(ctx: PipelineContext): Promise<void> {
@@ -31,6 +38,7 @@ export class RespondStage extends PipelineStage {
     this.replyWithQuote = ctx.config.replyWithQuote ?? false;
     this.enableSegmentedReply = ctx.config.segmentedReply ?? false;
     this.onlyLlmResultSegmented = ctx.config.onlyLlmResultSegmented ?? false;
+    this.sendIntermediateReplies = ctx.config.sendIntermediateReplies ?? false;
   }
 
   async process(event: MessageEvent): Promise<void> {
@@ -94,7 +102,10 @@ export class RespondStage extends PipelineStage {
 
       try {
         if (nonRecordComponents.length > 0) {
-          if (this.enableSegmentedReply && nonRecordComponents.length > 1) {
+          // Deliver each component as its own message when either segmented
+          // reply is on (splits one text into several) or agent mode is on
+          // (multiple distinct utterances). Otherwise send them together.
+          if ((this.enableSegmentedReply || this.sendIntermediateReplies) && nonRecordComponents.length > 1) {
             for (let i = 0; i < nonRecordComponents.length; i++) {
               await event.send([nonRecordComponents[i]]);
               if (i < nonRecordComponents.length - 1) {

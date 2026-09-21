@@ -39,6 +39,15 @@ export interface AgentConfig {
   t2iFormat: "png" | "jpeg";
   t2iTemplate: string;
   displayReasoningText: boolean;
+  /**
+   * Agent-style intermediate narration delivery. When false (default), only the
+   * final assistant reply of a run is delivered/persisted — the classic
+   * one-question-one-answer chat behaviour. When true, every visible assistant
+   * utterance produced during a run (the narration emitted between tool calls)
+   * is delivered as its own message and persisted, matching an agent that
+   * "thinks out loud". Tool invocations themselves are never shown.
+   */
+  sendIntermediateReplies: boolean;
   defaultProviderId: string;
   fallbackProviderIds: string[];
   defaultPersonaId: string;
@@ -263,6 +272,7 @@ export class ConfigManager {
       t2iFormat: "png",
       t2iTemplate: "default",
       displayReasoningText: false,
+      sendIntermediateReplies: false,
       reasoningEffort: undefined,
       autoReasoningEffort: false,
       defaultProviderId: "",
