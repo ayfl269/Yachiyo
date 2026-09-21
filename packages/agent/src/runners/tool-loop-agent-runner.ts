@@ -1701,6 +1701,12 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
     // flight when a hard stop fires.
     const handoffResults = await this.prelaunchHandoffs(req, llmResponse);
 
+    // Index of the tool call that tripped the loop-detection hard limit, or -1
+    // if the batch ran to completion. Used after the loop to backfill results
+    // for any remaining tool calls (see below).
+    let hardStopAtIndex = -1;
+    let hardStopReasonText = "";
+
     for (let i = 0; i < (llmResponse.toolsCallName?.length ?? 0); i++) {
       const funcToolName = llmResponse.toolsCallName![i];
       let funcToolArgs = llmResponse.toolsCallArgs?.[i] ?? {};
@@ -1721,19 +1727,26 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
       );
       if (hardStopReason) {
         this.mainAgentLoopHardStopped = true;
+        hardStopAtIndex = i;
+        hardStopReasonText = hardStopReason;
         console.warn(
           `[AgentRunner] Loop-detection hard stop triggered: ${hardStopReason}`
         );
         appendToolCallResult(
           funcToolId,
-          `Tool "${funcToolName}" executed, but the loop-detection hard limit ` +
+          `Tool "${funcToolName}" was not executed: the loop-detection hard limit ` +
           `was triggered (${hardStopReason}). ` +
           MAIN_AGENT_LOOP_HARD_STOP_TEMPLATE.replace("{reason}", hardStopReason).trim()
         );
         // Stop processing remaining tool calls in this batch — the model
         // needs to see the hard-stop notice and produce a final reply.
-        // Also request stop so any in-flight LLM stream is cancelled.
-        this.requestStop();
+        //
+        // Deliberately do NOT call requestStop() here. The hard stop is not a
+        // user cancellation: it is a signal to strip the tool set on the NEXT
+        // step so the model produces a final summary. requestStop() aborts the
+        // shared abortController, which is also the abortSignal for that next
+        // LLM call — so it would kill the very summary we want, ending the run
+        // as "stopped by user" with an "Aborted" error instead of a reply.
         break;
       }
 
@@ -1880,6 +1893,23 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
             ts: Date.now(),
             result: toolResultContent,
           }))
+        );
+      }
+    }
+
+    // Backfill results for tool calls skipped by the hard-stop `break`. The
+    // assistant message below records ALL tool_calls from this LLM response, so
+    // every one must have a matching tool result or the next request fails
+    // validation (dangling tool_use). Emit a short "not executed" result.
+    if (hardStopAtIndex >= 0) {
+      const allNames = llmResponse.toolsCallName ?? [];
+      const allIds = llmResponse.toolsCallIds ?? [];
+      for (let i = hardStopAtIndex + 1; i < allNames.length; i++) {
+        appendToolCallResult(
+          allIds[i],
+          `Tool "${allNames[i]}" was not executed: the loop-detection hard limit ` +
+          `was triggered (${hardStopReasonText}). Tool calls are now disabled; ` +
+          `summarize your findings and reply to the user.`
         );
       }
     }

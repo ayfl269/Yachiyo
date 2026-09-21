@@ -1881,6 +1881,89 @@ function testRedactProxyUrl(): void {
 }
 
 // ============================================================
+// 26b. 测试: 循环检测硬停后仍能产出最终总结（regression）
+// ============================================================
+
+async function testLoopHardStopFinalSummary(): Promise<void> {
+  console.log("\n=== 测试: 循环检测硬停后产出最终总结 ===");
+
+  // 同一工具连续调用达到硬停阈值（5 次）。硬停后应剥离工具集并允许模型
+  // 产出最终总结；此前硬停路径调用 requestStop() 会 abort 共享
+  // abortController，导致下一步（即总结调用）立即以 "Aborted" 失败，整个
+  // 运行被当作“用户中止”。
+  const tool = createFunctionTool({
+    name: "noop",
+    description: "noop",
+    parameters: { type: "object", properties: {} },
+    async handler() { return "ok"; },
+  });
+
+  // provider 每次返回对 noop 的工具调用；硬停后（无工具）返回总结文本。
+  let call = 0;
+  const provider: Provider = {
+    type: "chat_completion",
+    providerConfig: { id: "loop-prov", maxContextTokens: 4096, modalities: ["text", "tool_use"] },
+    async textChat(params: ProviderChatParams): Promise<LLMResponse> {
+      call++;
+      const hasTools = Boolean(params.funcTool && !params.funcTool.empty());
+      if (hasTools) {
+        return {
+          role: "assistant",
+          completionText: "",
+          toolsCallName: ["noop"],
+          toolsCallArgs: [{}],
+          toolsCallIds: [`call-${call}`],
+          isChunk: false,
+        };
+      }
+      // 工具已被剥离 → 产出最终总结
+      return { role: "assistant", completionText: "FINAL SUMMARY", isChunk: false };
+    },
+  };
+
+  const runner = new ToolLoopAgentRunner();
+  const runContext = createContextWrapper<null>(null);
+  const hooks = new EmptyAgentHooks();
+  await runner.reset(runContext, hooks, {
+    provider,
+    request: { prompt: "go", imageUrls: [], audioUrls: [], contexts: [], extraUserContentParts: [] },
+    toolExecutor: new FunctionToolExecutor(),
+    agentHooks: hooks,
+    streaming: false,
+  });
+  (runner as any).req.funcTool = new ToolSet([tool]);
+
+  for await (const _ of runner.stepUntilDone(20)) { void _; }
+
+  assert(runner.done(), "Runner 已完成（未卡死）");
+  assert(!runner.wasAborted(), "硬停不被误判为用户中止");
+  const final = runner.getFinalLlmResp();
+  assert(
+    final?.completionText === "FINAL SUMMARY",
+    `硬停后产出最终总结（actual=${JSON.stringify(final?.completionText)}）`,
+  );
+
+  // 所有 tool_calls 都必须有对应的 tool 结果（否则下一轮 API 会因
+  // 悬空 tool_use 报 400）。这里硬停只发生在第 5 次调用，逐条断言。
+  const messages = runner.currentRunContext.messages;
+  const assistantWithCalls = messages.filter(
+    (m) => m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0,
+  );
+  const toolResultIds = new Set(
+    messages.filter((m) => m.role === "tool").map((m) => m.tool_call_id),
+  );
+  const dangling: string[] = [];
+  for (const am of assistantWithCalls) {
+    for (const tc of am.tool_calls as Array<{ id: string }>) {
+      if (!toolResultIds.has(tc.id)) dangling.push(tc.id);
+    }
+  }
+  assert(dangling.length === 0, `无悬空 tool_calls（dangling=${JSON.stringify(dangling)}）`);
+
+  console.log("  ✅ 循环检测硬停后产出最终总结测试通过");
+}
+
+// ============================================================
 // 27. 测试: L1(ext) — HTML 实体 &#39; 正确解码
 // ============================================================
 
@@ -1938,6 +2021,7 @@ async function main(): Promise<void> {
     await testFileLockWriterStarvationAndModeRelease();
     testRedactProxyUrl();
     testHtmlEntityDecode();
+    await testLoopHardStopFinalSummary();
 
     console.log("\n╔══════════════════════════════════════════╗");
     console.log(`║   通过: ${passCount}  失败: ${failCount}  跳过: ${skipCount}`.padEnd(46) + "║");
