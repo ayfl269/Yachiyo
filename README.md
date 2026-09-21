@@ -223,6 +223,7 @@ pnpm test
 | `DASHBOARD_DEFAULT_USER` | 管理后台默认用户名 | `admin` |
 | `DASHBOARD_DEFAULT_PASSWORD` | 管理后台默认密码（≥ 8 字符，未设置时自动生成） | — |
 | `DATA_DIR` | 数据目录路径（存放 SQLite 数据库与密钥） | `./data` |
+| `WORKSPACE_DIR` | Agent 工具（shell/文件/代码搜索等）的工作区根目录 | 进程启动目录 |
 | `HTTPS_PROXY` / `HTTP_PROXY` | 出站 HTTPS/HTTP 代理地址（同时作用于 undici 与 Playwright） | — |
 
 > 启动时若未设置 `PROVIDER_TYPE` 与 `PROVIDER_API_KEY`，系统将以"无 LLM Provider"模式启动，仍可使用 Dashboard 进行配置。

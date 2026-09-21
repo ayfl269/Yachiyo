@@ -1,5 +1,5 @@
 import { AsyncQueue } from "@yachiyo/common/async-queue.js";
-import { join } from "path";
+import { join, resolve } from "path";
 import type { MessageEvent } from "@yachiyo/message/event.js";
 import { ProviderManager } from "@yachiyo/provider/manager.js";
 import { ConversationManager } from "@yachiyo/conversation/manager.js";
@@ -75,6 +75,13 @@ import type { DashboardServer } from "@yachiyo/dashboard/server.js";
 export interface BootstrapOptions {
   /** 数据目录路径，默认 ./data，支持 DATA_DIR 环境变量覆盖 */
   dataDir?: string;
+
+  /**
+   * Agent 工具（shell/文件/代码搜索等）的工作区根目录。
+   * 默认 process.cwd()，支持 WORKSPACE_DIR 环境变量覆盖。
+   * 与 dataDir 解耦，避免 Agent 文件操作与 SQLite 数据库/密钥混杂。
+   */
+  workspaceDir?: string;
 
   /** 适配器配置列表，支持同时配置多个适配器 */
   adapters?: AdapterConfigBase[];
@@ -156,7 +163,8 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
   }
 
   // 0. 初始化 DatabaseManager 和所有 SQLite 数据库
-  const dataDir = options.dataDir ?? process.env.DATA_DIR ?? "./data";
+  const dataDir = resolve(options.dataDir ?? process.env.DATA_DIR ?? "./data");
+  const workspaceDir = resolve(options.workspaceDir ?? process.env.WORKSPACE_DIR ?? process.cwd());
   const dbManager = new DatabaseManager(dataDir);
   dbManager.initialize();
 
@@ -256,7 +264,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
 
   // 5.1 创建 FunctionToolManager 并注册所有内置工具
   const toolManager = new FunctionToolManager();
-  const workspaceRoot = dataDir;
+  const workspaceRoot = workspaceDir;
 
   // 注册 Web 工具 (web_fetch, web_search, http_request)
   for (const tool of getWebTools()) {
