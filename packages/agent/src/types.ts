@@ -65,6 +65,13 @@ export interface ContextWrapper<TContext = unknown> {
   _funcToolSet?: import("./tool.js").ToolSet;
   _provider?: Provider;
   /**
+   * Whether LLM calls are streamed. Inherited from the parent run so
+   * sub-agent handoffs use the same streaming configuration as the main
+   * agent (`textChatStream` vs `textChat`). Set by
+   * {@link ToolLoopAgentRunner.reset}; defaults to non-streaming when unset.
+   */
+  _streaming?: boolean;
+  /**
    * Fallback providers inherited from the parent agent's run context.
    * Sub-agent handoff uses these when the sub-agent's primary provider
    * fails (empty output, network error, etc.), mirroring the main

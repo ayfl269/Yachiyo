@@ -418,6 +418,9 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
       this.runContext._funcToolSet = this.req.funcTool as ToolSet;
     }
     this.runContext._provider = this.provider;
+    // Expose the streaming flag so sub-agent handoffs inherit the same
+    // streaming configuration as the main agent (see executeHandoff).
+    this.runContext._streaming = this.streaming;
     this.aborted = false;
     this.abortController = new AbortController();
     this.pendingFollowUps = [];
@@ -1094,6 +1097,16 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
 
   get isStreaming(): boolean {
     return this.streaming;
+  }
+
+  /**
+   * Number of agent steps started in the current run (one step = one LLM
+   * call). Unlike counting yielded {@link AgentResponse}s, this is unaffected
+   * by streaming chunks, so it is the correct measure of "steps taken" for
+   * sub-agent loop/timeout reporting.
+   */
+  getStepIndex(): number {
+    return this.runStepIndex;
   }
 
   get currentRequest(): ProviderRequest {

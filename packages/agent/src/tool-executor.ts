@@ -658,7 +658,10 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
       },
       toolExecutor: this,
       agentHooks: new EmptyAgentHooks(),
-      streaming: false,
+      // Inherit the parent run's streaming configuration so sub-agents behave
+      // like the main agent. Defaults to non-streaming when the parent did not
+      // set it (standalone/legacy usage).
+      streaming: runContext._streaming ?? false,
       // Inherit the parent run's LIVE reasoning effort (including any value the
       // auto controller escalated to this step) so the sub-agent thinks at the
       // same intensity. Falls back to the static effort when no auto value is
@@ -708,10 +711,12 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
     // Previously, an exception in the async iterator would skip all three
     // `releaseAll` call sites and leak the locks permanently, which could
     // deadlock subsequent sub-agents waiting on the same files.
-    let stepCount = 0;
     try {
       for await (const response of subRunner.stepUntilDone(LOOP_DETECTION_MAX_TOTAL_STEPS)) {
-        stepCount++;
+        // Note: do NOT count yielded responses here — in streaming mode each
+        // step emits many `streaming_delta` chunks, which would inflate the
+        // step count. Use subRunner.getStepIndex() (one step = one LLM call)
+        // for reporting instead.
 
         // Check execution timeout
         if (Date.now() > executionDeadline) {
@@ -774,7 +779,7 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
             text:
               `[Loop Detection] Sub-agent "${agentName}" was terminated due to a detected loop.\n` +
               `Reason: ${loopReason}\n` +
-              `Steps taken: ${stepCount}\n` +
+              `Steps taken: ${subRunner.getStepIndex()}\n` +
               (partialResult
                 ? `Partial result before termination:\n${partialResult}`
                 : "No partial result was produced before termination."),
@@ -797,7 +802,7 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
             type: "text" as const,
             text:
               `[Timeout] Sub-agent "${agentName}" was terminated after exceeding the execution time limit (${executionTimeoutMs / 1000}s).\n` +
-              `Steps taken: ${stepCount}\n` +
+              `Steps taken: ${subRunner.getStepIndex()}\n` +
               (partialResult
                 ? `Partial result before termination:\n${partialResult}`
                 : "No partial result was produced before termination."),
