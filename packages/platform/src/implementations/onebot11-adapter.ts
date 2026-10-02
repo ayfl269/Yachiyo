@@ -26,6 +26,8 @@ import type { OneBot11AdapterConfig } from "../config.js";
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer, type Server, type IncomingMessage } from "http";
 import { timingSafeEqual } from "crypto";
+import { readFile, stat } from "fs/promises";
+import { fileURLToPath } from "url";
 
 /**
  * #53: 常量时间 token 比较。长度不等时直接返回 false
@@ -54,6 +56,48 @@ function decodeHtmlEntities(str: string): string {
       default: return _match;
     }
   });
+}
+
+/**
+ * OneBot implementations do not consistently accept `file://` URIs.
+ * Some (notably NapCat) stringify an unrecognized image segment back into a
+ * literal `[CQ:image,...]` message instead of uploading it.
+ *
+ * Convert readable local files to `base64://`, which is portable across
+ * local and remote OneBot processes. If the file is not readable by this
+ * process, send the plain filesystem path so an OneBot process that shares
+ * or owns the path can still resolve it.
+ */
+async function normalizeImageSource(source: string): Promise<string> {
+  if (!source) return source;
+
+  const lower = source.toLowerCase();
+  if (
+    lower.startsWith("http://") ||
+    lower.startsWith("https://") ||
+    lower.startsWith("base64://") ||
+    lower.startsWith("data:")
+  ) {
+    return source;
+  }
+
+  let localPath = source;
+  if (lower.startsWith("file://")) {
+    try {
+      localPath = fileURLToPath(source);
+    } catch {
+      return source;
+    }
+  }
+
+  try {
+    const fileStat = await stat(localPath);
+    if (!fileStat.isFile()) return localPath;
+    const data = await readFile(localPath);
+    return `base64://${data.toString("base64")}`;
+  } catch {
+    return localPath;
+  }
 }
 
 // ── OneBot 11 Protocol Types ──
@@ -444,7 +488,7 @@ class OneBot11Event extends MessageEvent {
       params.user_id = uid;
     }
 
-    params.message = this.componentsToOB11(components);
+    params.message = await this.componentsToOB11(components);
 
     if (!this.adapter) {
       console.warn("[OneBot11] Cannot send reply: adapter reference not set");
@@ -559,7 +603,7 @@ class OneBot11Event extends MessageEvent {
     }
   }
 
-  private componentsToOB11(components: MessageComponent[]): OB11MessageSegment[] {
+  private async componentsToOB11(components: MessageComponent[]): Promise<OB11MessageSegment[]> {
     const segments: OB11MessageSegment[] = [];
     for (const comp of components) {
       switch (comp.type) {
@@ -570,8 +614,8 @@ class OneBot11Event extends MessageEvent {
           const img = comp as ImageComponent;
           // #51: 支持 url/file/path 任一非空值作为图片来源
           // (OneBot 11 的 file 字段接受 URL / 本地路径 / base64)。
-          const src = img.url || img.file || img.path || "";
-          segments.push({ type: "image", data: { file: src, url: img.url ?? src } });
+          const src = await normalizeImageSource(img.url || img.file || img.path || "");
+          segments.push({ type: "image", data: { file: src } });
           break;
         }
         case ComponentType.At: {
@@ -806,7 +850,7 @@ export class OneBot11Adapter extends PlatformAdapter {
     const action = typeStr === "group" ? "send_group_msg" : "send_private_msg";
     const params: Record<string, unknown> =
       typeStr === "group" ? { group_id: id } : { user_id: id };
-    params.message = this.componentsToOB11(components);
+    params.message = await this.componentsToOB11(components);
 
     try {
       await this.callApiWithResponse(action, params);
@@ -943,7 +987,7 @@ export class OneBot11Adapter extends PlatformAdapter {
   }
 
   /** 将消息组件转换为 OneBot 11 消息段 */
-  private componentsToOB11(components: MessageComponent[]): OB11MessageSegment[] {
+  private async componentsToOB11(components: MessageComponent[]): Promise<OB11MessageSegment[]> {
     const segments: OB11MessageSegment[] = [];
     for (const comp of components) {
       switch (comp.type) {
@@ -954,8 +998,8 @@ export class OneBot11Adapter extends PlatformAdapter {
           const img = comp as ImageComponent;
           // #51: 支持 url/file/path 任一非空值作为图片来源
           // (OneBot 11 的 file 字段接受 URL / 本地路径 / base64)。
-          const src = img.url || img.file || img.path || "";
-          segments.push({ type: "image", data: { file: src, url: img.url ?? src } });
+          const src = await normalizeImageSource(img.url || img.file || img.path || "");
+          segments.push({ type: "image", data: { file: src } });
           break;
         }
         case ComponentType.At: {

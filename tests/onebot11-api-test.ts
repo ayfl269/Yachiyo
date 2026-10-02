@@ -20,6 +20,11 @@ import { MessageEvent } from "@yachiyo/message/event.js";
 import { PlatformMessage } from "@yachiyo/message/platform-message.js";
 import { MessageType } from "@yachiyo/message/types.js";
 import type { PlatformMetadata } from "@yachiyo/platform/metadata.js";
+import { ComponentType, type ImageComponent } from "@yachiyo/message/components.js";
+import { mkdtemp, rm, writeFile } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
+import { pathToFileURL } from "url";
 
 let passed = 0;
 let failed = 0;
@@ -473,6 +478,48 @@ async function main(): Promise<void> {
       assert(typedResults[4].user_id === 5, "Fifth result should have user_id=5");
       assert(typedResults[2].nickname === "User3", "Third result should have correct nickname");
       mockServer.messageHandler = null;
+    }
+
+    // ── Test: local image is sent as base64, not a literal CQ code ──
+    console.log("\n=== sendProactiveMessage: local image normalization ===");
+    {
+      const tempDir = await mkdtemp(join(tmpdir(), "yachiyo-onebot-image-"));
+      const imagePath = join(tempDir, "one.png");
+      const imageBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      await writeFile(imagePath, imageBytes);
+
+      const receivedParams: Array<Record<string, unknown>> = [];
+      mockServer.messageHandler = (msg) => {
+        receivedParams.push(msg.params);
+        mockServer.broadcast({ echo: msg.echo, retcode: 0, status: "ok", data: { message_id: 1 } });
+      };
+
+      const imageComponent: ImageComponent = {
+        type: ComponentType.Image,
+        url: pathToFileURL(imagePath).toString(),
+        toDict() {
+          return { type: "image", data: { url: this.url } };
+        },
+      };
+      const delivered = await adapter.sendProactiveMessage(
+        { umo: "onebot11:group:12345", sessionId: "group_12345", platformId: "test-ob11" },
+        [imageComponent],
+      );
+
+      const message = receivedParams.at(-1)?.message as
+        | Array<{ type: string; data: { file?: string } }>
+        | undefined;
+      const imageSegment = message?.find((segment) => segment.type === "image");
+      assert(delivered, "Should deliver proactive image message");
+      assert(mockServer.lastReceivedAction === "send_group_msg", "Should call send_group_msg");
+      assert(imageSegment?.data.file?.startsWith("base64://") === true, "Should convert local file URI to base64");
+      assert(
+        imageSegment?.data.file === `base64://${imageBytes.toString("base64")}`,
+        "Should preserve the local image bytes",
+      );
+
+      mockServer.messageHandler = null;
+      await rm(tempDir, { recursive: true, force: true });
     }
 
     // ── Test: rejectAllPending on stop ──
