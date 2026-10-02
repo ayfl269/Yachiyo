@@ -27,7 +27,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { createServer, type Server, type IncomingMessage } from "http";
 import { timingSafeEqual } from "crypto";
 import { readFile, stat } from "fs/promises";
-import { fileURLToPath } from "url";
+import { resolveFileUriPath } from "@yachiyo/common/download-utils.js";
 
 /**
  * #53: 常量时间 token 比较。长度不等时直接返回 false
@@ -66,7 +66,7 @@ function decodeHtmlEntities(str: string): string {
  * Convert readable local files to `base64://`, which is portable across
  * local and remote OneBot processes. If the file is not readable by this
  * process, send the plain filesystem path so an OneBot process that shares
- * or owns the path can still resolve it.
+ * or owns the path can still resolve it. A raw `file://` URI is never sent.
  */
 async function normalizeImageSource(source: string): Promise<string> {
   if (!source) return source;
@@ -81,14 +81,7 @@ async function normalizeImageSource(source: string): Promise<string> {
     return source;
   }
 
-  let localPath = source;
-  if (lower.startsWith("file://")) {
-    try {
-      localPath = fileURLToPath(source);
-    } catch {
-      return source;
-    }
-  }
+  const localPath = lower.startsWith("file://") ? resolveFileUriPath(source) : source;
 
   try {
     const fileStat = await stat(localPath);
@@ -96,6 +89,12 @@ async function normalizeImageSource(source: string): Promise<string> {
     const data = await readFile(localPath);
     return `base64://${data.toString("base64")}`;
   } catch {
+    // Not readable here (missing, permissions, or a path only a remote OneBot
+    // process owns). The plain path is the best we can send; log it so the
+    // degraded case is diagnosable instead of silently producing CQ text.
+    console.warn(
+      `[OneBot11] Image not readable by this process, sending plain path: ${localPath}`,
+    );
     return localPath;
   }
 }

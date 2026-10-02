@@ -522,6 +522,52 @@ async function main(): Promise<void> {
       await rm(tempDir, { recursive: true, force: true });
     }
 
+    // ── Test: an unresolvable file:// URI must not reach the wire verbatim ──
+    // NapCat stringifies an image segment it cannot resolve back into a
+    // literal `[CQ:image,file=file:///root/1.png]` text message, so the scheme
+    // has to be stripped even when this process cannot read the file (on
+    // Windows `fileURLToPath` even throws for a POSIX path like this one).
+    console.log("\n=== sendProactiveMessage: unresolvable file URI normalization ===");
+    {
+      const receivedParams: Array<Record<string, unknown>> = [];
+      mockServer.messageHandler = (msg) => {
+        receivedParams.push(msg.params);
+        mockServer.broadcast({ echo: msg.echo, retcode: 0, status: "ok", data: { message_id: 1 } });
+      };
+
+      const imageComponent: ImageComponent = {
+        type: ComponentType.Image,
+        url: "file:///root/1.png",
+        toDict() {
+          return { type: "image", data: { url: this.url } };
+        },
+      };
+      const delivered = await adapter.sendProactiveMessage(
+        { umo: "onebot11:group:12345", sessionId: "group_12345", platformId: "test-ob11" },
+        [imageComponent],
+      );
+
+      const message = receivedParams.at(-1)?.message as
+        | Array<{ type: string; data: { file?: string; url?: string } }>
+        | undefined;
+      const imageSegment = message?.find((segment) => segment.type === "image");
+      assert(delivered, "Should deliver image with unresolvable file URI");
+      assert(
+        imageSegment?.data.file === "/root/1.png",
+        `Should strip the file:// scheme, keeping the POSIX path (actual=${imageSegment?.data.file})`,
+      );
+      assert(
+        imageSegment?.data.file?.startsWith("file://") === false,
+        "Should never emit a raw file:// URI",
+      );
+      assert(
+        imageSegment?.data.url === undefined,
+        "Should not populate url for a non-http source",
+      );
+
+      mockServer.messageHandler = null;
+    }
+
     // ── Test: rejectAllPending on stop ──
     console.log("\n=== rejectAllPending on stop ===");
     {

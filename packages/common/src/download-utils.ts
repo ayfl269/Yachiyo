@@ -316,7 +316,7 @@ export async function resolveAudioToDataUrl(audioRef: string): Promise<string | 
 
 // ── Internal helpers ──
 
-function resolveFileUriPath(uri: string): string {
+export function resolveFileUriPath(uri: string): string {
   try {
     return fileURLToPath(uri);
   } catch {
@@ -326,7 +326,13 @@ function resolveFileUriPath(uri: string): string {
     if (process.platform === "win32" && /^\/[A-Za-z]:/.test(path)) {
       path = path.slice(1);
     }
-    return decodeURIComponent(path);
+    try {
+      return decodeURIComponent(path);
+    } catch {
+      // Malformed %-escape: keep the raw path rather than throwing, so a bad
+      // URI can never abort the send that is being resolved.
+      return path;
+    }
   }
 }
 
