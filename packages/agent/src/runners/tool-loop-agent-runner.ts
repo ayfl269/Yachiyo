@@ -149,8 +149,6 @@ const REPEATED_TOOL_NOTICE_L3_TEMPLATE =
 // Mirrors the sub-agent loop detection in tool-executor.ts so behaviour
 // is consistent between main agent and handoff sub-agents.
 
-/** Same tool called N times consecutively → hard stop. */
-const MAIN_AGENT_LOOP_MAX_SAME_TOOL = 5;
 /** Same tool + same arguments called N times → hard stop. */
 const MAIN_AGENT_LOOP_MAX_SAME_ARGS = 3;
 
@@ -1330,13 +1328,11 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
   /**
    * Detect main-agent tool-calling loops that warrant a hard stop.
    *
-   * Two independent signals:
-   * 1. Same tool called {@link MAIN_AGENT_LOOP_MAX_SAME_TOOL} times
-   *    consecutively (matches sub-agent loop detection).
-   * 2. Same tool + same arguments called
-   *    {@link MAIN_AGENT_LOOP_MAX_SAME_ARGS} times (catches alternating-tool
-   *    loops where the model ping-pongs between two tools but the args
-   *    repeat — a clearer stuck signal than streak alone).
+   * Same tool + same arguments called {@link MAIN_AGENT_LOOP_MAX_SAME_ARGS}
+   * times is the hard-stop signal. A same-tool streak alone is intentionally
+   * not a hard stop: long tasks routinely call one tool many times with
+   * different arguments (for example fetching many URLs). The streak still
+   * drives soft notices and automatic reasoning effort elsewhere.
    *
    * Returns `null` if no hard limit is triggered, otherwise a human-readable
    * reason string suitable for inclusion in a [SYSTEM NOTICE] to the model.
@@ -1348,14 +1344,8 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
   private detectMainAgentLoop(
     toolName: string,
     toolArgs: Record<string, unknown>,
-    streak: number
   ): string | null {
-    // Signal 1: same-tool streak
-    if (streak >= MAIN_AGENT_LOOP_MAX_SAME_TOOL) {
-      return `tool "${toolName}" called ${streak} times consecutively`;
-    }
-
-    // Signal 2: same tool + same args fingerprint
+    // Same tool + same args fingerprint.
     const fingerprint = `${toolName}:${stableStringifyForLoop(toolArgs)}`;
     const count = (this.mainAgentArgFingerprints.get(fingerprint) ?? 0) + 1;
     this.mainAgentArgFingerprints.set(fingerprint, count);
@@ -1740,13 +1730,11 @@ export class ToolLoopAgentRunner<TContext = unknown> extends BaseAgentRunner<TCo
 
       // Main-agent loop detection (hard limit). Soft notices are still
       // produced by `buildRepeatedToolCallGuidance` below; the hard limit
-      // fires when streak/arg-repeat crosses the configured threshold and
-      // forces the next step to drop the tool set so the model must
-      // produce a final summary.
+      // fires when identical arguments repeat and forces the next step to
+      // drop the tool set so the model must produce a final summary.
       const hardStopReason = this.detectMainAgentLoop(
         funcToolName,
         funcToolArgs as Record<string, unknown>,
-        toolCallStreak,
       );
       if (hardStopReason) {
         this.mainAgentLoopHardStopped = true;

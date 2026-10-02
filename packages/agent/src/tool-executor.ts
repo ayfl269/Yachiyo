@@ -688,12 +688,9 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
     }
 
     // ── Sub-agent loop detection ──
-    const LOOP_DETECTION_MAX_SAME_TOOL = 5;       // Same tool called N times consecutively
     const LOOP_DETECTION_MAX_SAME_ARGS = 3;       // Same tool + same args called N times
     const LOOP_DETECTION_MAX_TOTAL_STEPS = sandboxPolicy.maxToolCalls ?? 30;    // Use sandbox policy limit
 
-    let lastToolName: string | null = null;
-    let sameToolStreak = 0;
     const argFingerprints: Map<string, number> = new Map();
     let loopDetected = false;
     let loopReason = "";
@@ -732,21 +729,9 @@ export class FunctionToolExecutor<TContext = unknown> extends BaseFunctionToolEx
             const toolArgs = data.args as Record<string, unknown> | undefined;
 
             if (toolName) {
-              // Check 1: Same tool streak
-              if (toolName === lastToolName) {
-                sameToolStreak++;
-              } else {
-                lastToolName = toolName;
-                sameToolStreak = 1;
-              }
-
-              if (sameToolStreak >= LOOP_DETECTION_MAX_SAME_TOOL) {
-                loopDetected = true;
-                loopReason = `Sub-agent called tool "${toolName}" ${sameToolStreak} times consecutively without progress.`;
-                break;
-              }
-
-              // Check 2: Same tool + same args fingerprint
+              // Same tool + same args fingerprint. A same-tool streak alone
+              // is not a loop: long tasks may call one tool with changing
+              // arguments many times.
               if (toolArgs) {
                 const fingerprint = `${toolName}:${stableStringify(toolArgs)}`;
                 const count = (argFingerprints.get(fingerprint) ?? 0) + 1;

@@ -1890,8 +1890,8 @@ function testRedactProxyUrl(): void {
 async function testLoopHardStopFinalSummary(): Promise<void> {
   console.log("\n=== 测试: 循环检测硬停后产出最终总结 ===");
 
-  // 同一工具连续调用达到硬停阈值（5 次）。硬停后应剥离工具集并允许模型
-  // 产出最终总结；此前硬停路径调用 requestStop() 会 abort 共享
+  // 同一工具 + 同一参数累计达到硬停阈值（3 次）。硬停后应剥离工具集并
+  // 允许模型产出最终总结；此前硬停路径调用 requestStop() 会 abort 共享
   // abortController，导致下一步（即总结调用）立即以 "Aborted" 失败，整个
   // 运行被当作“用户中止”。
   const tool = createFunctionTool({
@@ -1901,7 +1901,7 @@ async function testLoopHardStopFinalSummary(): Promise<void> {
     async handler() { return "ok"; },
   });
 
-  // provider 每次返回对 noop 的工具调用；硬停后（无工具）返回总结文本。
+  // provider 每次返回对 noop 的相同工具调用；硬停后（无工具）返回总结文本。
   let call = 0;
   const provider: Provider = {
     type: "chat_completion",
@@ -1947,7 +1947,7 @@ async function testLoopHardStopFinalSummary(): Promise<void> {
   );
 
   // 所有 tool_calls 都必须有对应的 tool 结果（否则下一轮 API 会因
-  // 悬空 tool_use 报 400）。这里硬停只发生在第 5 次调用，逐条断言。
+  // 悬空 tool_use 报 400）。这里硬停发生在相同参数的第 3 次调用。
   const messages = runner.currentRunContext.messages;
   const assistantWithCalls = messages.filter(
     (m) => m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0,
@@ -1964,6 +1964,142 @@ async function testLoopHardStopFinalSummary(): Promise<void> {
   assert(dangling.length === 0, `无悬空 tool_calls（dangling=${JSON.stringify(dangling)}）`);
 
   console.log("  ✅ 循环检测硬停后产出最终总结测试通过");
+}
+
+// ============================================================
+// 26b-2. 测试: 同工具不同参数的长任务不会被循环硬停
+// ============================================================
+
+async function testSameToolDifferentArgsIsNotHardStop(): Promise<void> {
+  console.log("\n=== 测试: 同工具不同参数长任务不被循环硬停 ===");
+
+  const tool = createFunctionTool({
+    name: "fetch_like",
+    description: "fetch-like",
+    parameters: {
+      type: "object",
+      properties: {
+        url: { type: "string" },
+      },
+      required: ["url"],
+    },
+    async handler(_ctx, url) { return `fetched ${url}`; },
+  });
+
+  const TOTAL_CALLS = 8;
+  let call = 0;
+  const provider: Provider = {
+    type: "chat_completion",
+    providerConfig: { id: "long-task-prov", maxContextTokens: 4096, modalities: ["text", "tool_use"] },
+    async textChat(params: ProviderChatParams): Promise<LLMResponse> {
+      call++;
+      const hasTools = Boolean(params.funcTool && !params.funcTool.empty());
+      if (hasTools && call <= TOTAL_CALLS) {
+        return {
+          role: "assistant",
+          completionText: "",
+          toolsCallName: ["fetch_like"],
+          toolsCallArgs: [{ url: `https://example.com/${call}` }],
+          toolsCallIds: [`call-${call}`],
+          isChunk: false,
+        };
+      }
+      return { role: "assistant", completionText: "LONG TASK DONE", isChunk: false };
+    },
+  };
+
+  const runner = new ToolLoopAgentRunner();
+  const runContext = createContextWrapper<null>(null);
+  const hooks = new EmptyAgentHooks();
+  await runner.reset(runContext, hooks, {
+    provider,
+    request: { prompt: "fetch many", imageUrls: [], audioUrls: [], contexts: [], extraUserContentParts: [] },
+    toolExecutor: new FunctionToolExecutor(),
+    agentHooks: hooks,
+    streaming: false,
+  });
+  (runner as any).req.funcTool = new ToolSet([tool]);
+
+  for await (const _ of runner.stepUntilDone(20)) { void _; }
+
+  assert(runner.done(), "Runner 已完成");
+  assert(!runner.wasAborted(), "长任务不被误判为用户中止");
+  assert(
+    runner.getFinalLlmResp()?.completionText === "LONG TASK DONE",
+    `同工具不同参数可持续执行（actual=${JSON.stringify(runner.getFinalLlmResp()?.completionText)}）`,
+  );
+  assert(call >= TOTAL_CALLS + 1, `工具调用次数未被硬停截断（actual=${call}）`);
+
+  console.log("  ✅ 同工具不同参数长任务不被硬停测试通过");
+}
+
+// ============================================================
+// 26b-3. 测试: 子代理同工具不同参数的长任务不会被循环终止
+// ============================================================
+
+async function testSubAgentSameToolDifferentArgsIsNotLoop(): Promise<void> {
+  console.log("\n=== 测试: 子代理同工具不同参数长任务不被循环终止 ===");
+
+  const fetchTool = createFunctionTool({
+    name: "fetch_like",
+    description: "fetch-like",
+    parameters: {
+      type: "object",
+      properties: {
+        url: { type: "string" },
+      },
+      required: ["url"],
+    },
+    async handler(_ctx, url) { return `fetched ${url}`; },
+  });
+
+  const TOTAL_CALLS = 8;
+  let call = 0;
+  const provider: Provider = {
+    type: "chat_completion",
+    providerConfig: { id: "subagent-long-task-prov", maxContextTokens: 4096, modalities: ["text", "tool_use"] },
+    async textChat(params: ProviderChatParams): Promise<LLMResponse> {
+      call++;
+      const hasTools = Boolean(params.funcTool && !params.funcTool.empty());
+      if (hasTools && call <= TOTAL_CALLS) {
+        return {
+          role: "assistant",
+          completionText: "",
+          toolsCallName: ["fetch_like"],
+          toolsCallArgs: [{ url: `https://example.com/sub/${call}` }],
+          toolsCallIds: [`sub-call-${call}`],
+          isChunk: false,
+        };
+      }
+      return { role: "assistant", completionText: "SUBAGENT DONE", isChunk: false };
+    },
+  };
+
+  const subAgent = createAgent({
+    name: "long-task-subagent",
+    instructions: "Fetch many URLs.",
+    tools: [fetchTool],
+  });
+  const handoff = createHandoffTool(subAgent);
+  const executor = new FunctionToolExecutor();
+  const runContext = createContextWrapper<Record<string, unknown>>({}, { toolCallTimeout: 120 });
+  runContext._provider = provider;
+
+  const results: CallToolResult[] = [];
+  for await (const result of executor.execute(handoff, runContext, { input: "fetch many" })) {
+    results.push(result);
+  }
+
+  const text = results
+    .flatMap((r) => r.content)
+    .filter((part): part is { type: "text"; text: string } => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
+  assert(!text.includes("[Loop Detection]"), `子代理未被循环检测终止（actual=${JSON.stringify(text)}）`);
+  assert(text.includes("SUBAGENT DONE"), `子代理正常返回最终结果（actual=${JSON.stringify(text)}）`);
+  assert(call >= TOTAL_CALLS + 1, `子代理工具调用次数未被截断（actual=${call}）`);
+
+  console.log("  ✅ 子代理同工具不同参数长任务不被循环终止测试通过");
 }
 
 // ============================================================
@@ -2124,6 +2260,8 @@ async function main(): Promise<void> {
     testRedactProxyUrl();
     testHtmlEntityDecode();
     await testLoopHardStopFinalSummary();
+    await testSameToolDifferentArgsIsNotHardStop();
+    await testSubAgentSameToolDifferentArgsIsNotLoop();
     await testCommandToolsAndSandboxPolicy();
     await testDestructiveCommandFalsePositives();
 
