@@ -100,6 +100,17 @@ async function normalizeImageSource(source: string): Promise<string> {
   }
 }
 
+/**
+ * `file` always carries the normalized source. `url` is only populated when
+ * that source really is an http(s) link, so base64 payloads and filesystem
+ * paths are never handed to the OneBot side as a bogus image URL.
+ */
+function buildImageSegmentData(source: string): Record<string, unknown> {
+  const data: Record<string, unknown> = { file: source };
+  if (/^https?:\/\//i.test(source)) data.url = source;
+  return data;
+}
+
 // ── OneBot 11 Protocol Types ──
 
 interface OB11MessageSegment {
@@ -615,7 +626,7 @@ class OneBot11Event extends MessageEvent {
           // #51: 支持 url/file/path 任一非空值作为图片来源
           // (OneBot 11 的 file 字段接受 URL / 本地路径 / base64)。
           const src = await normalizeImageSource(img.url || img.file || img.path || "");
-          segments.push({ type: "image", data: { file: src } });
+          segments.push({ type: "image", data: buildImageSegmentData(src) });
           break;
         }
         case ComponentType.At: {
@@ -999,7 +1010,7 @@ export class OneBot11Adapter extends PlatformAdapter {
           // #51: 支持 url/file/path 任一非空值作为图片来源
           // (OneBot 11 的 file 字段接受 URL / 本地路径 / base64)。
           const src = await normalizeImageSource(img.url || img.file || img.path || "");
-          segments.push({ type: "image", data: { file: src } });
+          segments.push({ type: "image", data: buildImageSegmentData(src) });
           break;
         }
         case ComponentType.At: {
