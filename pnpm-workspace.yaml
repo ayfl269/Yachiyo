@@ -7,6 +7,7 @@ allowBuilds:
 
 minimumReleaseAgeExclude:
   - hono@4.13.7
+  - ip-address@10.7.3
 
 # 锁定已知漏洞的传递依赖到修复版本
 overrides:
@@ -14,13 +15,12 @@ overrides:
   bl: ^2.2.1
   ini: ^1.3.8
   # brace-expansion 有三条链路（v1 来自 minimatch@3 → eslint, v2 来自 minimatch@9 → ts-estree, v5 来自 minimatch@10 → ts-estree）
-  # 使用版本限定覆盖以仅修补受影响版本（ref: GHSA-3jxr-9vmj-r5cp, GHSA-mh99-v99m-4gvg）
-  # CVE-2026-13149：DoS via exponential-time expansion of consecutive non-expanding {} groups
-  # 影响范围：>= 2.0.0, < 2.1.2 / >= 3.0.0, < 5.0.7 / < 1.1.16
-  # 修复版本：v1 = 1.1.16, v2 = 2.1.2, v5 = 5.0.7+（override 到 5.0.8 兼顾 CVE-2026-14257）
-  'brace-expansion@1.1.15': 1.1.16
-  'brace-expansion@2.1.1': 2.1.2
-  'brace-expansion@5.0.6': 5.0.8
+  # 使用版本限定覆盖以仅修补受影响版本（ref: GHSA-3jxr-9vmj-r5cp, GHSA-mh99-v99m-4gvg, GHSA-q2hr-2g5m-vwhr）
+  # GHSA-q2hr-2g5m-vwhr：quadratic-time expansion of the `{a},b}` rewrite causes CPU DoS
+  # 修复版本：v1 = 1.1.21, v2 = 2.1.7, v5 = 5.0.12
+  'brace-expansion@1.1.15': 1.1.21
+  'brace-expansion@2.1.1': 2.1.7
+  'brace-expansion@5.0.6': 5.0.12
   # GHSA-5p4m-2wfm-xmqj / CVE-2026-59870（5.x 编号，修复未回移至 3.x/4.x）：
   # !!omap 解析时 resolveYamlOmap() 用 objectKeys.indexOf() 线性扫描做键唯一性校验，
   # 整体复杂度 O(n²)，构造的 YAML 文档可使 yaml.load() 同步阻塞事件循环造成 DoS。
@@ -36,11 +36,14 @@ overrides:
   # - CVE-2026-76172 / GHSA-jqff-g426-hqxp：百分比编码 scheme 规范化导致宿主混淆（3.1.6 修复）
   # - GHSA-qw65-cvwx-89v3：serialize() 端口未校验导致 authority 注入（3.1.7 修复）
   # - GHSA-58mr-gqgx-xq4g：IP 字面量括号不匹配导致宿主混淆（3.1.7 修复）
-  # 直接锁 3.x 线头部 3.1.7，避免逐版本追赶后续安全通告
-  fast-uri: 3.1.7
+  # - GHSA-hrr3-gc8f-f4qj：百分比编码八位组导致 host case normalization 不一致（3.1.8 修复）
+  # 直接锁 3.x 线头部 3.1.8，避免逐版本追赶后续安全通告
+  fast-uri: 3.1.8
   # GHSA-mwp4-54f8-5fhr：ip-address leading-zero octet SSRF / trust-boundary bypass
-  # 影响范围：<=10.3.0；来自 @modelcontextprotocol/sdk → express-rate-limit → ip-address
-  ip-address: 10.3.1
+  # 以及 GHSA-2vr4-cq9g-pvrc、GHSA-rpw4-54j3-4h4q、GHSA-j6r3-76f7-8jcv、GHSA-h3mg-xc3c-68pw
+  # 影响范围：NAT64 / fe80::/10 分类错误、跨地址族子网比较、无界解析诊断
+  # 来自 @modelcontextprotocol/sdk → express-rate-limit → ip-address；10.7.1 修复上述告警
+  ip-address: 10.7.3
   # qs 安全修复（来自 @modelcontextprotocol/sdk → express / body-parser → qs）：
   # - CVE-2026-2391 / GHSA-w7fw-mjwx-w883：`[]=` 逗号分组的 arrayLimit 绕过（6.16.0 修复）
   # - CVE-2026-82417 / GHSA-4mjr-xmp4-gh2g：isBuffer() 未校验 constructor.isBuffer 可调用性，

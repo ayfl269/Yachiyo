@@ -7,3 +7,6 @@
 # 影响范围：< 8.5.23；来自 vite / @vitejs/plugin-react → postcss
 overrides:
   postcss: 8.5.25
+  # GHSA-2v37-7h3g-55p8：custom generator 在 size 为 0 时可无限循环（3.3.18 修复）
+  # 来自 vite / @vitejs/plugin-react → postcss → nanoid
+  nanoid: 3.3.18
