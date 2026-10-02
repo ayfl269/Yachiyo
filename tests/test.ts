@@ -2085,12 +2085,13 @@ async function testSubAgentSameToolDifferentArgsIsNotLoop(): Promise<void> {
   const runContext = createContextWrapper<Record<string, unknown>>({}, { toolCallTimeout: 120 });
   runContext._provider = provider;
 
-  const results: CallToolResult[] = [];
+  const results: (CallToolResult | null)[] = [];
   for await (const result of executor.execute(handoff, runContext, { input: "fetch many" })) {
     results.push(result);
   }
 
   const text = results
+    .filter((r): r is CallToolResult => r !== null)
     .flatMap((r) => r.content)
     .filter((part): part is { type: "text"; text: string } => part.type === "text")
     .map((part) => part.text)
