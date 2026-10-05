@@ -1,4 +1,5 @@
 import { AsyncQueue } from "@yachiyo/common/async-queue.js";
+import { getStartupAdapterConfigs } from "./startup-adapters.js";
 import { join, resolve } from "path";
 import type { MessageEvent } from "@yachiyo/message/event.js";
 import { ProviderManager } from "@yachiyo/provider/manager.js";
@@ -408,9 +409,12 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
 
   // 注册定时任务工具 + 任务调度服务
   const sqliteSchedulerTaskStore = new SqliteSchedulerTaskStore(dbManager.getDb("scheduler"));
-  const schedulerTool = createSchedulerTool({ sqliteStore: sqliteSchedulerTaskStore });
-  toolManager.addToolInstance(schedulerTool);
   const taskScheduler = new TaskScheduler(sqliteSchedulerTaskStore);
+  const schedulerTool = createSchedulerTool({
+    sqliteStore: sqliteSchedulerTaskStore,
+    fireNow: (id) => taskScheduler.fireNow(id),
+  });
+  toolManager.addToolInstance(schedulerTool);
 
   // 注册跨平台消息发送工具
   const crossPlatformSendTool = createCrossPlatformSendTool({ adapterLookup: adapterRegistry });
@@ -512,7 +516,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
 
   if (savedAdapters.length > 0) {
     // 从数据库恢复适配器
-    for (const adapterConfig of savedAdapters) {
+    for (const adapterConfig of getStartupAdapterConfigs(options, savedAdapters)) {
       if (adapterConfig.enabled === false) continue;
       try {
         adapterRegistry.createAdapter(adapterConfig.type, adapterConfig, eventQueue);
@@ -522,7 +526,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
     }
   } else {
     // 数据库为空：使用启动参数或默认配置
-    for (const adapterConfig of options.adapters ?? []) {
+    for (const adapterConfig of getStartupAdapterConfigs(options)) {
       const validated = validateAdapterConfig(adapterConfig);
       if (validated.enabled === false) continue;
       adapterRegistry.createAdapter(validated.type, validated, eventQueue);
@@ -584,8 +588,9 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
     // onResponded: model has generated and sent its response. Mark the task
     // as fired to prevent the fallback from also firing.
     const onResponded = () => {
-      sqliteSchedulerTaskStore.markFired(task.id, new Date());
-      console.log(`[Bootstrap] Pre-fire: model responded for task "${task.title}" (${task.id}), marked as fired.`);
+      if (sqliteSchedulerTaskStore.markFired(task.id, new Date(), task.occurrenceId)) {
+        console.log(`[Bootstrap] Pre-fire: model responded for task "${task.title}" (${task.id}), marked as fired.`);
+      }
     };
 
     adapter.triggerAgentMessage(target, prompt, onResponded, historyMessage);
@@ -647,6 +652,7 @@ export async function bootstrap(options: BootstrapOptions): Promise<BootstrapCon
         memoryConsolidator,
         ltmConsolidator: ltmConsolidationJob,
         schedulerStore: sqliteSchedulerTaskStore,
+        fireSchedulerTask: (id) => taskScheduler.fireNow(id),
         shutdown: async () => {},
       },
       {

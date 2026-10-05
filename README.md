@@ -158,7 +158,7 @@ pnpm frontend:dev
 pnpm test
 ```
 
-包含的测试文件（全部 22 个由 `pnpm test` 运行）：
+包含的测试文件（共 28 个由 `pnpm test` 运行）：
 
 | 测试文件 | 测试内容 |
 |----------|---------|
@@ -169,13 +169,16 @@ pnpm test
 | `tests/memory-system-test.ts` | 记忆提取与整理 |
 | `tests/long-term-consolidation-test.ts` | 长期记忆语义合并、数据库迁移与存量数据保留 |
 | `tests/provider-caching-test.ts` | 模型 Prompt 缓存 |
+| `tests/reasoning-effort-test.ts` | 模型推理强度配置与传递 |
 | `tests/provider-manager-test.ts` | 模型加载与 MCP 安全校验 |
 | `tests/provider-stream-parsers-test.ts` | 各 Provider 流式响应解析 |
+| `tests/provider-reasoning-separation-test.ts` | 推理内容与用户可见回复分离 |
 | `tests/model-context-limit-test.ts` | 上下文窗口解析（官方元数据优先、`max_tokens` 32k 下界、降级阶梯） |
 | `tests/context-downgrade-test.ts` | context-overflow 识别、真实窗口解析与压缩阈值按窗口重算 |
 | `tests/pipeline-stages-test.ts` | Pipeline 8 阶段核心逻辑单元测试 |
 | `tests/save-run-history-test.ts` | saveRunHistory 历史写入、中间态过滤与 append-only 语义 |
 | `tests/full-memory-indexing-test.ts` | 全量会话持久化与后台记忆索引生成/检索 |
+| `tests/periodic-indexing-test.ts` | 周期定时记忆索引端到端验证 |
 | `tests/conversation-test.ts` | 对话管理（会话映射、历史、API Key） |
 | `tests/save-platform-file-test.ts` | save_platform_file 工具（URL 校验、路径穿越防护、文件下载） |
 | `tests/onebot11-api-test.ts` | OneBot11 适配器 API 响应机制（Echo 关联、超时、核心 API） |
@@ -185,6 +188,8 @@ pnpm test
 | `tests/qqofficial-test.ts` | QQ Official Bot 适配器（富媒体、扩展发送、撤回、表态、频道/公告/权限） |
 | `tests/review-fixes-test.ts` | 代码审查修复回归（SSRF 元数据绕过、会话归属隔离、插件工具派发、Provider 去重） |
 | `tests/dashboard-security-test.ts` | 管理后台安全助手（路径包含校验、ZIP 条目净化） |
+| `tests/scheduler-system-test.ts` | 定时任务 CRUD、会话隔离、即时投递与周期任务幂等 |
+| `tests/startup-adapters-test.ts` | OneBot11 启动配置与适配器列表优先级 |
 
 另可通过独立脚本运行：
 
@@ -201,9 +206,8 @@ pnpm test
 | `tests/ask-user-tool-test.ts` | ask_user 工具（澄清交互、选项卡片） |
 | `tests/knowledge-base-test.ts` | 知识库分块、向量检索与 RAG |
 | `tests/proxy-tool-test.ts` | proxy_manage 工具（运行时代理切换） |
-| `tests/scheduler-system-test.ts` | 定时任务两阶段触发与状态机 |
 
-全部测试文件（含上表 23 个与独立脚本）均纳入 `pnpm typecheck` 的 `tsconfig.tests.json` 类型检查，无白名单排除。
+全部测试文件（含独立脚本）均纳入 `pnpm typecheck` 的 `tsconfig.tests.json` 类型检查，无白名单排除。
 
 ---
 
@@ -218,7 +222,8 @@ pnpm test
 | `PROVIDER_MODEL` | 模型名称 | `gpt-4o-mini` |
 | `PROVIDER_BASE_URL` | 自定义 API Base URL（可选） | — |
 | `WEBHOOK_PORT` | OneBot11 WebSocket 监听端口 | `8080` |
-| `WEBHOOK_HOST` | OneBot11 WebSocket 监听地址 | `0.0.0.0` |
+| `WEBHOOK_HOST` | OneBot11 WebSocket 监听地址 | `127.0.0.1` |
+| `WEBHOOK_ACCESS_TOKEN` | OneBot11 WebSocket 鉴权 Token（可选） | — |
 | `DASHBOARD_ENABLED` | 是否启用管理后台（设为 `false` 关闭） | 启用 |
 | `DASHBOARD_PORT` | 管理后台端口 | `8000` |
 | `DASHBOARD_HOST` | 管理后台监听地址 | `0.0.0.0` |
@@ -227,6 +232,10 @@ pnpm test
 | `DATA_DIR` | 数据目录路径（存放 SQLite 数据库与密钥） | `./data` |
 | `WORKSPACE_DIR` | Agent 工具（shell/文件/代码搜索等）的工作区根目录 | 进程启动目录 |
 | `HTTPS_PROXY` / `HTTP_PROXY` | 出站 HTTPS/HTTP 代理地址（同时作用于 undici 与 Playwright） | — |
+
+显式设置的 `WEBHOOK_HOST`、`WEBHOOK_PORT` 和 `WEBHOOK_ACCESS_TOKEN` 在每次启动时覆盖对应 OneBot11 实例的持久化配置；未设置的变量保留已保存的值。首次启动默认只监听 `127.0.0.1`，远程或容器部署需显式设置监听地址，并配置 Token。
+
+定时任务工具默认按会话隔离。可信嵌入式管理调用方可使用 `createSchedulerTool({ sqliteStore, access: "admin" })` 管理全部任务，包括历史无 UMO 任务；此权限不能通过模型的工具参数开启。仅提供存储时，通知任务的 `fire_now` 仅将有 UMO 和 platformId 的任务标记为到期，需运行中的调度器和可用适配器尝试投递；返回 queued 兼容字段仅表示触发请求已受理，不代表已发送或保证送达。缺少路由时直接返回错误。提供 `fireNow` 回调时会立即尝试投递。goal/plan 的 `fire_now` 表示完成状态，无需通知。一次性通知重试耗尽时标记为 failed；周期通知跳过失败的当次触发，保留未来周期。两者均记录错误日志，不记录虚假的完成或成功触发时间。Dashboard 是经过登录认证的全局管理入口。
 
 > 启动时若未设置 `PROVIDER_TYPE` 与 `PROVIDER_API_KEY`，系统将以"无 LLM Provider"模式启动，仍可使用 Dashboard 进行配置。
 

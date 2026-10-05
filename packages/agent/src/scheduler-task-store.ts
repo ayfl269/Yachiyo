@@ -14,6 +14,7 @@
  */
 
 import type Database from "better-sqlite3";
+import { randomUUID } from "node:crypto";
 import { escapeLike, type Migration } from "@yachiyo/common/database.js";
 
 // ── Types ──
@@ -58,6 +59,8 @@ export interface SchedulerTask {
   lastFiredAt: string | null;
   /** ISO timestamp of the next time the task should fire. */
   nextFireAt: string | null;
+  /** Unique revision of the scheduled occurrence; persisted independently of time. */
+  occurrenceId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -113,6 +116,12 @@ export const SCHEDULER_MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_scheduler_tags_task ON scheduler_tags(task_id);
     `,
   },
+  {
+    version: 2,
+    name: "scheduler_occurrence_identity",
+    up: `ALTER TABLE scheduler_tasks ADD COLUMN occurrence_id TEXT NOT NULL DEFAULT '';
+         UPDATE scheduler_tasks SET occurrence_id = lower(hex(randomblob(16)));`,
+  },
 ];
 
 // ── Row Types ──
@@ -135,6 +144,7 @@ interface SchedulerTaskRow {
   payload: string | null;
   last_fired_at: string | null;
   next_fire_at: string | null;
+  occurrence_id: string;
   created_at: string;
   updated_at: string;
 }
@@ -175,13 +185,13 @@ export class SqliteSchedulerTaskStore {
         INSERT OR REPLACE INTO scheduler_tasks
         (id, type, title, description, status, priority, scheduled_at, recurrence,
          goal, plan, current_step, umo, session_id, platform_id, payload,
-         last_fired_at, next_fire_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         last_fired_at, next_fire_at, created_at, updated_at, occurrence_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         task.id, task.type, task.title, task.description, task.status, task.priority,
         task.scheduledAt, task.recurrence, task.goal, JSON.stringify(task.plan),
         task.currentStep, task.umo, task.sessionId, task.platformId, task.payload,
-        task.lastFiredAt, task.nextFireAt, finalCreatedAt, updatedAt,
+        task.lastFiredAt, task.nextFireAt, finalCreatedAt, updatedAt, randomUUID(),
       );
 
       if (task.tags !== undefined) {
@@ -197,7 +207,7 @@ export class SqliteSchedulerTaskStore {
   }
 
   get(id: string): SchedulerTask | null {
-    const row = this.db.prepare("SELECT id, type, title, description, status, priority, scheduled_at, recurrence, goal, plan, current_step, umo, session_id, platform_id, payload, last_fired_at, next_fire_at, created_at, updated_at FROM scheduler_tasks WHERE id = ?").get(id) as SchedulerTaskRow | undefined;
+    const row = this.db.prepare("SELECT id, type, title, description, status, priority, scheduled_at, recurrence, goal, plan, current_step, umo, session_id, platform_id, payload, last_fired_at, next_fire_at, created_at, updated_at, occurrence_id FROM scheduler_tasks WHERE id = ?").get(id) as SchedulerTaskRow | undefined;
     if (!row) return null;
     return this.rowToTask(row);
   }
@@ -232,7 +242,7 @@ export class SqliteSchedulerTaskStore {
     }
 
     const rows = this.db.prepare(
-      `SELECT id, type, title, description, status, priority, scheduled_at, recurrence, goal, plan, current_step, umo, session_id, platform_id, payload, last_fired_at, next_fire_at, created_at, updated_at FROM scheduler_tasks${whereClause} ORDER BY priority DESC, created_at DESC LIMIT ?`
+      `SELECT id, type, title, description, status, priority, scheduled_at, recurrence, goal, plan, current_step, umo, session_id, platform_id, payload, last_fired_at, next_fire_at, created_at, updated_at, occurrence_id FROM scheduler_tasks${whereClause} ORDER BY priority DESC, created_at DESC LIMIT ?`
     ).all(...params, limit) as SchedulerTaskRow[];
 
     return rows.map((r) => this.rowToTask(r));
@@ -262,7 +272,7 @@ export class SqliteSchedulerTaskStore {
     }
 
     const rows = this.db.prepare(
-      `SELECT id, type, title, description, status, priority, scheduled_at, recurrence, goal, plan, current_step, umo, session_id, platform_id, payload, last_fired_at, next_fire_at, created_at, updated_at FROM scheduler_tasks${whereClause} ORDER BY priority DESC, updated_at DESC LIMIT ?`
+      `SELECT id, type, title, description, status, priority, scheduled_at, recurrence, goal, plan, current_step, umo, session_id, platform_id, payload, last_fired_at, next_fire_at, created_at, updated_at, occurrence_id FROM scheduler_tasks${whereClause} ORDER BY priority DESC, updated_at DESC LIMIT ?`
     ).all(...params, limit) as SchedulerTaskRow[];
 
     return rows.map((r) => this.rowToTask(r));
@@ -278,7 +288,7 @@ export class SqliteSchedulerTaskStore {
   getDueTasks(now: Date): SchedulerTask[] {
     const nowIso = now.toISOString();
     const rows = this.db.prepare(`
-      SELECT id, type, title, description, status, priority, scheduled_at, recurrence, goal, plan, current_step, umo, session_id, platform_id, payload, last_fired_at, next_fire_at, created_at, updated_at FROM scheduler_tasks
+      SELECT id, type, title, description, status, priority, scheduled_at, recurrence, goal, plan, current_step, umo, session_id, platform_id, payload, last_fired_at, next_fire_at, created_at, updated_at, occurrence_id FROM scheduler_tasks
       WHERE next_fire_at IS NOT NULL
         AND next_fire_at <= ?
         AND status IN ('pending', 'active', 'notifying')
@@ -296,7 +306,7 @@ export class SqliteSchedulerTaskStore {
     const nowIso = now.toISOString();
     const thresholdIso = new Date(now.getTime() + windowMs).toISOString();
     const rows = this.db.prepare(`
-      SELECT id, type, title, description, status, priority, scheduled_at, recurrence, goal, plan, current_step, umo, session_id, platform_id, payload, last_fired_at, next_fire_at, created_at, updated_at FROM scheduler_tasks
+      SELECT id, type, title, description, status, priority, scheduled_at, recurrence, goal, plan, current_step, umo, session_id, platform_id, payload, last_fired_at, next_fire_at, created_at, updated_at, occurrence_id FROM scheduler_tasks
       WHERE next_fire_at IS NOT NULL
         AND next_fire_at > ?
         AND next_fire_at <= ?
@@ -312,13 +322,13 @@ export class SqliteSchedulerTaskStore {
    * Returns true if the transition was applied, false if the task was
    * already advanced or doesn't exist.
    */
-  markNotifying(id: string): boolean {
+  markNotifying(id: string, expectedOccurrenceId?: string): boolean {
     const nowIso = new Date().toISOString();
     const result = this.db.prepare(`
       UPDATE scheduler_tasks
       SET status = 'notifying', updated_at = ?
-      WHERE id = ? AND status = 'pending'
-    `).run(nowIso, id);
+      WHERE id = ? AND status = 'pending' AND occurrence_id = COALESCE(?, occurrence_id)
+    `).run(nowIso, id, expectedOccurrenceId ?? null);
     return result.changes > 0;
   }
 
@@ -328,11 +338,14 @@ export class SqliteSchedulerTaskStore {
    * Uses a conditional WHERE clause to prevent double-firing: only
    * advances tasks that are still in an active state (pending/active/notifying).
    * If the task was already completed, cancelled, or deleted, this is a no-op.
+   * Async delivery paths must pass the occurrence's original occurrenceId:
+   * a late callback then cannot advance a newer occurrence or reschedule.
    */
-  markFired(id: string, now: Date): void {
+  markFired(id: string, now: Date, expectedOccurrenceId?: string): boolean {
     const task = this.get(id);
-    if (!task) return;
-    if (task.status === "completed" || task.status === "cancelled" || task.status === "failed") return;
+    if (!task) return false;
+    if (expectedOccurrenceId !== undefined && task.occurrenceId !== expectedOccurrenceId) return false;
+    if (task.status === "completed" || task.status === "cancelled" || task.status === "failed") return false;
 
     const nowIso = now.toISOString();
 
@@ -354,11 +367,41 @@ export class SqliteSchedulerTaskStore {
       newStatus = "completed";
     }
 
-    this.db.prepare(`
+    const result = this.db.prepare(`
       UPDATE scheduler_tasks
-      SET last_fired_at = ?, next_fire_at = ?, status = ?, updated_at = ?
+      SET last_fired_at = ?, next_fire_at = ?, status = ?, updated_at = ?, occurrence_id = ?
       WHERE id = ? AND status IN ('pending', 'active', 'notifying')
-    `).run(nowIso, nextFireAt, newStatus, nowIso, id);
+        AND occurrence_id = ?
+    `).run(nowIso, nextFireAt, newStatus, nowIso, randomUUID(), id, task.occurrenceId);
+    return result.changes > 0;
+  }
+
+  /** Make a routed notification due; an active scheduler is still required to attempt delivery. */
+  requestFire(id: string): boolean {
+    const task = this.get(id);
+    if (!task || !["pending", "active", "notifying"].includes(task.status)) return false;
+    if (!task.umo || !task.platformId) return false;
+    return this.update(id, { status: "pending", nextFireAt: new Date().toISOString() });
+  }
+
+  markFailed(id: string, occurrenceId: string | undefined): boolean {
+    const result = this.db.prepare(`UPDATE scheduler_tasks SET status = 'failed', updated_at = ?
+      WHERE id = ? AND occurrence_id = ? AND status IN ('pending', 'active', 'notifying')`)
+      .run(new Date().toISOString(), id, occurrenceId);
+    return result.changes > 0;
+  }
+
+  /** Skip an exhausted recurring occurrence without recording successful delivery. */
+  skipFailedOccurrence(id: string, now: Date, occurrenceId: string | undefined): boolean {
+    const task = this.get(id);
+    if (!task || task.type !== "recurring" || !task.recurrence) return false;
+    const next = computeNextFireAt(task.recurrence, now);
+    if (!next || next.getTime() <= now.getTime()) return false;
+    const result = this.db.prepare(`UPDATE scheduler_tasks
+      SET status = 'pending', next_fire_at = ?, occurrence_id = ?, updated_at = ?
+      WHERE id = ? AND occurrence_id = ? AND status IN ('pending', 'active', 'notifying')`)
+      .run(next.toISOString(), randomUUID(), now.toISOString(), id, occurrenceId);
+    return result.changes > 0;
   }
 
   /**
@@ -407,6 +450,11 @@ export class SqliteSchedulerTaskStore {
     }
     setClauses.push("updated_at = ?");
     params.push(now, id);
+    if (["type", "scheduledAt", "recurrence", "nextFireAt", "status", "umo", "sessionId", "platformId"]
+      .some((key) => updates[key as keyof typeof updates] !== undefined)) {
+      setClauses.push("occurrence_id = ?");
+      params.splice(params.length - 1, 0, randomUUID());
+    }
 
     const changed = this.db.transaction(() => {
       const info = this.db.prepare(
@@ -451,15 +499,15 @@ export class SqliteSchedulerTaskStore {
     return countBefore;
   }
 
-  stats(): SchedulerStats {
-    const total = this.count();
+  stats(umo?: string): SchedulerStats {
+    const total = this.count({ umo });
     const byType = {} as Record<TaskType, number>;
     const types: TaskType[] = ["reminder", "scheduled", "recurring", "goal", "plan"];
-    for (const t of types) byType[t] = this.count({ type: t });
+    for (const t of types) byType[t] = this.count({ type: t, umo });
 
     const byStatus = {} as Record<TaskStatus, number>;
     const statuses: TaskStatus[] = ["pending", "active", "notifying", "completed", "cancelled", "failed"];
-    for (const s of statuses) byStatus[s] = this.count({ status: s });
+    for (const s of statuses) byStatus[s] = this.count({ status: s, umo });
 
     return { total, byType, byStatus };
   }
@@ -495,6 +543,7 @@ export class SqliteSchedulerTaskStore {
       payload: row.payload ?? null,
       lastFiredAt: row.last_fired_at ?? null,
       nextFireAt: row.next_fire_at ?? null,
+      occurrenceId: row.occurrence_id,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };

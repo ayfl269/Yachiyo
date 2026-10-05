@@ -21,6 +21,7 @@
 
 import { createFunctionTool, type FunctionTool } from "./tool.js";
 import type { ContextWrapper, CallToolResult } from "./types.js";
+import { resolveToolContextOwner } from "./types.js";
 import { generateId } from "@yachiyo/common/id-generator.js";
 import type { SqliteSchedulerTaskStore } from "./scheduler-task-store.js";
 import {
@@ -66,6 +67,9 @@ function getToolContext(_ctx: unknown): SchedulerToolContext {
 
 export interface CreateSchedulerToolOptions {
   sqliteStore?: SqliteSchedulerTaskStore;
+  fireNow?: (id: string) => Promise<boolean>;
+  /** Trusted callers may explicitly manage all tasks, including unowned rows. */
+  access?: "session" | "admin";
 }
 
 const VALID_TYPES: TaskType[] = ["reminder", "scheduled", "recurring", "goal", "plan"];
@@ -219,6 +223,22 @@ export function createSchedulerTool(options?: CreateSchedulerToolOptions): Funct
       const context = getToolContext(_ctx);
 
       try {
+        const umo = resolveToolContextOwner(_ctx, { warnLabel: "SchedulerTool" });
+        const isAdmin = options?.access === "admin";
+        if (!umo && !isAdmin) {
+          return { content: [{ type: "text", text: "error: No session context available." }], isError: true };
+        }
+        // Apply ownership checks before every ID-based operation, including
+        // create/set_plan which can otherwise overwrite an existing row.
+        if (id) {
+          const existing = store.get(id);
+          if (existing && !isAdmin && existing.umo !== umo) {
+            return { content: [{ type: "text", text: `Task not found: "${id}"` }], isError: true };
+          }
+          if (existing && action === "create") {
+            return { content: [{ type: "text", text: "error: Task id already exists." }], isError: true };
+          }
+        }
         switch (action) {
           case "create":
             return handleCreate(store, {
@@ -228,9 +248,9 @@ export function createSchedulerTool(options?: CreateSchedulerToolOptions): Funct
           case "get":
             return handleGet(store, id);
           case "list":
-            return handleList(store, { type, status, umo: context.event?.unifiedMsgOrigin, limit });
+            return handleList(store, { type, status, umo: isAdmin ? undefined : umo, limit });
           case "search":
-            return handleSearch(store, { query: query ?? title ?? "", type, status, umo: context.event?.unifiedMsgOrigin, limit });
+            return handleSearch(store, { query: query ?? title ?? "", type, status, umo: isAdmin ? undefined : umo, limit });
           case "update":
             return handleUpdate(store, id, {
               type, title, description, status, priority, scheduledAt,
@@ -251,9 +271,9 @@ export function createSchedulerTool(options?: CreateSchedulerToolOptions): Funct
           case "next_step":
             return handleNextStep(store, id);
           case "fire_now":
-            return handleFireNow(store, id);
+            return await handleFireNow(store, id, options?.fireNow);
           case "stats":
-            return handleStats(store);
+            return handleStats(store, isAdmin ? undefined : umo);
           default:
             return { content: [{ type: "text", text: `error: Unknown action: "${action}".` }], isError: true };
         }
@@ -571,19 +591,28 @@ function handleNextStep(store: SqliteSchedulerTaskStore, id: string | undefined)
   return { content: [{ type: "text", text: `Advanced to step ${next}: "${newPlan[next].description}"` }] };
 }
 
-function handleFireNow(store: SqliteSchedulerTaskStore, id: string | undefined): CallToolResult {
+async function handleFireNow(store: SqliteSchedulerTaskStore, id: string | undefined, fireNow?: (id: string) => Promise<boolean>): Promise<CallToolResult> {
   if (!id) return { content: [{ type: "text", text: "error: 'id' is required for fire_now action." }], isError: true };
   const task = store.get(id);
   if (!task) return { content: [{ type: "text", text: `Task not found: "${id}"` }], isError: true };
 
-  const now = new Date();
-  store.markFired(id, now);
+  if (task.type === "goal" || task.type === "plan") {
+    const completed = store.markFired(id, new Date(), task.occurrenceId);
+    return { content: [{ type: "text", text: completed ? `Task "${id}" completed (no notification required).` : "error: Task could not be completed." }], isError: !completed };
+  }
+  if (!fireNow) {
+    const queued = store.requestFire(id);
+    return { content: [{ type: "text", text: queued ? `Task "${id}" marked due for a delivery attempt. A running scheduler and available adapter are required; delivery is not confirmed or guaranteed.` : "error: Task cannot be requested: an active notification task with umo and platformId is required." }], isError: !queued };
+  }
+  if (!(await fireNow(id))) {
+    return { content: [{ type: "text", text: "error: Task delivery was not confirmed." }], isError: true };
+  }
   const updated = store.get(id);
-  return { content: [{ type: "text", text: `Task "${id}" fired at ${now.toISOString()}. Next fire: ${updated?.nextFireAt ?? "none"} (status: ${updated?.status}).` }] };
+  return { content: [{ type: "text", text: `Task "${id}" fired at ${updated?.lastFiredAt}. Next fire: ${updated?.nextFireAt ?? "none"} (status: ${updated?.status}).` }] };
 }
 
-function handleStats(store: SqliteSchedulerTaskStore): CallToolResult {
-  const stats = store.stats();
+function handleStats(store: SqliteSchedulerTaskStore, umo?: string): CallToolResult {
+  const stats = store.stats(umo);
   const lines = [
     `Total tasks: ${stats.total}`,
     ``,

@@ -21,6 +21,7 @@ import {
   createSchedulerTool,
 } from "@yachiyo/agent/index.js";
 import { TaskScheduler } from "@yachiyo/pipeline/task-scheduler.js";
+import type { AdapterRegistry } from "@yachiyo/platform/registry.js";
 import type { CallToolResult, FunctionTool } from "@yachiyo/agent/index.js";
 
 let passCount = 0;
@@ -100,6 +101,22 @@ async function main(): Promise<void> {
   console.log("║   Scheduler 定时任务功能测试              ║");
   console.log("╚══════════════════════════════════════════╝");
 
+  const legacyDb = new Database(":memory:");
+  for (const migration of SCHEDULER_MIGRATIONS.slice(0, 1)) {
+    if (typeof migration.up === "function") migration.up(legacyDb);
+    else legacyDb.exec(migration.up);
+  }
+  legacyDb.prepare(`INSERT INTO scheduler_tasks (id, title, umo, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?)`).run("legacy", "旧任务", null, "2026-01-01", "2026-01-01");
+  for (const migration of SCHEDULER_MIGRATIONS.slice(1)) {
+    if (typeof migration.up === "function") migration.up(legacyDb);
+    else legacyDb.exec(migration.up);
+  }
+  const migrated = new SqliteSchedulerTaskStore(legacyDb).get("legacy");
+  assert(migrated?.title === "旧任务" && migrated.umo === null, "版本迁移保留历史任务");
+  assert(Boolean(migrated?.occurrenceId), "版本迁移为历史任务生成触发标识");
+  legacyDb.close();
+
   // In-memory SQLite (shared across the store + tool)
   const db = new Database(":memory:");
   db.pragma("foreign_keys = ON");
@@ -112,7 +129,18 @@ async function main(): Promise<void> {
   }
 
   const store = new SqliteSchedulerTaskStore(db);
-  const schedulerTool = createSchedulerTool({ sqliteStore: store });
+  let immediateDeliveries = 0;
+  let deliveryOk = true;
+  const immediateScheduler = new TaskScheduler(store, { preFireWindow: 0 }, {
+    getAdapter: () => ({ sendProactiveMessage: async () => {
+      immediateDeliveries++;
+      return deliveryOk;
+    } }),
+  } as unknown as AdapterRegistry);
+  const schedulerTool = createSchedulerTool({
+    sqliteStore: store,
+    fireNow: (id) => immediateScheduler.fireNow(id),
+  });
 
   // ── Test: Store CRUD ──
   console.log("\n=== 测试: Store CRUD ===");
@@ -376,6 +404,7 @@ async function main(): Promise<void> {
     action: "create",
     type: "reminder",
     title: "测试提醒",
+    scheduledAt: new Date(Date.now() + 3600_000).toISOString(),
     description: "这是一个测试",
     payload: "payload-content",
     tags: ["tag1", "tag2"],
@@ -539,6 +568,7 @@ async function main(): Promise<void> {
     id: "fire-test",
     type: "reminder",
     title: "fire_now 测试",
+    scheduledAt: new Date(Date.now() + 3600_000).toISOString(),
   });
   assert(getText(fireNowCreate).includes("Task created"), "fire_now: 创建任务成功");
 
@@ -549,6 +579,80 @@ async function main(): Promise<void> {
   const firedTask = store.get("fire-test");
   assert(firedTask?.status === "completed", "fire_now: 一次性任务 → completed");
   assert(firedTask?.lastFiredAt !== null, "fire_now: lastFiredAt 已设置");
+  assert(immediateDeliveries === 1, "fire_now: 实际投递一次");
+  const duplicateFire = await call(schedulerTool, adminCtx, { action: "fire_now", id: "fire-test" });
+  assert(duplicateFire.isError === true && immediateDeliveries === 1, "fire_now: 已完成任务不会重复投递");
+
+  await call(schedulerTool, adminCtx, {
+    action: "create", id: "failed-fire", title: "投递失败", scheduledAt: futureDate2.toISOString(),
+  });
+  deliveryOk = false;
+  const failedFire = await call(schedulerTool, adminCtx, { action: "fire_now", id: "failed-fire" });
+  assert(failedFire.isError === true, "fire_now: 投递失败返回错误");
+  assert(store.get("failed-fire")?.status === "pending" && store.get("failed-fire")?.lastFiredAt === null,
+    "fire_now: 投递失败保留未完成任务");
+  deliveryOk = true;
+
+  const storeOnlyTool = createSchedulerTool({ sqliteStore: store });
+  const queuedFire = await call(storeOnlyTool, adminCtx, { action: "fire_now", id: createdTaskId });
+  assert(queuedFire.isError !== true && getText(queuedFire).includes("marked due") &&
+    getText(queuedFire).includes("not confirmed or guaranteed"), "store-only fire_now 明确仅请求尝试投递");
+  assert(store.get(createdTaskId)?.status === "pending" && store.get(createdTaskId)?.lastFiredAt === null,
+    "store-only fire_now 不伪造完成");
+  await immediateScheduler.tick();
+  assert(store.get(createdTaskId)?.status === "completed", "排队的任务由调度器实际投递");
+  const completedGoal = await call(storeOnlyTool, adminCtx, { action: "fire_now", id: goalId });
+  assert(completedGoal.isError !== true && store.get(goalId)?.status === "completed", "goal 保留状态完成语义");
+
+  // Admin access is an explicit construction-time capability, never a tool argument.
+  const adminTool = createSchedulerTool({ sqliteStore: store, access: "admin" });
+  const unowned = { ...store.get("failed-fire")!, id: "unowned-task", umo: null, sessionId: null, platformId: null };
+  store.save(unowned);
+  assert((await call(schedulerTool, adminCtx, { action: "get", id: "unowned-task" })).isError === true,
+    "会话工具拒绝无归属任务");
+  assert((await call(adminTool, {}, { action: "get", id: "unowned-task" })).isError !== true,
+    "显式管理工具可访问历史无归属任务");
+  assert((await call(adminTool, {}, { action: "fire_now", id: "unowned-task" })).isError === true,
+    "store-only fire_now 拒绝缺少路由的通知任务");
+  await call(adminTool, {}, { action: "set_plan", id: "standalone-plan",
+    plan: [{ description: "standalone step", status: "pending" }] });
+  assert(await immediateScheduler.fireNow("standalone-plan"), "公开 fireNow 支持无路由 plan 完成");
+  assert(store.get("standalone-plan")?.status === "completed", "plan 完成不会要求投递回调");
+
+  const foreignCtx = { context: { event: { unifiedMsgOrigin: "other:session" } } };
+  const original = JSON.stringify(store.get(createdTaskId));
+  for (const action of ["get", "update", "delete", "create", "set_plan", "update_step", "next_step", "fire_now"]) {
+    const result = await call(schedulerTool, foreignCtx, {
+      action, id: createdTaskId, title: "overwrite", scheduledAt: futureDate2.toISOString(),
+      plan: [{ description: "overwrite", status: "pending" }], stepIndex: 0, stepStatus: "completed",
+    });
+    assert(result.isError === true && !getText(result).includes("payload-content"), `${action}: 拒绝跨会话访问`);
+    assert(JSON.stringify(store.get(createdTaskId)) === original, `${action}: 原任务未被修改`);
+  }
+  const foreignStats = await call(schedulerTool, foreignCtx, { action: "stats" });
+  assert(getText(foreignStats).includes("Total tasks: 0"), "stats: 仅统计当前会话");
+  for (const action of ["get", "list", "search", "stats", "create"]) {
+    assert((await call(schedulerTool, {}, { action, id: createdTaskId })).isError === true,
+      `${action}: 缺少会话上下文时拒绝操作`);
+  }
+  assert((await call(schedulerTool, { context: { unifiedMsgOrigin: "test:umo" } }, {
+    action: "get", id: createdTaskId,
+  })).isError !== true, "共享 owner 解析兼容直接事件上下文");
+  const originalWarn = console.warn;
+  let ownerWarnings = 0;
+  console.warn = (...messages: unknown[]) => {
+    if (String(messages[0]).includes("SchedulerTool")) ownerWarnings++;
+  };
+  try {
+    for (let i = 0; i < 2; i++) {
+      assert((await call(schedulerTool, { context: { unknownShape: true } }, {
+        action: "get", id: createdTaskId,
+      })).isError === true, "未知上下文拒绝访问");
+    }
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert(ownerWarnings === 1, "未知上下文只告警一次");
 
   // ─ stats ─
   const statsResult = await call(schedulerTool, adminCtx, { action: "stats" });
@@ -637,7 +741,7 @@ async function main(): Promise<void> {
   assert(firedTask2?.status === "completed", "tick: 触发后任务 → completed");
   assert(firedTask2?.lastFiredAt !== null, "tick: 触发后 lastFiredAt 已设置");
 
-  // Add a due task WITHOUT routing info (no umo) → skipped, still marked fired
+  // Missing routing info must retain the task for retry.
   store2.save({
     id: "no-rumo",
     type: "reminder",
@@ -662,7 +766,7 @@ async function main(): Promise<void> {
   await taskScheduler.tick();
   assert(deliveredMessages.length === deliveredBefore, "tick: 无 umo 任务不推送");
   const noUmoTask = store2.get("no-rumo");
-  assert(noUmoTask?.status === "completed", "tick: 无 umo 任务仍被标记 completed");
+  assert(noUmoTask?.status === "pending", "tick: 无 umo 任务保留 pending 等待重试");
 
   // Recurring task with umo: should deliver and recompute next
   store2.save({
@@ -685,12 +789,98 @@ async function main(): Promise<void> {
     lastFiredAt: null,
     nextFireAt: pastDate.toISOString(),
   });
+  const oldOccurrenceId = store2.get("recurring-fire")!.occurrenceId;
   await taskScheduler.tick();
   assert(deliveredMessages.length === deliveredBefore + 1, "tick: 周期任务被推送");
   const recurringTaskAfter = store2.get("recurring-fire");
   assert(recurringTaskAfter?.status === "pending", "tick: 周期任务保持 pending");
   assert(recurringTaskAfter?.nextFireAt !== null, "tick: 周期任务 nextFireAt 已重算");
   assert(new Date(recurringTaskAfter!.nextFireAt!).getTime() > now.getTime(), "tick: 周期任务 nextFireAt 在未来");
+
+  // A delayed model callback must not advance the occurrence already
+  // completed by fallback, nor overwrite a user's rescheduled task.
+  const nextOccurrence = recurringTaskAfter!.nextFireAt;
+  assert(!store2.markFired("recurring-fire", new Date(Date.now() + 60_000), oldOccurrenceId), "旧版本 CAS 返回 false");
+  assert(store2.get("recurring-fire")?.nextFireAt === nextOccurrence, "迟到回调不会重复推进周期任务");
+  store2.markNotifying("recurring-fire");
+  const beforeRescheduleId = store2.get("recurring-fire")!.occurrenceId;
+  const rescheduledAt = new Date(Date.now() + 7200_000).toISOString();
+  store2.update("recurring-fire", { nextFireAt: rescheduledAt });
+  store2.markFired("recurring-fire", new Date(), beforeRescheduleId);
+  assert(store2.get("recurring-fire")?.nextFireAt === rescheduledAt, "旧回调不会覆盖重新安排的时间");
+
+  // Two concurrent manual triggers must share a single in-flight delivery.
+  let finishDelivery!: (ok: boolean) => void;
+  let concurrentDeliveries = 0;
+  const concurrentScheduler = new TaskScheduler(store2, undefined, {
+    getAdapter: () => ({ sendProactiveMessage: () => {
+      concurrentDeliveries++;
+      return new Promise<boolean>((resolve) => { finishDelivery = resolve; });
+    } }),
+  } as unknown as AdapterRegistry);
+  const firstDelivery = concurrentScheduler.fireNow("recurring-fire");
+  assert(!(await concurrentScheduler.fireNow("recurring-fire")), "并发 fire_now 不会重复投递");
+  finishDelivery(true);
+  assert(await firstDelivery, "首个 fire_now 正常投递");
+  assert(concurrentDeliveries === 1, "并发请求仅发送一次");
+
+  // Rescheduling to the exact same timestamp must still invalidate callbacks.
+  const sameTimeTask = store2.get("recurring-fire")!;
+  store2.update(sameTimeTask.id, { nextFireAt: sameTimeTask.nextFireAt });
+  assert(!store2.markFired(sameTimeTask.id, new Date(), sameTimeTask.occurrenceId), "相同时间不同版本不会混淆");
+  store2.save({ ...sameTimeTask, id: "null-time", type: "goal", nextFireAt: null });
+  const nullTimeId = store2.get("null-time")!.occurrenceId;
+  store2.save({ ...sameTimeTask, id: "null-time", type: "goal", nextFireAt: null });
+  assert(!store2.markFired("null-time", new Date(), nullTimeId), "null 时间也使用独立版本标识");
+
+  // The adapter can accept a send after the task has been cancelled/replaced.
+  const staleDelivery = concurrentScheduler.fireNow("recurring-fire");
+  store2.update("recurring-fire", { status: "cancelled" });
+  finishDelivery(true);
+  assert(!(await staleDelivery), "投递成功但 CAS 未推进时 fireNow 返回 false");
+  assert(store2.get("recurring-fire")?.status === "cancelled", "CAS 失败保留取消状态");
+
+  // Exhaustion is failure, never successful completion without a delivery.
+  const originalNow = Date.now;
+  let retryTime = originalNow();
+  Date.now = () => retryTime;
+  try {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await taskScheduler.fireNow("no-rumo");
+      retryTime += 11 * 60_000;
+    }
+  } finally {
+    Date.now = originalNow;
+  }
+  assert(store2.get("no-rumo")?.status === "failed", "重试耗尽标记 failed");
+  assert(store2.get("no-rumo")?.lastFiredAt === null, "失败任务不记录虚假触发时间");
+
+  store2.save({ ...sameTimeTask, id: "recover-recurring", status: "pending", nextFireAt: pastDate.toISOString(), lastFiredAt: null });
+  const failedOccurrence = store2.get("recover-recurring")!.occurrenceId;
+  let adapterRecovered = false;
+  const recoveryScheduler = new TaskScheduler(store2, { preFireWindow: 0 }, {
+    getAdapter: () => ({ sendProactiveMessage: async () => adapterRecovered }),
+  } as unknown as AdapterRegistry);
+  retryTime = originalNow();
+  Date.now = () => retryTime;
+  try {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await recoveryScheduler.fireNow("recover-recurring");
+      retryTime += 11 * 60_000;
+    }
+  } finally {
+    Date.now = originalNow;
+  }
+  const retainedRecurring = store2.get("recover-recurring")!;
+  assert(retainedRecurring.status === "pending", "周期任务重试耗尽后保留有效状态");
+  assert(new Date(retainedRecurring.nextFireAt!).getTime() > Date.now(), "失败周期跳过当次并安排未来触发");
+  assert(retainedRecurring.lastFiredAt === null, "跳过失败周期不伪造成功投递时间");
+  assert(retainedRecurring.occurrenceId !== failedOccurrence, "下个周期拥有新的触发版本");
+  assert(!store2.markFired(retainedRecurring.id, new Date(), failedOccurrence), "失败周期的迟到回调不会覆盖下个周期");
+  adapterRecovered = true;
+  store2.update(retainedRecurring.id, { nextFireAt: pastDate.toISOString() });
+  await recoveryScheduler.tick();
+  assert(store2.get(retainedRecurring.id)?.lastFiredAt !== null, "适配器恢复后下个周期可以正常投递");
 
   // start/stop should not throw
   taskScheduler.start();

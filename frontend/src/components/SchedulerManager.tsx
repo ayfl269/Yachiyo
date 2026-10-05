@@ -268,7 +268,9 @@ export default function SchedulerManager() {
     try {
       const res = await apiFetch(`/api/scheduler/tasks/${encodeURIComponent(id)}/fire`, { method: 'POST' })
       if (res.ok) {
-        showMessage('任务已立即触发', 'success')
+        const result = await res.json()
+        showMessage(result.queued ? '已请求触发，需运行调度器；投递尚未确认' :
+          result.task?.type === 'goal' || result.task?.type === 'plan' ? '任务已完成' : '任务已立即触发', 'success')
         fetchTasks()
         fetchStats()
       } else {

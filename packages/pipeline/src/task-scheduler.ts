@@ -70,9 +70,9 @@ const RESOLVER_SCAN_HORIZON_MS = 24 * 60 * 60 * 1000;
  * Delivery-failure retry policy for the fallback fire path (#86): a task
  * whose delivery failed is retried with exponential backoff
  * (interval * 2^failures, capped at {@link FIRE_RETRY_BACKOFF_MAX_MS}).
- * After {@link MAX_FIRE_ATTEMPTS} consecutive failures the task is marked
- * fired anyway (with an error log) so a permanently broken route cannot
- * retry forever.
+ * After {@link MAX_FIRE_ATTEMPTS} consecutive failures, a one-shot task is
+ * marked failed and a recurring task skips that occurrence while retaining
+ * its future schedule. Neither path records a successful delivery.
  */
 const MAX_FIRE_ATTEMPTS = 5;
 const FIRE_RETRY_BACKOFF_MAX_MS = 10 * 60 * 1000;
@@ -86,13 +86,14 @@ export class TaskScheduler {
   private preFireWindowResolver: ((task: SchedulerTask) => number) | null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking: boolean = false;
+  private delivering: Set<string> = new Set();
   /**
    * Consecutive delivery failures per task id (#86), used to throttle
    * retries of the fallback fire path (exponential backoff) and to give up
    * after {@link MAX_FIRE_ATTEMPTS} attempts so a permanently broken route
    * cannot retry forever.
    */
-  private fireFailures: Map<string, { count: number; lastAttemptAt: number }> = new Map();
+  private fireFailures: Map<string, { count: number; lastAttemptAt: number; occurrenceId?: string }> = new Map();
 
   /** Callback for pre-fire events. When set, tasks in the pre-fire window
    *  are sent to the model instead of firing directly. */
@@ -164,6 +165,16 @@ export class TaskScheduler {
     return this.preFireWindow;
   }
 
+  /** Deliver one active reminder immediately, regardless of its due time. */
+  async fireNow(id: string): Promise<boolean> {
+    const task = this.store.get(id);
+    if (!task || !["pending", "active", "notifying"].includes(task.status)) return false;
+    if (task.type === "goal" || task.type === "plan") {
+      return this.store.markFired(id, new Date(), task.occurrenceId);
+    }
+    return this.fireTask(task);
+  }
+
   /** Process all due tasks now. Exposed for testing/manual triggers. */
   async tick(): Promise<void> {
     if (this.ticking) {
@@ -214,7 +225,7 @@ export class TaskScheduler {
                 if (dueMs > taskWindow) continue;
               }
               // Atomically transition pending → notifying
-              const marked = this.store.markNotifying(task.id);
+              const marked = this.store.markNotifying(task.id, task.occurrenceId);
               if (!marked) continue; // Already advanced by another path
               this.onPreFire(task);
               prefired++;
@@ -273,9 +284,24 @@ export class TaskScheduler {
    * throttled, or the delivery failed (task retained for retry).
    */
   private async fireTask(task: SchedulerTask): Promise<boolean> {
+    if (this.delivering.has(task.id)) return false;
+    const current = this.store.get(task.id);
+    if (!current || current.occurrenceId !== task.occurrenceId ||
+        !["pending", "active", "notifying"].includes(current.status)) return false;
+    this.delivering.add(task.id);
+    try {
+      return await this.deliverTask(task);
+    } finally {
+      this.delivering.delete(task.id);
+    }
+  }
+
+  private async deliverTask(task: SchedulerTask): Promise<boolean> {
     // Retry throttle: skip this tick if the task failed recently and its
     // backoff window has not elapsed yet.
-    const failure = this.fireFailures.get(task.id);
+    const recordedFailure = this.fireFailures.get(task.id);
+    const failure = recordedFailure?.occurrenceId === task.occurrenceId ? recordedFailure : undefined;
+    if (!failure) this.fireFailures.delete(task.id);
     if (failure) {
       const backoff = Math.min(this.interval * 2 ** failure.count, FIRE_RETRY_BACKOFF_MAX_MS);
       if (Date.now() - failure.lastAttemptAt < backoff) {
@@ -283,15 +309,16 @@ export class TaskScheduler {
       }
     }
 
-    /** Record a failed attempt; give up (mark fired) after too many tries. */
+    /** Exhaust one occurrence; recurring schedules retain their next opportunity. */
     const markAttemptFailed = (): void => {
       const count = (this.fireFailures.get(task.id)?.count ?? 0) + 1;
-      this.fireFailures.set(task.id, { count, lastAttemptAt: Date.now() });
+      this.fireFailures.set(task.id, { count, lastAttemptAt: Date.now(), occurrenceId: task.occurrenceId });
       if (count >= MAX_FIRE_ATTEMPTS) {
+        const skipped = this.store.skipFailedOccurrence(task.id, new Date(), task.occurrenceId);
         console.error(
-          `[TaskScheduler] Task ${task.id} failed to deliver ${count} times, giving up and marking as fired.`,
+          `[TaskScheduler] Task ${task.id} failed to deliver ${count} times; ${skipped ? "skipping this occurrence and retaining the recurring schedule" : "marking failed"} without recording delivery.`,
         );
-        this.store.markFired(task.id, new Date());
+        if (!skipped) this.store.markFailed(task.id, task.occurrenceId);
         this.fireFailures.delete(task.id);
       }
     };
@@ -341,7 +368,11 @@ export class TaskScheduler {
         // conditional WHERE in markFired prevents double-advancing if
         // the model already responded and called markFired via onResponded.
         this.fireFailures.delete(task.id);
-        this.store.markFired(task.id, new Date());
+        const advanced = this.store.markFired(task.id, new Date(), task.occurrenceId);
+        if (!advanced) {
+          console.warn(`[TaskScheduler] Delivery accepted for stale occurrence of task ${task.id}; task state was not advanced.`);
+          return false;
+        }
         console.log(`[TaskScheduler] Task "${task.title}" (${task.id}) delivered to ${target.umo}.`);
       } else {
         // Delivery rejected (session may be inactive) — keep the task due

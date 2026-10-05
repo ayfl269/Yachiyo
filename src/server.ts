@@ -11,7 +11,8 @@ import type { ChatProviderType } from "@yachiyo/provider/factory.js";
  *   PROVIDER_MODEL      - 模型名称
  *   PROVIDER_BASE_URL   - (可选) API Base URL
  *   WEBHOOK_PORT        - (可选) Webhook 端口，默认 8080
- *   WEBHOOK_HOST        - (可选) Webhook 监听地址，默认 0.0.0.0
+ *   WEBHOOK_HOST        - (可选) Webhook 监听地址，默认 127.0.0.1
+ *   WEBHOOK_ACCESS_TOKEN - (可选) OneBot11 WebSocket 鉴权 Token
  */
 
 async function main() {
@@ -20,11 +21,17 @@ async function main() {
   const model = process.env.PROVIDER_MODEL ?? "gpt-4o-mini";
   const baseUrl = process.env.PROVIDER_BASE_URL;
   const webhookPort = parseInt(process.env.WEBHOOK_PORT ?? "8080", 10);
-  const webhookHost = process.env.WEBHOOK_HOST ?? "0.0.0.0";
+  const webhookHost = process.env.WEBHOOK_HOST ?? "127.0.0.1";
   const dashboardEnabled = process.env.DASHBOARD_ENABLED !== "false";
   const dashboardPort = parseInt(process.env.DASHBOARD_PORT ?? "8000", 10);
   const dashboardHost = process.env.DASHBOARD_HOST ?? "0.0.0.0";
 
+  if (process.env.WEBHOOK_HOST === undefined) {
+    console.warn("[Server] OneBot11 default bind address is now 127.0.0.1. Remote/container deployments must explicitly set WEBHOOK_HOST (for example 0.0.0.0). Saved adapter settings are preserved unless overridden.");
+  }
+  if (!process.env.WEBHOOK_ACCESS_TOKEN) {
+    console.warn("[Server] WEBHOOK_ACCESS_TOKEN is not set. OneBot11 will use any saved token; without one, its WebSocket endpoint is unauthenticated.");
+  }
 
   console.log(`[Server] Starting${providerType ? ` with provider: ${providerType}, model: ${model}` : " without LLM provider"}`);
   if (dashboardEnabled) {
@@ -42,8 +49,9 @@ async function main() {
       },
     } : undefined,
     onebot11: {
-      port: webhookPort,
-      host: webhookHost,
+      ...(process.env.WEBHOOK_PORT !== undefined ? { port: webhookPort } : {}),
+      ...(process.env.WEBHOOK_HOST !== undefined ? { host: webhookHost } : {}),
+      ...(process.env.WEBHOOK_ACCESS_TOKEN !== undefined ? { accessToken: process.env.WEBHOOK_ACCESS_TOKEN } : {}),
     },
     dashboard: {
       enabled: dashboardEnabled,

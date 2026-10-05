@@ -83,6 +83,7 @@ export interface BootstrapContext {
   /** Long-term semantic merge job; optional for backwards compatibility. */
   ltmConsolidator?: LongTermMemoryConsolidationJob;
   schedulerStore?: SqliteSchedulerTaskStore;
+  fireSchedulerTask?: (id: string) => Promise<boolean>;
   memoryStore?: SqliteMemoryStore;
   dashboardServer?: DashboardServer;
   shutdown: () => Promise<void>;
@@ -4142,21 +4143,32 @@ export class DashboardServer {
           return;
         }
         const body = parsed.value as Record<string, unknown>;
-        const updated = {
-          ...existing,
+        const updates = {
           ...(body.title !== undefined && { title: body.title as string }),
           ...(body.description !== undefined && { description: body.description as string }),
-          ...(body.status !== undefined && { status: body.status as TaskStatus }),
+          ...(body.status !== undefined && body.status !== existing.status && { status: body.status as TaskStatus }),
           ...(body.priority !== undefined && { priority: body.priority as number }),
-          ...(body.scheduled_at !== undefined && { scheduledAt: body.scheduled_at as string | null }),
-          ...(body.recurrence !== undefined && { recurrence: body.recurrence as string | null }),
+          ...(body.scheduled_at !== undefined && body.scheduled_at !== existing.scheduledAt && { scheduledAt: body.scheduled_at as string | null }),
+          ...(body.recurrence !== undefined && body.recurrence !== existing.recurrence && { recurrence: body.recurrence as string | null }),
           ...(body.goal !== undefined && { goal: body.goal as string | null }),
           ...(body.payload !== undefined && { payload: body.payload as unknown }),
           ...(body.tags !== undefined && { tags: Array.isArray(body.tags) ? body.tags as string[] : existing.tags }),
-        } as SchedulerTask;
-        store.save(updated);
+        } as Partial<SchedulerTask>;
+        if (updates.scheduledAt !== undefined || updates.recurrence !== undefined) {
+          const { computeInitialNextFireAt } = await import("@yachiyo/agent/scheduler-task-store.js");
+          updates.nextFireAt = computeInitialNextFireAt(
+            updates.scheduledAt !== undefined ? updates.scheduledAt : existing.scheduledAt,
+            updates.recurrence !== undefined ? updates.recurrence : existing.recurrence,
+            new Date(),
+          );
+        }
+        if (!store.update(taskId, updates)) {
+          res.writeHead(404);
+          res.end(JSON.stringify({ error: "Task not found" }));
+          return;
+        }
         res.writeHead(200);
-        res.end(JSON.stringify({ task: updated }));
+        res.end(JSON.stringify({ task: store.get(taskId) }));
       } catch (err: unknown) {
         res.writeHead(500);
         res.end(JSON.stringify({ error: safeClientMessage(err) }));
@@ -4224,20 +4236,29 @@ export class DashboardServer {
           res.end(JSON.stringify({ error: "Task not found" }));
           return;
         }
-        const now = new Date();
-        const { computeInitialNextFireAt } = await import("@yachiyo/agent/scheduler-task-store.js");
-        const nextFireAt = task.recurrence
-          ? computeInitialNextFireAt(task.scheduledAt, task.recurrence, now)
-          : null;
-        const updated = {
-          ...task,
-          lastFiredAt: now.toISOString(),
-          nextFireAt,
-          status: task.recurrence ? task.status : "completed",
-        };
-        store.save(updated);
+        let queued = false;
+        if (task.type === "goal" || task.type === "plan") {
+          if (!store.markFired(taskId, new Date(), task.occurrenceId)) {
+            res.writeHead(409);
+            res.end(JSON.stringify({ error: "Task state changed" }));
+            return;
+          }
+        } else if (this.ctx.fireSchedulerTask) {
+          if (!(await this.ctx.fireSchedulerTask(taskId))) {
+            res.writeHead(409);
+            res.end(JSON.stringify({ error: "Task delivery was not confirmed" }));
+            return;
+          }
+        } else {
+          queued = store.requestFire(taskId);
+          if (!queued) {
+            res.writeHead(409);
+            res.end(JSON.stringify({ error: "Trigger request requires an active notification task with umo and platformId" }));
+            return;
+          }
+        }
         res.writeHead(200);
-        res.end(JSON.stringify({ task: updated }));
+        res.end(JSON.stringify({ task: store.get(taskId), queued }));
       } catch (err: unknown) {
         res.writeHead(500);
         res.end(JSON.stringify({ error: safeClientMessage(err) }));
