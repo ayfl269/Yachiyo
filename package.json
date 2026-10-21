@@ -23,7 +23,7 @@
     "reset-admin": "tsx scripts/reset-admin.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "@yachiyo/agent": "workspace:*",
     "@yachiyo/common": "workspace:*",
     "@yachiyo/config": "workspace:*",
